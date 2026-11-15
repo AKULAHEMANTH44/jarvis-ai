@@ -365,19 +365,34 @@ class SpeechService {
     }
 
     if (bestCmd) {
-      bestCmd.action(clean);
+      const emitOutcome = (ok: boolean) => {
+        const responseText = ok
+          ? bestCmd!.feedbackText
+          : bestCmd!.failureText || 'Unable to execute that command under current conditions, sir.';
+        if (this.onMessageCallback) {
+          this.onMessageCallback({
+            id: Math.random().toString(36).substring(7),
+            sender: 'JARVIS',
+            text: responseText,
+            timestamp: new Date().toLocaleTimeString(),
+            type: ok ? 'RESPONSE' : 'ALERT'
+          });
+        }
+        this.speak(responseText);
+      };
 
-      const responseText = bestCmd.feedbackText;
-      if (this.onMessageCallback) {
-        this.onMessageCallback({
-          id: Math.random().toString(36).substring(7),
-          sender: 'JARVIS',
-          text: responseText,
-          timestamp: new Date().toLocaleTimeString(),
-          type: 'RESPONSE'
-        });
+      try {
+        const result = bestCmd.action(clean);
+        if (result instanceof Promise) {
+          void result
+            .then((resolved) => emitOutcome(resolved !== false))
+            .catch(() => emitOutcome(false));
+        } else {
+          emitOutcome(result !== false);
+        }
+      } catch {
+        emitOutcome(false);
       }
-      this.speak(responseText);
       return;
     }
 

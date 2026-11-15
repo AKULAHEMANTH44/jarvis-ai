@@ -89,4 +89,26 @@ describe('ReversibleParticleEngine & VISION 1.2 Sphere', () => {
     sphere.setColorTheme(0xff8800);
     sphere.dispose();
   });
+
+  it('supports live 3D initialization materialization, core voice/processing reactivity, and light-trail filament web', () => {
+    const sphere = new VisionSphereObject(0x00f0ff, 1200);
+    const engine = sphere.getParticleEngine();
+    expect(engine.filamentLines).toBeInstanceOf(THREE.LineSegments);
+
+    // Progressive initialization 0 -> 0.5 -> 1.0
+    sphere.setInitProgress(0);
+    sphere.update(0.1, 1.0, 0.016);
+    sphere.setInitProgress(0.6);
+    sphere.update(0.5, 1.0, 0.016);
+    sphere.setInitProgress(1.0);
+    sphere.update(1.0, 1.0, 0.016);
+
+    // Voice & processing activity reactivity
+    sphere.setCoreActivity({ isListening: true, isSpeaking: true, isProcessing: true });
+    sphere.update(1.2, 1.0, 0.016);
+    sphere.setCoreActivity({ isListening: false, isSpeaking: false, isProcessing: false });
+    sphere.update(1.4, 1.0, 0.016);
+
+    sphere.dispose();
+  });
 });

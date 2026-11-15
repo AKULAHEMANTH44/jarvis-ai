@@ -171,4 +171,27 @@ describe('SpeechService Voice Command Engine', () => {
       expect(executed).toBe(expected);
     }
   });
+
+  it('reports failure ALERT instead of falsely claiming success when a command action returns false', () => {
+    const logged: { text: string; type?: string }[] = [];
+    speechService.setMessageCallback((msg) => {
+      if (msg.sender === 'JARVIS') logged.push({ text: msg.text, type: msg.type });
+    });
+
+    speechService.registerCommands([
+      {
+        patterns: ['capture optical scan'],
+        description: 'Optical scan',
+        category: 'MANIPULATION',
+        action: () => false,
+        feedbackText: 'Optical scan captured successfully.',
+        failureText: 'Optical sensor is offline. Enable the camera first.'
+      }
+    ]);
+
+    speechService.handleTranscript('capture optical scan');
+    expect(logged.length).toBe(1);
+    expect(logged[0].type).toBe('ALERT');
+    expect(logged[0].text).toBe('Optical sensor is offline. Enable the camera first.');
+  });
 });

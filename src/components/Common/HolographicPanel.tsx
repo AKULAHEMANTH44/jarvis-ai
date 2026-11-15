@@ -23,10 +23,10 @@ export const HolographicPanel: React.FC<HolographicPanelProps> = ({
 }) => {
   return (
     <div
-      className={`relative overflow-hidden backdrop-blur-md bg-opacity-75 bg-[#041424] border rounded-lg p-3 text-cyan-400 transition-all duration-300 ${
+      className={`relative overflow-hidden bg-[#020914]/90 border rounded-lg p-3 text-cyan-400 transition-colors duration-200 ${
         reactive
-          ? 'border-cyan-300/70 shadow-[0_0_28px_rgba(0,240,255,0.28)]'
-          : 'border-cyan-500/30 shadow-[0_0_20px_rgba(0,240,255,0.15)]'
+          ? 'border-cyan-300/75 shadow-[0_0_24px_rgba(0,240,255,0.22)]'
+          : 'border-cyan-500/30 shadow-[0_0_16px_rgba(0,240,255,0.12)]'
       } ${className}`}
     >
       {/* Subtle Holographic Scan Sweep Layer */}

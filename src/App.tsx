@@ -36,8 +36,12 @@ import { automationEngine } from './services/automationEngine';
 import { contextualAI } from './services/contextualAI';
 
 export const App: React.FC = () => {
+  const autostart =
+    typeof window !== 'undefined' &&
+    new URLSearchParams(window.location.search).get('autostart') === '1';
+
   // Modes & Models State
-  const [showBootOverlay, setShowBootOverlay] = useState<boolean>(true);
+  const [showBootOverlay, setShowBootOverlay] = useState<boolean>(() => !autostart);
   const [mode, setMode] = useState<InteractionMode>('WORKSPACE');
   const [currentModelId, setCurrentModelId] = useState<HologramModelId>('vision_sphere');
   const [spatialObjects, setSpatialObjects] = useState<SpatialObjectState[]>([]);
@@ -46,6 +50,12 @@ export const App: React.FC = () => {
   const [componentLabels, setComponentLabels] = useState<ComponentLabel2D[]>([]);
   const [activeGestureFeedback, setActiveGestureFeedback] = useState<string | null>(null);
   const [isProcessingCommand, setIsProcessingCommand] = useState<boolean>(false);
+
+  // Discreet Collapsible Edge Drawers (default closed so Vision X core dominates the viewport)
+  const [leftDrawerOpen, setLeftDrawerOpen] = useState<boolean>(false);
+  const [rightDrawerMode, setRightDrawerMode] = useState<'CLOSED' | 'LAB' | 'DIAGNOSTICS'>('CLOSED');
+  const [voiceDrawerOpen, setVoiceDrawerOpen] = useState<boolean>(false);
+
   const [requestedWorkspaceTab, setRequestedWorkspaceTab] = useState<{
     tab: 'OBJECTS' | 'LAB' | 'AUTOMATION' | 'NOTES' | 'TIMER';
     nonce: number;
@@ -124,6 +134,7 @@ export const App: React.FC = () => {
   // Three.js Scene Reference
   const sceneManagerRef = useRef<HologramSceneManager | null>(null);
   const lastGestureRef = useRef<GestureType>('NONE');
+  const lastDispatchedGestureRef = useRef<GestureDetectionResult | null>(null);
 
   const appendMessage = useCallback(
     (sender: AssistantMessage['sender'], text: string, type: AssistantMessage['type'] = 'INFO') => {
@@ -201,19 +212,20 @@ export const App: React.FC = () => {
     }
   }, [appendMessage, syncSpatialStates]);
 
-  const handleDuplicateObject = useCallback((id: string) => {
-    if (sceneManagerRef.current) {
-      audioService.playChirp(1500);
-      const dup = sceneManagerRef.current.spatialManager.duplicate(id);
-      syncSpatialStates();
-      if (dup) {
-        appendMessage('JARVIS', `Cloned ${dup.name}. Both instances ready for independent spatial manipulation.`, 'INFO');
-      }
+  const handleDuplicateObject = useCallback((id: string): boolean => {
+    if (!sceneManagerRef.current) return false;
+    audioService.playChirp(1500);
+    const dup = sceneManagerRef.current.spatialManager.duplicate(id);
+    syncSpatialStates();
+    if (dup) {
+      appendMessage('JARVIS', `Cloned ${dup.name}. Both instances ready for independent spatial manipulation.`, 'INFO');
+      return true;
     }
+    return false;
   }, [appendMessage, syncSpatialStates]);
 
-  const handleDeleteObject = useCallback(async (id: string) => {
-    const target = spatialObjects.find(o => o.id === id);
+  const handleDeleteObject = useCallback(async (id: string): Promise<boolean> => {
+    const target = spatialObjects.find((o) => o.id === id);
     const targetName = target ? target.name : 'Selected Hologram';
 
     const approved = await desktopBridge.requestAuthorization(
@@ -224,10 +236,14 @@ export const App: React.FC = () => {
 
     if (approved && sceneManagerRef.current) {
       audioService.playChirp(800);
-      sceneManagerRef.current.spatialManager.delete(id);
+      const deleted = sceneManagerRef.current.spatialManager.delete(id);
       syncSpatialStates();
-      appendMessage('JARVIS', `${targetName} de-materialized from workspace.`, 'INFO');
+      if (deleted) {
+        appendMessage('JARVIS', `${targetName} de-materialized from workspace.`, 'INFO');
+      }
+      return deleted;
     }
+    return false;
   }, [appendMessage, spatialObjects, syncSpatialStates]);
 
   const handleSelectObject = useCallback((id: string) => {
@@ -321,14 +337,14 @@ export const App: React.FC = () => {
     }
   }, [appendMessage, syncSpatialStates]);
 
-  const handleCaptureWebcamScan = useCallback(() => {
+  const handleCaptureWebcamScan = useCallback((): boolean => {
     if (!isCameraActive || !videoRef.current || !sceneManagerRef.current) {
       appendMessage(
         'JARVIS',
-        'Optical sensor is offline. Enable the camera in the left HUD first to capture a 3D depth-relief scan.',
+        'Optical sensor is offline. Enable the camera in the Optical drawer first to capture a 3D depth-relief scan.',
         'ALERT'
       );
-      return;
+      return false;
     }
     const inst = sceneManagerRef.current.reconstructFromVideo(videoRef.current);
     if (inst) {
@@ -340,9 +356,10 @@ export const App: React.FC = () => {
         `Captured optical frame and reconstructed 3D depth-relief hologram (${inst.vertexCount} vertices).`,
         'RESPONSE'
       );
-    } else {
-      appendMessage('JARVIS', 'Camera video stream is still warming up. Retry in a moment.', 'ALERT');
+      return true;
     }
+    appendMessage('JARVIS', 'Camera video stream is still warming up. Retry in a moment.', 'ALERT');
+    return false;
   }, [appendMessage, isCameraActive, syncSpatialStates]);
 
   const handleTriggerRescan = useCallback(() => {
@@ -353,32 +370,36 @@ export const App: React.FC = () => {
     }
   }, [appendMessage, selectedObjectId]);
 
-  const handleRotate360 = useCallback(() => {
-    if (sceneManagerRef.current) {
-      audioService.playChirp(1450);
-      sceneManagerRef.current.rotate360(selectedObjectId || undefined);
-      syncSpatialStates();
-    }
+  const handleRotate360 = useCallback((): boolean => {
+    if (!sceneManagerRef.current) return false;
+    audioService.playChirp(1450);
+    const ok = sceneManagerRef.current.rotate360(selectedObjectId || undefined);
+    syncSpatialStates();
+    return ok;
   }, [selectedObjectId, syncSpatialStates]);
 
-  const handleDisintegrate = useCallback(() => {
-    if (sceneManagerRef.current) {
-      audioService.playShockwave();
-      sceneManagerRef.current.disintegrateObject(selectedObjectId || undefined);
+  const handleDisintegrate = useCallback((): boolean => {
+    if (!sceneManagerRef.current) return false;
+    audioService.playShockwave();
+    const ok = sceneManagerRef.current.disintegrateObject(selectedObjectId || undefined);
+    if (ok) {
       setVisualSettings((v) => ({ ...v, dispersionAmount: 1.0 }));
       syncSpatialStates();
       appendMessage('JARVIS', 'Particle disintegration initiated. Original spatial state preserved.', 'ALERT');
     }
+    return ok;
   }, [appendMessage, selectedObjectId, syncSpatialStates]);
 
-  const handleReconstruct = useCallback(() => {
-    if (sceneManagerRef.current) {
-      audioService.playActivationWhoosh();
-      sceneManagerRef.current.reconstructObject(selectedObjectId || undefined);
+  const handleReconstruct = useCallback((): boolean => {
+    if (!sceneManagerRef.current) return false;
+    audioService.playActivationWhoosh();
+    const ok = sceneManagerRef.current.reconstructObject(selectedObjectId || undefined);
+    if (ok) {
       setVisualSettings((v) => ({ ...v, explodedView: false, explosionAmount: 0, dispersionAmount: 0 }));
       syncSpatialStates();
       appendMessage('JARVIS', 'Reassembling holographic structure to original state.', 'RESPONSE');
     }
+    return ok;
   }, [appendMessage, selectedObjectId, syncSpatialStates]);
 
   const handleReconstructImages = useCallback(async (files: File[]) => {
@@ -589,18 +610,19 @@ export const App: React.FC = () => {
         description: 'Full 360-degree rotation',
         category: 'MANIPULATION',
         action: () => handleRotate360(),
-        feedbackText: 'Executing full 360-degree holographic inspection rotation.'
+        feedbackText: 'Executing full 360-degree holographic inspection rotation.',
+        failureText: 'Rotation blocked — unlock the selected holographic object first.'
       },
       {
-        patterns: ['rotate the interface', 'rotate interface', 'rotate the object', 'rotate object', 'spin object', 'rotate it'],
+        patterns: ['rotate hologram', 'rotate the hologram', 'rotate the interface', 'rotate interface', 'rotate the object', 'rotate object', 'spin object', 'rotate it'],
         description: 'Rotate holographic interface or object',
         category: 'MANIPULATION',
         action: () => {
-          if (sceneManagerRef.current) {
-            sceneManagerRef.current.applySphericalRotation(0, 0.9, 0);
-          }
+          if (!sceneManagerRef.current) return false;
+          sceneManagerRef.current.applySphericalRotation(0, 0.9, 0);
+          return true;
         },
-        feedbackText: 'Rotating the holographic interface.'
+        feedbackText: 'Rotating the holographic structure.'
       },
       {
         patterns: ['turn right', 'rotate right'],
@@ -659,7 +681,7 @@ export const App: React.FC = () => {
         action: () => {
           setVisualSettings((v) => ({ ...v, dispersionAmount: 1.0 }));
           sceneManagerRef.current?.setDispersion(1.0, 'DISPERSED');
-          handleDisintegrate();
+          return handleDisintegrate();
         },
         feedbackText: 'Dispersing holographic structure into controlled energy particles.'
       },
@@ -676,10 +698,13 @@ export const App: React.FC = () => {
         category: 'NAVIGATION',
         action: () => {
           setMode('WORKSPACE');
+          setLeftDrawerOpen(false);
+          setRightDrawerMode('CLOSED');
+          setVoiceDrawerOpen(false);
           handleReconstruct();
           handleResetTransform();
         },
-        feedbackText: 'Restoring normal assembled workspace view.'
+        feedbackText: 'Restoring clean spatial focus and assembled holographic core.'
       },
       {
         patterns: ['open the object laboratory', 'open object laboratory', 'open laboratory', 'object laboratory'],
@@ -687,6 +712,7 @@ export const App: React.FC = () => {
         category: 'NAVIGATION',
         action: () => {
           setMode('WORKSPACE');
+          setRightDrawerMode('LAB');
           setRequestedWorkspaceTab({ tab: 'LAB', nonce: Date.now() });
           audioService.playActivationWhoosh();
         },
@@ -698,6 +724,7 @@ export const App: React.FC = () => {
         category: 'NAVIGATION',
         action: () => {
           setMode('WORKSPACE');
+          setRightDrawerMode('DIAGNOSTICS');
           setRequestedDiagnosticsTab({ tab: 'DIAGNOSTICS', nonce: Date.now() });
           audioService.playChirp(1400);
         },
@@ -709,6 +736,7 @@ export const App: React.FC = () => {
         category: 'AUTOMATION',
         action: () => {
           setMode('WORKSPACE');
+          setRightDrawerMode('DIAGNOSTICS');
           setRequestedDiagnosticsTab({ tab: 'DIAGNOSTICS', nonce: Date.now() });
           automationEngine.createTask(
             'Autonomous Optical & Containment Sweep',
@@ -779,9 +807,12 @@ export const App: React.FC = () => {
           if (selectedObjectId && sceneManagerRef.current) {
             sceneManagerRef.current.spatialManager.setLocked(selectedObjectId, true);
             syncSpatialStates();
+            return true;
           }
+          return false;
         },
-        feedbackText: 'Spatial transform locked for active hologram.'
+        feedbackText: 'Spatial transform locked for active hologram.',
+        failureText: 'No active hologram selected to lock.'
       },
       {
         patterns: ['unlock object', 'unfreeze object'],
@@ -792,9 +823,12 @@ export const App: React.FC = () => {
             sceneManagerRef.current.spatialManager.setLocked(selectedObjectId, false);
             sceneManagerRef.current.spatialManager.setFrozen(selectedObjectId, false);
             syncSpatialStates();
+            return true;
           }
+          return false;
         },
-        feedbackText: 'Spatial transform unlocked.'
+        feedbackText: 'Spatial transform unlocked.',
+        failureText: 'No active hologram selected to unlock.'
       },
       {
         patterns: ['expand it', 'expand', 'zoom in', 'enlarge'],
@@ -804,7 +838,9 @@ export const App: React.FC = () => {
           if (sceneManagerRef.current) {
             sceneManagerRef.current.applyScaleMultiplier(1.35);
             syncSpatialStates();
+            return true;
           }
+          return false;
         },
         feedbackText: 'Expanding the holographic structure.'
       },
@@ -816,37 +852,51 @@ export const App: React.FC = () => {
           if (sceneManagerRef.current) {
             sceneManagerRef.current.applyScaleMultiplier(0.75);
             syncSpatialStates();
+            return true;
           }
+          return false;
         },
         feedbackText: 'Contracting holographic dimensions.'
       },
       {
-        patterns: ['reset hologram', 'reset object', 'reset', 'center object', 'recenter'],
-        description: 'Reset hologram position and dispersion',
+        patterns: ['reset environment', 'reset hologram', 'reset object', 'reset', 'center object', 'recenter'],
+        description: 'Reset environment, dispersion, and hologram anchor',
         category: 'MANIPULATION',
         action: () => {
+          setVisualSettings((v) => ({
+            ...v,
+            explodedView: false,
+            explosionAmount: 0,
+            dispersionAmount: 0,
+            sliceEnabled: false
+          }));
           handleReconstruct();
           handleResetTransform();
+          return true;
         },
-        feedbackText: 'Resetting holographic sphere and returning anchor to origin.'
+        feedbackText: 'Resetting Vision X environment and returning anchor to origin.'
       },
       {
         patterns: ['duplicate it', 'duplicate object', 'clone object', 'make a copy'],
         description: 'Duplicate selected object',
         category: 'SPATIAL',
         action: () => {
-          if (selectedObjectId) handleDuplicateObject(selectedObjectId);
+          if (!selectedObjectId) return false;
+          return handleDuplicateObject(selectedObjectId);
         },
-        feedbackText: 'Duplicating selected holographic entity.'
+        feedbackText: 'Duplicating selected holographic entity.',
+        failureText: 'No holographic object selected to duplicate.'
       },
       {
         patterns: ['delete it', 'delete object', 'remove object', 'dematerialize'],
         description: 'Delete selected object',
         category: 'SPATIAL',
-        action: () => {
-          if (selectedObjectId) handleDeleteObject(selectedObjectId);
+        action: async () => {
+          if (!selectedObjectId) return false;
+          return handleDeleteObject(selectedObjectId);
         },
-        feedbackText: 'Requesting confirmation to delete selected object.',
+        feedbackText: 'Selected holographic object de-materialized.',
+        failureText: 'Deletion cancelled or no object selected.',
         requiresConfirmation: true
       },
       {
@@ -1015,11 +1065,16 @@ export const App: React.FC = () => {
   const handleToggleCamera = useCallback(async () => {
     if (isCameraActive) {
       handTrackingService.stop();
+      gestureEngine.recalibrateNeutral();
+      lastGestureRef.current = 'NONE';
+      lastDispatchedGestureRef.current = null;
       setIsCameraActive(false);
       setCameraError(null);
       setGestureResult(null);
+      setActiveGestureFeedback(null);
       setLaserTarget(null);
       if (sceneManagerRef.current) {
+        sceneManagerRef.current.clearRotationInertia();
         sceneManagerRef.current.setHandCentroid(undefined);
         sceneManagerRef.current.updateLaserPointer(0, 0, false);
       }
@@ -1052,7 +1107,9 @@ export const App: React.FC = () => {
 
   // GESTURE DISPATCH ENGINE
   useEffect(() => {
-    if (!gestureResult) return;
+    if (!gestureResult || lastDispatchedGestureRef.current === gestureResult) return;
+    lastDispatchedGestureRef.current = gestureResult;
+
     const g = gestureResult.activeGesture;
     const scene = sceneManagerRef.current;
 
@@ -1063,7 +1120,7 @@ export const App: React.FC = () => {
     // Update or clear 3D Laser Targeting Reticle
     if (g !== 'TWO_FINGER_POINT' && scene) {
       scene.updateLaserPointer(0, 0, false);
-      if (laserTarget) setLaserTarget(null);
+      setLaserTarget((prev) => (prev ? null : prev));
     }
 
     if (gestureResult.trackingLost) {
@@ -1072,7 +1129,9 @@ export const App: React.FC = () => {
 
     if (g === 'NONE') {
       lastGestureRef.current = 'NONE';
-      if (!gestureResult.trackingLost && activeGestureFeedback) setActiveGestureFeedback(null);
+      if (!gestureResult.trackingLost) {
+        setActiveGestureFeedback((prev) => (prev ? null : prev));
+      }
       return;
     }
 
@@ -1093,14 +1152,18 @@ export const App: React.FC = () => {
       if (scene && selectedObjectId) {
         scene.spatialManager.setFrozen(selectedObjectId, false);
       }
-      if (mode === 'STANDBY') {
-        setMode('WORKSPACE');
-        audioService.playActivationWhoosh();
-      }
+      setMode((prev) => {
+        if (prev === 'STANDBY') {
+          audioService.playActivationWhoosh();
+          return 'WORKSPACE';
+        }
+        return prev;
+      });
     }
     // B. CLOSED FIST (Hold / Freeze active object)
     else if (g === 'CLOSED_FIST') {
       setActiveGestureFeedback('GESTURE // CLOSED FIST · OBJECT FROZEN');
+      if (scene) scene.clearRotationInertia();
       if (lastGestureRef.current !== 'CLOSED_FIST') {
         audioService.playChirp(820);
         if (scene && selectedObjectId) {
@@ -1112,6 +1175,7 @@ export const App: React.FC = () => {
     // C. PINCH
     else if (g === 'PINCH') {
       setActiveGestureFeedback('GESTURE // PINCH · TARGET GRABBED');
+      if (scene) scene.clearRotationInertia();
       if (lastGestureRef.current !== 'PINCH' && lastGestureRef.current !== 'MOVE_PINCHED') {
         audioService.playPinchGrab();
       }
@@ -1142,6 +1206,7 @@ export const App: React.FC = () => {
     }
     // F. TWO-HAND MOVEMENT (ZOOM / DISPERSION)
     else if (g === 'TWO_HAND_ZOOM' && scene) {
+      scene.clearRotationInertia();
       if (gestureResult.dispersionControl) {
         setActiveGestureFeedback(
           `GESTURE // DISPERSION ${Math.round(gestureResult.dispersionControl.dispersion * 100)}% (${gestureResult.dispersionControl.phase})`
@@ -1155,6 +1220,7 @@ export const App: React.FC = () => {
     }
     // G. TWO OPEN PALMS
     else if (g === 'TWO_OPEN_PALMS') {
+      if (scene) scene.clearRotationInertia();
       if (gestureResult.dispersionControl) {
         setActiveGestureFeedback(
           `GESTURE // WIDE INTERFACE · DISPERSION ${Math.round(gestureResult.dispersionControl.dispersion * 100)}%`
@@ -1209,15 +1275,12 @@ export const App: React.FC = () => {
 
     lastGestureRef.current = g;
   }, [
-    activeGestureFeedback,
     gestureResult,
     handleNextModel,
     handlePrevModel,
     handleReconstruct,
     handleResetTransform,
     handleTriggerShockwave,
-    laserTarget,
-    mode,
     selectedObjectId,
     syncSpatialStates
   ]);
@@ -1234,10 +1297,11 @@ export const App: React.FC = () => {
     if (sceneManagerRef.current) {
       sceneManagerRef.current.setCoreActivity({
         isListening: isVoiceActive,
-        isSpeaking
+        isSpeaking,
+        isProcessing: isProcessingCommand
       });
     }
-  }, [isVoiceActive, isSpeaking]);
+  }, [isVoiceActive, isSpeaking, isProcessingCommand]);
 
   // Project 2D component callout labels smoothly when Exploded View or VISION 1.2 CORE is active
   useEffect(() => {
@@ -1286,14 +1350,49 @@ export const App: React.FC = () => {
     ? 'LISTENING'
     : 'ACTIVE';
 
+  const isDispersed = visualSettings.dispersionAmount >= 0.45 || Boolean(selectedSpatialObj?.isDisintegrated);
+  const hasOpenDrawers = leftDrawerOpen || rightDrawerMode !== 'CLOSED' || voiceDrawerOpen;
+
+  const handleToggleDispersion = useCallback(() => {
+    if (isDispersed) {
+      handleReconstruct();
+    } else {
+      setVisualSettings((v) => ({ ...v, dispersionAmount: 1.0 }));
+      sceneManagerRef.current?.setDispersion(1.0, 'DISPERSED');
+      handleDisintegrate();
+    }
+  }, [handleDisintegrate, handleReconstruct, isDispersed]);
+
+  const handleToggleCollapseAll = useCallback(() => {
+    if (hasOpenDrawers) {
+      setLeftDrawerOpen(false);
+      setRightDrawerMode('CLOSED');
+      setVoiceDrawerOpen(false);
+    } else {
+      setRightDrawerMode('LAB');
+    }
+  }, [hasOpenDrawers]);
+
+  const handleBootProgress = useCallback((p: number) => {
+    sceneManagerRef.current?.setInitializationProgress(p);
+  }, []);
+
+  const handleBootComplete = useCallback(() => {
+    sceneManagerRef.current?.skipInitialization();
+    setShowBootOverlay(false);
+  }, []);
+
   return (
-    <div className="relative w-screen h-screen overflow-hidden bg-[#02070e] font-mono text-cyan-400 select-none">
-      {/* 0. Skippable Initialization Boot Sequence */}
+    <div className="relative w-screen h-screen overflow-hidden bg-[#02060c] font-mono text-cyan-400 select-none flex flex-col">
+      {/* 0. Skippable Live-3D Initialization Telemetry */}
       {showBootOverlay && (
-        <BootSequenceOverlay onComplete={() => setShowBootOverlay(false)} />
+        <BootSequenceOverlay
+          onProgress={handleBootProgress}
+          onComplete={handleBootComplete}
+        />
       )}
 
-      {/* 1. Central 3D Holographic Canvas */}
+      {/* 1. Central Full-Viewport 3D Holographic Canvas */}
       <HologramCanvas
         currentModelId={currentModelId}
         visualSettings={visualSettings}
@@ -1308,48 +1407,80 @@ export const App: React.FC = () => {
         componentLabels={componentLabels}
         activeGestureFeedback={activeGestureFeedback}
         isTrackingLost={isTrackingLost}
+        startAtInitZero={!autostart}
       />
 
-      {/* 2. Top Status Bar HUD */}
-      <TopStatusBar
-        mode={mode}
-        fps={fps}
-        coreState={coreActivityLabel}
-        onModeChange={setMode}
-      />
-
-      {/* 3. Main HUD Overlay Layout */}
+      {/* 2. Slim Top Telemetry Bar */}
       {mode !== 'STANDBY' && (
-        <div className="relative z-20 pointer-events-none flex justify-between p-4 h-[calc(100vh-105px)]">
-          {/* Left HUD: Hand Vision & Gestures */}
-          <div className="pointer-events-auto overflow-y-auto max-h-full pr-2">
-            <LeftVisionHUD
-              isCameraActive={isCameraActive}
-              cameraError={cameraError}
-              onToggleCamera={handleToggleCamera}
-              gestureResult={gestureResult}
-              calibration={calibration}
-              onUpdateCalibration={(cal) => {
-                setCalibration((prev) => ({ ...prev, ...cal }));
-                gestureEngine.updateCalibration(cal);
-              }}
-              onResetCalibration={() => {
-                const defaults = gestureEngine.resetCalibrationToDefaults();
-                gestureEngine.updateCalibration({ mirrorX: true });
-                setCalibration({ ...defaults, mirrorX: true });
-              }}
-              onRecalibrateNeutral={() => {
-                gestureEngine.recalibrateNeutral();
-                appendMessage('JARVIS', 'Neutral optical hand anchor recalibrated.', 'INFO');
-              }}
-              videoRef={videoRef}
-            />
+        <TopStatusBar
+          mode={mode}
+          fps={fps}
+          coreState={coreActivityLabel}
+          onModeChange={(nextMode) => {
+            setMode(nextMode);
+            if (nextMode === 'CINEMATIC') {
+              setLeftDrawerOpen(false);
+              setRightDrawerMode('CLOSED');
+              setVoiceDrawerOpen(false);
+            }
+          }}
+          hasOpenDrawers={hasOpenDrawers}
+          onToggleCollapseAll={handleToggleCollapseAll}
+        />
+      )}
+
+      {/* 3. Unobstructed Center Spatial Area with Collapsible Edge Drawers */}
+      {mode !== 'STANDBY' && (
+        <div className="relative z-20 flex-1 pointer-events-none flex justify-between items-stretch p-3 overflow-hidden">
+          {/* Left Edge Column: Collapsible Optical Sensor & Vocal Stream */}
+          <div className="flex flex-col justify-between items-start space-y-2 max-h-full">
+            {leftDrawerOpen && (
+              <div className="pointer-events-auto overflow-y-auto max-h-full pr-1 animate-fade-in">
+                <LeftVisionHUD
+                  isCameraActive={isCameraActive}
+                  cameraError={cameraError}
+                  onToggleCamera={handleToggleCamera}
+                  gestureResult={gestureResult}
+                  calibration={calibration}
+                  onUpdateCalibration={(cal) => {
+                    setCalibration((prev) => ({ ...prev, ...cal }));
+                    gestureEngine.updateCalibration(cal);
+                  }}
+                  onResetCalibration={() => {
+                    const defaults = gestureEngine.resetCalibrationToDefaults();
+                    gestureEngine.updateCalibration({ mirrorX: true });
+                    setCalibration({ ...defaults, mirrorX: true });
+                  }}
+                  onRecalibrateNeutral={() => {
+                    gestureEngine.recalibrateNeutral();
+                    appendMessage('JARVIS', 'Neutral optical hand anchor recalibrated.', 'INFO');
+                  }}
+                  videoRef={videoRef}
+                />
+              </div>
+            )}
+
+            {voiceDrawerOpen && (
+              <div className="pointer-events-auto mt-auto animate-fade-in">
+                <VoiceConsoleHUD
+                  messages={messages}
+                  onSendCommand={handleSendConsoleCommand}
+                  isListening={isVoiceActive}
+                  isSpeaking={isSpeaking}
+                  isProcessing={isProcessingCommand}
+                  onClearHistory={() => setMessages((prev) => prev.slice(0, 1))}
+                />
+              </div>
+            )}
           </div>
 
-          {/* Center Space: Open view of 3D Hologram, Floating Workspace / Lab Panels & Voice Console */}
-          <div className="flex-1 flex flex-col justify-between items-center pointer-events-none px-4 pb-2">
-            {(mode === 'WORKSPACE' || mode === 'HOLOGRAM' || mode === 'DESKTOP') && (
-              <div className="pointer-events-auto pt-1 animate-fade-in">
+          {/* Center remains 100% open & unobstructed for the Vision X Hologram */}
+          <div className="flex-1 pointer-events-none" />
+
+          {/* Right Edge Column: Collapsible Object Lab OR Diagnostics & Model Catalog */}
+          <div className="flex flex-col justify-start items-end max-h-full">
+            {rightDrawerMode === 'LAB' && (
+              <div className="pointer-events-auto overflow-y-auto max-h-full pl-1 animate-fade-in">
                 <FloatingSpatialPanels
                   spatialObjects={spatialObjects}
                   selectedObjectId={selectedObjectId}
@@ -1383,52 +1514,64 @@ export const App: React.FC = () => {
               </div>
             )}
 
-            {/* Bottom Center: Floating Voice Console */}
-            <div className="pointer-events-auto mt-auto">
-              <VoiceConsoleHUD
-                messages={messages}
-                onSendCommand={handleSendConsoleCommand}
-                isListening={isVoiceActive}
-                isSpeaking={isSpeaking}
-                isProcessing={isProcessingCommand}
-                onClearHistory={() => setMessages((prev) => prev.slice(0, 1))}
-              />
-            </div>
-          </div>
-
-          {/* Right HUD: Diagnostics & Hologram Selector */}
-          <div className="pointer-events-auto overflow-y-auto max-h-full pl-2">
-            <RightDiagnosticsHUD
-              currentModelId={currentModelId}
-              selectedObject={selectedSpatialObj}
-              onSelectModel={handleSelectModel}
-              visualSettings={visualSettings}
-              onUpdateVisualSettings={(settings) =>
-                setVisualSettings((v) => ({ ...v, ...settings }))
-              }
-              onOpenAIConfig={() => setIsAIConfigOpen(true)}
-              requestedTab={requestedDiagnosticsTab}
-            />
+            {rightDrawerMode === 'DIAGNOSTICS' && (
+              <div className="pointer-events-auto overflow-y-auto max-h-full pl-1 animate-fade-in">
+                <RightDiagnosticsHUD
+                  currentModelId={currentModelId}
+                  selectedObject={selectedSpatialObj}
+                  onSelectModel={handleSelectModel}
+                  visualSettings={visualSettings}
+                  onUpdateVisualSettings={(settings) =>
+                    setVisualSettings((v) => ({ ...v, ...settings }))
+                  }
+                  onOpenAIConfig={() => setIsAIConfigOpen(true)}
+                  requestedTab={requestedDiagnosticsTab}
+                />
+              </div>
+            )}
           </div>
         </div>
       )}
 
-      {/* 4. Bottom Control Bar HUD */}
+      {/* Hidden video element preserved when Optical drawer is collapsed so camera tracking keeps running */}
+      {!leftDrawerOpen && (
+        <video ref={videoRef} className="hidden" playsInline muted />
+      )}
+
+      {/* 4. Unified Slim Bottom Command Dock */}
       {mode !== 'STANDBY' && (
         <BottomControlHUD
           currentMode={mode}
-          onSelectMode={setMode}
+          onSelectMode={(nextMode) => {
+            setMode(nextMode);
+            if (nextMode === 'CINEMATIC') {
+              setLeftDrawerOpen(false);
+              setRightDrawerMode('CLOSED');
+              setVoiceDrawerOpen(false);
+            }
+          }}
           isVoiceActive={isVoiceActive}
           voiceError={voiceError}
           onToggleVoice={handleToggleVoice}
+          onSendCommand={handleSendConsoleCommand}
           onTriggerShockwave={handleTriggerShockwave}
           onResetTransform={handleResetTransform}
           isCameraActive={isCameraActive}
           onToggleCamera={handleToggleCamera}
+          isDispersed={isDispersed}
+          onToggleDispersion={handleToggleDispersion}
+          leftDrawerOpen={leftDrawerOpen}
+          onToggleLeftDrawer={() => setLeftDrawerOpen((prev) => !prev)}
+          rightDrawerMode={rightDrawerMode}
+          onToggleRightDrawer={(target) =>
+            setRightDrawerMode((prev) => (prev === target ? 'CLOSED' : target))
+          }
+          voiceDrawerOpen={voiceDrawerOpen}
+          onToggleVoiceDrawer={() => setVoiceDrawerOpen((prev) => !prev)}
         />
       )}
 
-      {/* 5. Minimalist Standby HUD Overlay */}
+      {/* 5. Minimalist Translucent Standby HUD Overlay (sphere remains visible behind) */}
       {mode === 'STANDBY' && <StandbyHUD onWake={() => setMode('WORKSPACE')} />}
 
       {/* 6. Security Confirmation Modal for Consequential Actions */}

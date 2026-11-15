@@ -144,8 +144,8 @@ export const LeftVisionHUD: React.FC<LeftVisionHUDProps> = ({
             className="absolute inset-0 w-full h-full pointer-events-none"
           />
 
-          <div className="absolute inset-0 pointer-events-none flex items-center justify-center opacity-30">
-            <div className="w-16 h-16 border border-cyan-400/40 rounded-full animate-ping" />
+          <div className="absolute inset-0 pointer-events-none flex items-center justify-center opacity-25">
+            <div className="w-16 h-16 border border-cyan-400/35 rounded-full" />
             <div className="w-1 h-full border-r border-cyan-400/20" />
             <div className="h-1 w-full border-b border-cyan-400/20" />
           </div>
@@ -161,7 +161,7 @@ export const LeftVisionHUD: React.FC<LeftVisionHUDProps> = ({
                 </>
               ) : (
                 <>
-                  <Camera className="w-8 h-8 text-cyan-500/40 animate-pulse" />
+                  <Camera className="w-8 h-8 text-cyan-500/50" />
                   <span className="text-cyan-400/80 font-mono text-[11px]">
                     OPTICAL SENSOR OFFLINE
                   </span>
@@ -181,14 +181,14 @@ export const LeftVisionHUD: React.FC<LeftVisionHUDProps> = ({
 
           {isCameraActive && gestureResult?.trackingLost && (
             <div className="absolute top-2 left-2 z-20 flex items-center space-x-1.5 bg-amber-950/85 px-2 py-0.5 rounded border border-amber-400/80 font-mono text-[10px] text-amber-200 shadow-[0_0_10px_rgba(255,170,0,0.4)]">
-              <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+              <span className="w-2 h-2 rounded-full bg-amber-400" />
               <span>TRACKING LOST // STABILIZING</span>
             </div>
           )}
 
           {isCameraActive && (!gestureResult || gestureResult.hands.length === 0) && (
             <div className="absolute bottom-2 left-2 z-10 flex items-center space-x-1.5 bg-black/70 px-2 py-0.5 rounded border border-cyan-500/30 font-mono text-[10px] text-cyan-300">
-              <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+              <span className="w-2 h-2 rounded-full bg-amber-400" />
               <span>{gestureResult?.trackingLost ? 'REACQUIRING HAND...' : 'SEARCHING HANDS...'}</span>
             </div>
           )}

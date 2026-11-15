@@ -143,6 +143,9 @@ export class HandTrackingService {
     videoEl: HTMLVideoElement,
     onResults: (result: HandLandmarkerResult, fps: number) => void
   ): Promise<boolean> {
+    if (this.isRunning || this.stream || this.animationFrameId !== null) {
+      this.stop();
+    }
     this.videoElement = videoEl;
     this.onResultsCallback = onResults;
     this.lastError = null;

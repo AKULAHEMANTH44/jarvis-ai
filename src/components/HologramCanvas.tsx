@@ -18,6 +18,7 @@ interface HologramCanvasProps {
   componentLabels?: ComponentLabel2D[];
   activeGestureFeedback?: string | null;
   isTrackingLost?: boolean;
+  startAtInitZero?: boolean;
 }
 
 export const HologramCanvas: React.FC<HologramCanvasProps> = ({
@@ -29,7 +30,8 @@ export const HologramCanvas: React.FC<HologramCanvasProps> = ({
   laserTarget,
   componentLabels = [],
   activeGestureFeedback,
-  isTrackingLost = false
+  isTrackingLost = false,
+  startAtInitZero = false
 }) => {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const dragStateRef = useRef<{
@@ -51,7 +53,7 @@ export const HologramCanvas: React.FC<HologramCanvasProps> = ({
   useEffect(() => {
     if (!mountRef.current) return;
 
-    const manager = new HologramSceneManager(mountRef.current, visualSettings);
+    const manager = new HologramSceneManager(mountRef.current, visualSettings, startAtInitZero);
     sceneManagerRef.current = manager;
 
     return () => {

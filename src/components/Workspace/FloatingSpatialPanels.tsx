@@ -233,7 +233,7 @@ export const FloatingSpatialPanels: React.FC<FloatingSpatialPanelsProps> = ({
   const sliceAxes: SliceAxis[] = ['x', 'y', 'z'];
 
   return (
-    <div className="w-96 flex flex-col space-y-2 pointer-events-auto text-xs select-none">
+    <div className="w-80 flex flex-col space-y-2 pointer-events-auto text-xs select-none">
       {/* Workspace Navigation Tabs + Minimize */}
       <div className="flex items-center bg-black/75 border border-cyan-500/40 rounded-lg p-1 space-x-1">
         {(['OBJECTS', 'LAB', 'AUTOMATION', 'NOTES', 'TIMER'] as const).map((tab) => (
@@ -846,7 +846,7 @@ export const FloatingSpatialPanels: React.FC<FloatingSpatialPanelsProps> = ({
                               task.status === 'COMPLETED'
                                 ? 'border-emerald-500 text-emerald-300 bg-emerald-950/40'
                                 : task.status === 'RUNNING'
-                                ? 'border-cyan-400 text-cyan-300 bg-cyan-950/40 animate-pulse'
+                                ? 'border-cyan-400 text-cyan-300 bg-cyan-950/40'
                                 : task.status === 'WAITING_CONFIRMATION'
                                 ? 'border-amber-400 text-amber-300 bg-amber-950/40'
                                 : 'border-red-500 text-red-300 bg-red-950/40'
@@ -869,7 +869,7 @@ export const FloatingSpatialPanels: React.FC<FloatingSpatialPanelsProps> = ({
                               {st.status === 'DONE' ? (
                                 <CheckCircle className="w-3 h-3 text-emerald-400" />
                               ) : st.status === 'EXECUTING' ? (
-                                <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping" />
+                                <span className="w-2 h-2 rounded-full bg-cyan-400" />
                               ) : (
                                 <span className="w-2 h-2 rounded-full bg-cyan-800" />
                               )}

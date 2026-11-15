@@ -40,12 +40,19 @@ function clamp(val: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, val));
 }
 
+interface TrackedHandState {
+  id: number;
+  handedness: 'Left' | 'Right';
+  centroid: Landmark3D;
+  landmarks: Landmark3D[];
+}
+
 export class GestureEngine {
   private calibration: GestureCalibrationSettings;
-  private prevCentroids: Landmark3D[] = [];
+  private trackedHands: TrackedHandState[] = [];
+  private nextHandTrackId: number = 1;
   private neutralAnchor: Landmark3D | null = null;
   private prevTimestamp: number = 0;
-  private smoothedLandmarks: Landmark3D[][] = [];
   private smoothedRotVel: { x: number; y: number } = { x: 0, y: 0 };
   private prevPinchState: boolean = false;
   private lastPinchTimestamp: number = 0;
@@ -57,6 +64,7 @@ export class GestureEngine {
   private committedDispersion: number = 0;
   private lastDispersionPhase: DispersionControlTelemetry['phase'] = 'COMPLETE';
   private hadHandsPreviously: boolean = false;
+  private twoHandExitStabilizeFrames: number = 0;
 
   // Gesture cooldown map to prevent rapid transient re-triggers
   private gestureCooldowns: Record<string, number> = {
@@ -113,8 +121,9 @@ export class GestureEngine {
 
   public recalibrateNeutral() {
     this.neutralAnchor = null;
-    this.prevCentroids = [];
+    this.trackedHands = [];
     this.smoothedRotVel = { x: 0, y: 0 };
+    this.twoHandExitStabilizeFrames = 0;
   }
 
   public getNeutralAnchor(): Landmark3D | null {
@@ -157,14 +166,14 @@ export class GestureEngine {
     if (!rawHands || rawHands.length === 0) {
       const wasTracking = this.hadHandsPreviously;
       this.hadHandsPreviously = false;
-      this.prevCentroids = [];
+      this.trackedHands = [];
       this.neutralAnchor = null;
       this.prevTwoHandDistance = null;
       this.smoothedTwoHandDistance = null;
       this.lastPinchCentroid = null;
       this.prevPinchState = false;
-      this.smoothedLandmarks = [];
       this.smoothedRotVel = { x: 0, y: 0 };
+      this.twoHandExitStabilizeFrames = 0;
       this.prevGesture = 'NONE';
       return {
         activeGesture: 'NONE',
@@ -179,14 +188,12 @@ export class GestureEngine {
     this.hadHandsPreviously = true;
     const detectedHands: DetectedHand[] = [];
     const alpha = this.calibration.smoothingFactor;
+    const prevTracked = this.trackedHands;
 
-    // Save previous frame centroids before updating so single-hand relative delta is exact
-    const previousFrameCentroids = this.prevCentroids.map((c) => ({ ...c }));
-
-    // Process each detected hand
-    for (let i = 0; i < rawHands.length; i++) {
-      const currentRaw = rawHands[i];
-      const handedness =
+    // Match incoming MediaPipe hands to persistent tracked identities by nearest centroid
+    // (with subtle handedness tie-breaker) so hand slot swaps never blend Left/Right hands.
+    const rawMeta = rawHands.map((currentRaw, i) => {
+      const handedness: 'Left' | 'Right' =
         rawHandedness && rawHandedness[i] && rawHandedness[i][0]
           ? (rawHandedness[i][0].displayName as 'Left' | 'Right')
           : i === 0
@@ -196,21 +203,63 @@ export class GestureEngine {
         rawHandedness && rawHandedness[i] && rawHandedness[i][0]
           ? rawHandedness[i][0].score
           : 0.85;
+      const rawCentroid: Landmark3D = {
+        x: (currentRaw[0].x + currentRaw[5].x + currentRaw[9].x + currentRaw[17].x) / 4,
+        y: (currentRaw[0].y + currentRaw[5].y + currentRaw[9].y + currentRaw[17].y) / 4,
+        z:
+          ((currentRaw[0].z || 0) +
+            (currentRaw[5].z || 0) +
+            (currentRaw[9].z || 0) +
+            (currentRaw[17].z || 0)) /
+          4
+      };
+      return { currentRaw, handedness, confidence, rawCentroid };
+    });
 
-      // Temporal landmark smoothing
-      if (!this.smoothedLandmarks[i]) {
-        this.smoothedLandmarks[i] = currentRaw.map((p) => ({ x: p.x, y: p.y, z: p.z || 0 }));
-      } else {
-        for (let j = 0; j < currentRaw.length; j++) {
-          this.smoothedLandmarks[i][j].x =
-            this.smoothedLandmarks[i][j].x * (1 - alpha) + currentRaw[j].x * alpha;
-          this.smoothedLandmarks[i][j].y =
-            this.smoothedLandmarks[i][j].y * (1 - alpha) + currentRaw[j].y * alpha;
-          this.smoothedLandmarks[i][j].z =
-            this.smoothedLandmarks[i][j].z * (1 - alpha) + (currentRaw[j].z || 0) * alpha;
+    const candidatePairs: Array<{ rawIdx: number; prevIdx: number; score: number }> = [];
+    for (let r = 0; r < rawMeta.length; r++) {
+      for (let p = 0; p < prevTracked.length; p++) {
+        const dx = rawMeta[r].rawCentroid.x - prevTracked[p].centroid.x;
+        const dy = rawMeta[r].rawCentroid.y - prevTracked[p].centroid.y;
+        const dist2d = Math.hypot(dx, dy);
+        if (dist2d <= 0.45) {
+          const handednessPenalty = rawMeta[r].handedness === prevTracked[p].handedness ? 0 : 0.05;
+          candidatePairs.push({ rawIdx: r, prevIdx: p, score: dist2d + handednessPenalty });
         }
       }
-      const landmarks = this.smoothedLandmarks[i];
+    }
+    candidatePairs.sort((a, b) => a.score - b.score);
+
+    const matchedPrevForRaw: Array<TrackedHandState | null> = new Array(rawMeta.length).fill(null);
+    const usedRaw = new Set<number>();
+    const usedPrev = new Set<number>();
+    for (const pair of candidatePairs) {
+      if (usedRaw.has(pair.rawIdx) || usedPrev.has(pair.prevIdx)) continue;
+      usedRaw.add(pair.rawIdx);
+      usedPrev.add(pair.prevIdx);
+      matchedPrevForRaw[pair.rawIdx] = prevTracked[pair.prevIdx];
+    }
+
+    const nextTrackedHands: TrackedHandState[] = [];
+    const prevCentroidsByRawIndex: Array<Landmark3D | null> = [];
+
+    // Process each detected hand using its persistent match
+    for (let i = 0; i < rawMeta.length; i++) {
+      const { currentRaw, handedness, confidence } = rawMeta[i];
+      const matchedPrev = matchedPrevForRaw[i];
+      const trackId = matchedPrev ? matchedPrev.id : this.nextHandTrackId++;
+
+      // Temporal landmark smoothing (never interpolate across different hands)
+      let landmarks: Landmark3D[];
+      if (!matchedPrev || matchedPrev.landmarks.length !== currentRaw.length) {
+        landmarks = currentRaw.map((p) => ({ x: p.x, y: p.y, z: p.z || 0 }));
+      } else {
+        landmarks = matchedPrev.landmarks.map((prevPt, j) => ({
+          x: prevPt.x * (1 - alpha) + currentRaw[j].x * alpha,
+          y: prevPt.y * (1 - alpha) + currentRaw[j].y * alpha,
+          z: prevPt.z * (1 - alpha) + (currentRaw[j].z || 0) * alpha
+        }));
+      }
 
       const wrist = landmarks[0];
       const thumbTip = landmarks[4];
@@ -226,17 +275,23 @@ export class GestureEngine {
         z: (wrist.z + landmarks[5].z + landmarks[9].z + landmarks[17].z) / 4
       };
 
-      // Frame-rate normalized velocity
+      // Frame-rate normalized velocity against THIS hand's previous centroid
       let velocity: Landmark3D = { x: 0, y: 0, z: 0 };
-      if (this.prevCentroids[i]) {
+      if (matchedPrev) {
         const timeFactor = 0.033 / dt;
         velocity = {
-          x: (centroid.x - this.prevCentroids[i].x) * timeFactor,
-          y: (centroid.y - this.prevCentroids[i].y) * timeFactor,
-          z: (centroid.z - this.prevCentroids[i].z) * timeFactor
+          x: (centroid.x - matchedPrev.centroid.x) * timeFactor,
+          y: (centroid.y - matchedPrev.centroid.y) * timeFactor,
+          z: (centroid.z - matchedPrev.centroid.z) * timeFactor
         };
       }
-      this.prevCentroids[i] = centroid;
+      prevCentroidsByRawIndex[i] = matchedPrev ? { ...matchedPrev.centroid } : null;
+      nextTrackedHands.push({
+        id: trackId,
+        handedness,
+        centroid,
+        landmarks
+      });
 
       // Distances from wrist to fingertips
       const dIndex = distance3D(wrist, indexTip);
@@ -299,6 +354,8 @@ export class GestureEngine {
       });
     }
 
+    this.trackedHands = nextTrackedHands;
+
     let activeGesture: GestureType = 'NONE';
     let description = 'Hand active';
     let deltaScale: number | undefined = undefined;
@@ -317,6 +374,10 @@ export class GestureEngine {
 
     // Priority 1 (Part 3 & Part 6): TWO-HAND SPATIAL ZOOM & PROGRESSIVE PARTICLE DISPERSION
     if (detectedHands.length >= 2) {
+      // Zero single-hand rotation inertia & arm exit stabilization whenever 2 hands are active
+      this.smoothedRotVel = { x: 0, y: 0 };
+      this.twoHandExitStabilizeFrames = 2;
+
       currentTwoHandDistance = distance3D(detectedHands[0].centroid, detectedHands[1].centroid);
       const dispAlpha = clamp(this.calibration.dispersionSmoothing, 0.08, 0.9);
       if (this.smoothedTwoHandDistance === null) {
@@ -389,13 +450,19 @@ export class GestureEngine {
 
     // Priority 2: Single-hand gesture evaluation
     if (activeGesture === 'NONE' && primaryHand) {
+      const isTransitionStabilizing = this.twoHandExitStabilizeFrames > 0;
+      if (isTransitionStabilizing) {
+        this.twoHandExitStabilizeFrames--;
+        this.smoothedRotVel = { x: 0, y: 0 };
+      }
+
       const vel = primaryHand.velocity;
 
       // Compute calibrated relative movement rotation (Right/Left + Up/Down)
-      const prevC = previousFrameCentroids[0];
+      const prevC = prevCentroidsByRawIndex[0];
       let effDx = 0;
       let effDy = 0;
-      if (prevC) {
+      if (prevC && !isTransitionStabilizing) {
         const rawDx = primaryHand.centroid.x - prevC.x;
         const signedDx = this.calibration.mirrorX ? -rawDx : rawDx;
         const rawDy = primaryHand.centroid.y - prevC.y;
@@ -407,20 +474,23 @@ export class GestureEngine {
         if (Math.abs(rawDy) > dzDead) {
           effDy = rawDy - Math.sign(rawDy) * dzDead;
         }
-      }
 
-      const rotAlpha = 0.45;
-      const maxSpeed = this.calibration.maxRotationSpeed;
-      const gain = this.calibration.rotationSensitivity;
-      const targetRy = clamp(effDx * gain, -maxSpeed, maxSpeed);
-      const targetRx = clamp(effDy * gain, -maxSpeed, maxSpeed);
-      this.smoothedRotVel.x = this.smoothedRotVel.x * (1 - rotAlpha) + targetRx * rotAlpha;
-      this.smoothedRotVel.y = this.smoothedRotVel.y * (1 - rotAlpha) + targetRy * rotAlpha;
+        const rotAlpha = 0.45;
+        const maxSpeed = this.calibration.maxRotationSpeed;
+        const gain = this.calibration.rotationSensitivity;
+        const targetRy = clamp(effDx * gain, -maxSpeed, maxSpeed);
+        const targetRx = clamp(effDy * gain, -maxSpeed, maxSpeed);
+        this.smoothedRotVel.x = this.smoothedRotVel.x * (1 - rotAlpha) + targetRx * rotAlpha;
+        this.smoothedRotVel.y = this.smoothedRotVel.y * (1 - rotAlpha) + targetRy * rotAlpha;
+      } else if (!prevC) {
+        this.smoothedRotVel = { x: 0, y: 0 };
+      }
 
       // Check K: HAND PUSH FORWARD (Rapid movement toward camera)
       if (vel.z < this.calibration.pushSensitivity && primaryHand.isOpenPalm) {
         if (this.checkCooldown('PUSH_FORWARD', timestamp)) {
           activeGesture = 'PUSH_FORWARD';
+          this.smoothedRotVel = { x: 0, y: 0 };
           description = 'Push Forward: Cinematic Energy Wave Triggered';
         }
       }
@@ -428,18 +498,21 @@ export class GestureEngine {
       else if (vel.z > this.calibration.pullSensitivity) {
         if (this.checkCooldown('PULL_BACK', timestamp)) {
           activeGesture = 'PULL_BACK';
+          this.smoothedRotVel = { x: 0, y: 0 };
           description = 'Pull Back: Reconstruct & Anchor Object';
         }
       }
-      // Check H: QUICK HAND SWIPES (Horizontal speed threshold)
-      else if (vel.x > this.calibration.swipeSensitivity && !primaryHand.isPinching) {
+      // Check H: QUICK HAND SWIPES (Horizontal speed threshold; suppressed during 2->1 hand stabilization)
+      else if (!isTransitionStabilizing && vel.x > this.calibration.swipeSensitivity && !primaryHand.isPinching) {
         if (this.checkCooldown('SWIPE_RIGHT', timestamp)) {
           activeGesture = 'SWIPE_RIGHT';
+          this.smoothedRotVel = { x: 0, y: 0 };
           description = 'Quick Swipe Right: Next Holographic Module';
         }
-      } else if (vel.x < -this.calibration.swipeSensitivity && !primaryHand.isPinching) {
+      } else if (!isTransitionStabilizing && vel.x < -this.calibration.swipeSensitivity && !primaryHand.isPinching) {
         if (this.checkCooldown('SWIPE_LEFT', timestamp)) {
           activeGesture = 'SWIPE_LEFT';
+          this.smoothedRotVel = { x: 0, y: 0 };
           description = 'Quick Swipe Left: Previous Holographic Module';
         }
       }
@@ -452,11 +525,13 @@ export class GestureEngine {
       // Check I: TWO-FINGER POINT
       else if (primaryHand.isPointing) {
         activeGesture = 'TWO_FINGER_POINT';
+        this.smoothedRotVel = { x: 0, y: 0 };
         description = 'Two-Finger Point: Precision Laser Control';
       }
       // Check E: ROTATE WRIST (When wrist tilt exceeds 0.38 rad from upright vertical)
       else if (Math.abs(primaryHand.wristRotation.roll) > 0.38) {
         activeGesture = 'ROTATE_WRIST';
+        this.smoothedRotVel = { x: 0, y: 0 };
         deltaRotation = {
           x: primaryHand.wristRotation.pitch * 0.08,
           y: primaryHand.wristRotation.roll * 0.1,
@@ -467,6 +542,7 @@ export class GestureEngine {
       }
       // Check J: DOUBLE PINCH
       else if (primaryHand.isPinching && !this.prevPinchState) {
+        this.smoothedRotVel = { x: 0, y: 0 };
         const timeSinceLastPinch =
           this.lastPinchTimestamp > 0 ? timestamp - this.lastPinchTimestamp : 99999;
         this.lastPinchCentroid = { ...primaryHand.centroid };
@@ -484,6 +560,7 @@ export class GestureEngine {
       }
       // Check C & D: PINCH and MOVE PINCHED HAND (True delta calculation)
       else if (primaryHand.isPinching) {
+        this.smoothedRotVel = { x: 0, y: 0 };
         if (!this.lastPinchCentroid) {
           this.lastPinchCentroid = { ...primaryHand.centroid };
           activeGesture = 'PINCH';
@@ -505,8 +582,8 @@ export class GestureEngine {
           }
         }
       }
-      // Check E2: CONTINUOUS HAND MOVEMENT -> SPHERE ROTATION (with dead zone -> zero drift)
-      else if (Math.abs(effDx) > 0 || Math.abs(effDy) > 0) {
+      // Check E2: CONTINUOUS HAND MOVEMENT -> SPHERE ROTATION (with dead zone & transition stabilization)
+      else if (!isTransitionStabilizing && (Math.abs(effDx) > 0 || Math.abs(effDy) > 0)) {
         activeGesture = 'SPHERE_ROTATE';
         sphericalRotationDelta = {
           x: this.smoothedRotVel.x,
@@ -527,6 +604,8 @@ export class GestureEngine {
       else if (primaryHand.isOpenPalm) {
         activeGesture = 'OPEN_PALM';
         description = 'Open Palm: Holographic System Active (Neutral Hold)';
+      } else if (isTransitionStabilizing) {
+        description = 'Optical Hand Transition Stabilizing';
       }
     }
 

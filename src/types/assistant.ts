@@ -2,8 +2,9 @@ export interface VoiceCommand {
   patterns: string[];
   description: string;
   category: 'NAVIGATION' | 'MANIPULATION' | 'CINEMATIC' | 'SYSTEM' | 'AI' | 'SPATIAL' | 'AUTOMATION';
-  action: (args?: string) => void;
+  action: (args?: string) => boolean | Promise<boolean> | void;
   feedbackText: string;
+  failureText?: string;
   requiresConfirmation?: boolean;
 }
 

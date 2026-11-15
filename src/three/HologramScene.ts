@@ -27,6 +27,22 @@ import {
   reconstructFromImageFiles
 } from './objects/ReconstructedHologram';
 
+function detectSoftwareWebGL(): boolean {
+  if (typeof document === 'undefined') return false;
+  try {
+    const probeCanvas = document.createElement('canvas');
+    const gl = probeCanvas.getContext('webgl2') || probeCanvas.getContext('webgl');
+    if (!gl) return false;
+    const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+    const unmaskedRenderer = debugInfo ? String(gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL)) : '';
+    const isSw = /SwiftShader|llvmpipe|softpipe|Software|Basic Render/i.test(unmaskedRenderer);
+    gl.getExtension('WEBGL_lose_context')?.loseContext();
+    return isSw;
+  } catch {
+    return false;
+  }
+}
+
 export class HologramSceneManager {
   private container: HTMLElement;
   private renderer: THREE.WebGLRenderer;
@@ -36,6 +52,9 @@ export class HologramSceneManager {
   private bloomPass: UnrealBloomPass | null = null;
   private isSoftwareGl: boolean = false;
   private animationFrameId: number | null = null;
+  private softwareTimeoutId: number | null = null;
+  private isDestroyed: boolean = false;
+  private contextLost: boolean = false;
   private clock: THREE.Clock;
   private raycaster: THREE.Raycaster;
 
@@ -60,22 +79,30 @@ export class HologramSceneManager {
 
   private lastUserInteractionTime: number = 0;
   private activeHandCentroid?: { x: number; y: number; z: number };
+  private pointerNdc: { x: number; y: number } = { x: 0, y: 0 };
+  private baseCameraZ: number = 6.55;
   private settings: HologramVisualSettings;
   private angularVelocity: THREE.Vector3 = new THREE.Vector3(0, 0, 0);
   private lastDispersionAmount: number = 0;
   private lastDispersionShockwaveTime: number = 0;
+  private initProgress: number = 1.0;
 
-  constructor(container: HTMLElement, initialSettings: HologramVisualSettings) {
+  constructor(container: HTMLElement, initialSettings: HologramVisualSettings, startAtInitZero = false) {
     this.container = container;
     this.settings = initialSettings;
     this.clock = new THREE.Clock();
     this.raycaster = new THREE.Raycaster();
+    this.initProgress = startAtInitZero ? 0.0 : 1.0;
 
-    // 1. Scene & Renderer
+    // 1. Detect software WebGL before renderer construction so antialias/DPR match capabilities
+    this.isSoftwareGl = detectSoftwareWebGL();
+
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x02070e);
+    this.scene.background = new THREE.Color(0x02060c);
+    this.scene.fog = new THREE.FogExp2(0x02060c, 0.024);
+
     this.renderer = new THREE.WebGLRenderer({
-      antialias: true,
+      antialias: !this.isSoftwareGl,
       alpha: false,
       powerPreference: 'high-performance'
     });
@@ -83,24 +110,18 @@ export class HologramSceneManager {
     const width = Math.max(1, container.clientWidth);
     const height = Math.max(1, container.clientHeight);
     this.renderer.setSize(width, height);
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.setPixelRatio(this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio || 1, 2));
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.2;
+    this.renderer.toneMappingExposure = 1.18;
     container.appendChild(this.renderer.domElement);
 
-    // Detect software WebGL rasterizers where multi-pass bloom degrades FPS
-    try {
-      const gl = this.renderer.getContext();
-      const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
-      const unmaskedRenderer = debugInfo ? String(gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL)) : '';
-      this.isSoftwareGl = /SwiftShader|llvmpipe|softpipe|Software|Basic Render/i.test(unmaskedRenderer);
-    } catch {
-      this.isSoftwareGl = false;
-    }
+    this.renderer.domElement.addEventListener('webglcontextlost', this.onContextLost);
+    this.renderer.domElement.addEventListener('webglcontextrestored', this.onContextRestored);
 
-    // 2. Camera
+    // 2. Camera (framed so Vision X sphere fills ~70% of viewport with generous cosmic breathing room)
     this.camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 100);
-    this.camera.position.set(0, 0, 7.8);
+    this.camera.position.set(0, 0, this.baseCameraZ);
+    this.camera.lookAt(0, 0, 0);
 
     // 3. Post-Processing Bloom Pipeline (skipped on software GL or reducedEffects mode)
     if (!this.isSoftwareGl && !initialSettings.reducedEffects) {
@@ -108,7 +129,7 @@ export class HologramSceneManager {
     }
 
     // 4. Lighting
-    const ambient = new THREE.AmbientLight(0x003355, 1.4);
+    const ambient = new THREE.AmbientLight(0x003355, 1.35);
     this.scene.add(ambient);
 
     const dirLight1 = new THREE.DirectionalLight(0x00f0ff, 2.2);
@@ -123,7 +144,7 @@ export class HologramSceneManager {
     pointLight.position.set(0, 0, 2);
     this.scene.add(pointLight);
 
-    // 5. Model Root & Spatial Manager (Default to VISION 1.2 CORE)
+    // 5. Model Root & Spatial Manager (Default to VISION X CORE)
     this.modelRoot = new THREE.Group();
     this.scene.add(this.modelRoot);
 
@@ -133,12 +154,14 @@ export class HologramSceneManager {
 
     // 6. Environmental & Cinematic Effects
     this.ringGimbals = new RingGimbalsEffect(colorHex);
+    this.ringGimbals.setVisionSphereActive(true);
     this.scene.add(this.ringGimbals.group);
 
     const initialParticles = initialSettings.reducedEffects
-      ? Math.min(1100, initialSettings.particleCount || 1100)
-      : initialSettings.particleCount || 1500;
+      ? Math.min(1200, initialSettings.particleCount || 1200)
+      : initialSettings.particleCount || 1800;
     this.particleField = new ParticleFieldEffect(initialParticles, colorHex);
+    this.particleField.setInitProgress(this.initProgress);
     this.scene.add(this.particleField.points);
 
     this.shockwave = new EnergyShockwaveEffect(colorHex);
@@ -155,14 +178,43 @@ export class HologramSceneManager {
     this.laserReticle.visible = false;
     this.scene.add(this.laserReticle);
 
-    // Apply initial visual settings cleanly
+    // Sync initial progress & visual settings
+    this.spatialManager.setInitializationProgress(this.initProgress);
     this.updateVisualSettings(initialSettings);
 
     // 9. Listeners
     window.addEventListener('resize', this.onWindowResize);
+    window.addEventListener('pointermove', this.onPointerMove);
+
+    if (typeof window !== 'undefined') {
+      (window as unknown as Record<string, unknown>).__JARVIS_SCENE__ = {
+        getModelId: () => this.getModelId(),
+        getDispersion: () => this.spatialManager.getSelected()?.visionSphereObj?.getDispersion() ?? this.lastDispersionAmount,
+        getStates: () => this.getSpatialStates(),
+        getInitProgress: () => this.initProgress,
+        setDispersion: (v: number) => this.setDispersion(v)
+      };
+    }
 
     this.animate();
   }
+
+  private onContextLost = (e: Event) => {
+    e.preventDefault();
+    this.contextLost = true;
+  };
+
+  private onContextRestored = () => {
+    this.contextLost = false;
+  };
+
+  private onPointerMove = (e: PointerEvent) => {
+    if (!this.container) return;
+    const rect = this.container.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    this.pointerNdc.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointerNdc.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+  };
 
   private initComposer(width: number, height: number, glowIntensity: number) {
     if (this.composer) return;
@@ -253,6 +305,16 @@ export class HologramSceneManager {
     }
   }
 
+  public setInitializationProgress(progress: number) {
+    this.initProgress = Math.max(0, Math.min(1, progress));
+    this.spatialManager.setInitializationProgress(this.initProgress);
+    this.particleField.setInitProgress(this.initProgress);
+  }
+
+  public skipInitialization() {
+    this.setInitializationProgress(1.0);
+  }
+
   // Model switching / creation
   public setModel(modelId: HologramModelId) {
     const selected = this.spatialManager.getSelected();
@@ -263,6 +325,9 @@ export class HologramSceneManager {
     } else {
       this.spatialManager.createInstance(modelId, new THREE.Vector3(0, 0, 0));
     }
+    this.spatialManager.setInitializationProgress(this.initProgress);
+    this.ringGimbals.setVisionSphereActive(modelId === 'vision_sphere');
+    this.triggerShockwave();
   }
 
   public getModelId(): HologramModelId {
@@ -330,12 +395,14 @@ export class HologramSceneManager {
       (Math.random() - 0.5) * 2,
       0
     );
-    return this.spatialManager.createInstance(modelId, defaultPos);
+    const inst = this.spatialManager.createInstance(modelId, defaultPos);
+    this.ringGimbals.setVisionSphereActive(this.getModelId() === 'vision_sphere');
+    return inst;
   }
 
-  // Reconstruction Lab: synthesize procedural preset specimen
   public synthesizePreset(presetId: ReconstructionPresetId): SpatialInstance {
     const { name, geometry } = buildPresetGeometry(presetId);
+    this.ringGimbals.setVisionSphereActive(false);
     return this.spatialManager.createReconstructedInstance(
       name,
       geometry,
@@ -344,10 +411,10 @@ export class HologramSceneManager {
     );
   }
 
-  // Reconstruction Lab: import local .GLB, .GLTF, .OBJ or .STL mesh
   public async importMeshFromFile(file: File): Promise<SpatialInstance> {
     const lower = file.name.toLowerCase();
     const cleanName = file.name.replace(/\.(glb|gltf|obj|stl)$/i, '').slice(0, 28) || 'Imported Model';
+    this.ringGimbals.setVisionSphereActive(false);
 
     if (lower.endsWith('.glb') || lower.endsWith('.gltf')) {
       const buf = await file.arrayBuffer();
@@ -379,9 +446,9 @@ export class HologramSceneManager {
     );
   }
 
-  // Honest Image / Multi-View Upload Reconstruction
   public async reconstructFromImages(files: File[]): Promise<SpatialInstance> {
     const { name, geometry, methodLabel } = await reconstructFromImageFiles(files);
+    this.ringGimbals.setVisionSphereActive(false);
     return this.spatialManager.createReconstructedInstance(
       name,
       geometry,
@@ -390,7 +457,6 @@ export class HologramSceneManager {
     );
   }
 
-  // Reconstruction Lab: capture live webcam frame into an illustrative 2.5D depth-relief mesh
   public reconstructFromVideo(videoEl: HTMLVideoElement): SpatialInstance | null {
     if (!videoEl || videoEl.readyState < 2) return null;
 
@@ -406,6 +472,7 @@ export class HologramSceneManager {
     const imageData = ctx.getImageData(0, 0, w, h);
     const geometry = buildDepthReliefGeometry(imageData.data, w, h, 48, 36);
     const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
+    this.ringGimbals.setVisionSphereActive(false);
     return this.spatialManager.createReconstructedInstance(
       `Optical Scan ${timestamp}`,
       geometry,
@@ -422,6 +489,7 @@ export class HologramSceneManager {
     const ok = this.spatialManager.disintegrate(id);
     if (ok) {
       this.ringGimbals.setCoreActivity({ energyBoost: 1.0 });
+      this.particleField.setDispersion(1.0);
       this.triggerShockwave();
     }
     return ok;
@@ -431,6 +499,7 @@ export class HologramSceneManager {
     const ok = this.spatialManager.reconstruct(id);
     if (ok) {
       this.ringGimbals.setCoreActivity({ energyBoost: 0.9 });
+      this.particleField.setDispersion(0.0);
     }
     return ok;
   }
@@ -440,8 +509,18 @@ export class HologramSceneManager {
     return this.spatialManager.triggerRotate360(id);
   }
 
-  public setCoreActivity(activity: { isListening?: boolean; isSpeaking?: boolean; energyBoost?: number }) {
+  public setCoreActivity(activity: {
+    isListening?: boolean;
+    isSpeaking?: boolean;
+    isProcessing?: boolean;
+    energyBoost?: number;
+  }) {
     this.ringGimbals.setCoreActivity(activity);
+    this.spatialManager.setCoreActivity({
+      isListening: activity.isListening,
+      isSpeaking: activity.isSpeaking,
+      isProcessing: activity.isProcessing
+    });
   }
 
   public getProjectedComponentLabels(): ComponentLabel2D[] {
@@ -492,6 +571,7 @@ export class HologramSceneManager {
 
   public selectObject(id: string | null) {
     this.spatialManager.select(id);
+    this.ringGimbals.setVisionSphereActive(this.getModelId() === 'vision_sphere');
   }
 
   public raycastSelect(ndcX: number, ndcY: number): string | null {
@@ -502,13 +582,13 @@ export class HologramSceneManager {
       const intersects = this.raycaster.intersectObjects(inst.modelGroup.children, true);
       if (intersects.length > 0) {
         this.spatialManager.select(inst.id);
+        this.ringGimbals.setVisionSphereActive(inst.modelId === 'vision_sphere');
         return inst.id;
       }
     }
     return null;
   }
 
-  // Precision 3D Laser Pointer / Two-Finger Point targeting reticle
   public updateLaserPointer(ndcX: number, ndcY: number, active: boolean): LaserTargetInfo | null {
     if (!active) {
       this.laserReticle.visible = false;
@@ -544,7 +624,6 @@ export class HologramSceneManager {
       };
     }
 
-    // Project onto Z=0 plane if no direct mesh hit
     const ray = this.raycaster.ray;
     if (Math.abs(ray.direction.z) > 0.001) {
       const t = -ray.origin.z / ray.direction.z;
@@ -619,7 +698,7 @@ export class HologramSceneManager {
     }
     if (settings.particleCount !== undefined || settings.reducedEffects !== undefined) {
       const targetCount = this.settings.reducedEffects
-        ? Math.min(1100, this.settings.particleCount)
+        ? Math.min(1200, this.settings.particleCount)
         : this.settings.particleCount;
       this.particleField.setParticleCount(targetCount);
       this.spatialManager.getAll().forEach((inst) => {
@@ -655,7 +734,6 @@ export class HologramSceneManager {
       );
     }
 
-    // Forward VISION 1.2 independent layer tuning parameters
     this.spatialManager.getAll().forEach((inst) => {
       inst.visionSphereObj?.setParameters({
         rotationSpeed: this.settings.rotationSpeed,
@@ -672,6 +750,7 @@ export class HologramSceneManager {
   public setDispersion(amount: number, phase?: DispersionPhase) {
     const clamped = Math.max(0, Math.min(1, amount));
     this.spatialManager.setGlobalDispersion(clamped, phase);
+    this.particleField.setDispersion(clamped);
     this.ringGimbals.setCoreActivity({ energyBoost: 0.25 + clamped * 0.65 });
     if (this.bloomPass) {
       this.bloomPass.strength = Math.min(0.95, 0.25 + this.settings.glowIntensity * 0.16 + clamped * 0.18);
@@ -750,7 +829,6 @@ export class HologramSceneManager {
     const selected = this.spatialManager.getSelected();
     if (!selected || selected.isLocked || selected.isFrozen) return;
 
-    // Immediate crisp response + smooth momentum impulse
     selected.targetRotation.x = Math.max(-1.35, Math.min(1.35, selected.targetRotation.x + rx));
     selected.targetRotation.y += ry;
     selected.targetRotation.z += rz;
@@ -758,6 +836,10 @@ export class HologramSceneManager {
     this.angularVelocity.x = Math.max(-0.08, Math.min(0.08, this.angularVelocity.x * 0.4 + rx * 0.45));
     this.angularVelocity.y = Math.max(-0.12, Math.min(0.12, this.angularVelocity.y * 0.4 + ry * 0.45));
     this.angularVelocity.z = Math.max(-0.06, Math.min(0.06, this.angularVelocity.z * 0.4 + rz * 0.35));
+  }
+
+  public clearRotationInertia() {
+    this.angularVelocity.set(0, 0, 0);
   }
 
   public applyScaleMultiplier(multiplier: number) {
@@ -784,17 +866,44 @@ export class HologramSceneManager {
     }
   };
 
+  private scheduleNextFrame() {
+    if (this.isDestroyed) return;
+    if (this.isSoftwareGl) {
+      // Yield macrotask on software GL (SwiftShader) so browser input/screenshot tasks never starve
+      this.softwareTimeoutId = window.setTimeout(() => {
+        if (!this.isDestroyed) {
+          this.animationFrameId = requestAnimationFrame(this.animate);
+        }
+      }, 0);
+    } else {
+      this.animationFrameId = requestAnimationFrame(this.animate);
+    }
+  }
+
   private animate = () => {
-    const delta = this.clock.getDelta();
+    if (this.isDestroyed) return;
+    const rawDelta = this.clock.getDelta();
+    const delta = Math.max(0.001, Math.min(0.1, rawDelta));
     const elapsedTime = this.clock.getElapsedTime();
     const now = performance.now();
 
     const speed = this.settings.rotationSpeed;
     const isUserActive = now - this.lastUserInteractionTime < 1200;
 
+    // Subtle spatial camera parallax (pointer + active hand centroid)
+    const targetCamX = this.activeHandCentroid
+      ? (this.activeHandCentroid.x - 0.5) * 0.65
+      : this.pointerNdc.x * 0.32;
+    const targetCamY = this.activeHandCentroid
+      ? -(this.activeHandCentroid.y - 0.5) * 0.45
+      : this.pointerNdc.y * 0.22;
+    this.camera.position.x = THREE.MathUtils.damp(this.camera.position.x, targetCamX, 4.5, delta);
+    this.camera.position.y = THREE.MathUtils.damp(this.camera.position.y, targetCamY, 4.5, delta);
+    this.camera.position.z = THREE.MathUtils.damp(this.camera.position.z, this.baseCameraZ, 4.5, delta);
+    this.camera.lookAt(0, 0, 0);
+
     const selected = this.spatialManager.getSelected();
     if (selected && !selected.isLocked && !selected.isFrozen) {
-      // Exponential rotational inertia & damping
       if (this.angularVelocity.lengthSq() > 1e-8) {
         selected.targetRotation.x = Math.max(
           -1.35,
@@ -803,13 +912,13 @@ export class HologramSceneManager {
         selected.targetRotation.y += this.angularVelocity.y;
         selected.targetRotation.z += this.angularVelocity.z;
 
-        const damp = Math.exp(-6.5 * Math.max(0.001, Math.min(0.1, delta)));
+        const damp = Math.exp(-6.5 * delta);
         this.angularVelocity.multiplyScalar(damp);
         if (this.angularVelocity.lengthSq() < 1e-7) {
           this.angularVelocity.set(0, 0, 0);
         }
       } else if (this.autoRotate && !isUserActive && speed > 0) {
-        selected.targetRotation.y += 0.008 * speed;
+        selected.targetRotation.y += 0.45 * speed * delta;
       }
     } else {
       this.angularVelocity.set(0, 0, 0);
@@ -826,22 +935,34 @@ export class HologramSceneManager {
       this.laserReticle.scale.set(pulse, pulse, pulse);
     }
 
-    if (this.composer && !this.isSoftwareGl && !this.settings.reducedEffects) {
-      this.composer.render();
-    } else {
-      this.renderer.render(this.scene, this.camera);
+    if (!this.contextLost) {
+      if (this.composer && !this.isSoftwareGl && !this.settings.reducedEffects) {
+        this.composer.render();
+      } else {
+        this.renderer.render(this.scene, this.camera);
+      }
     }
 
-    this.animationFrameId = requestAnimationFrame(this.animate);
+    this.scheduleNextFrame();
   };
 
   public destroy() {
+    this.isDestroyed = true;
     if (this.animationFrameId !== null) {
       cancelAnimationFrame(this.animationFrameId);
     }
+    if (this.softwareTimeoutId !== null) {
+      clearTimeout(this.softwareTimeoutId);
+    }
     window.removeEventListener('resize', this.onWindowResize);
+    window.removeEventListener('pointermove', this.onPointerMove);
+    this.renderer.domElement.removeEventListener('webglcontextlost', this.onContextLost);
+    this.renderer.domElement.removeEventListener('webglcontextrestored', this.onContextRestored);
+
     this.disposeComposer();
     this.spatialManager.clearAll();
+    this.ringGimbals.dispose();
+    this.particleField.dispose();
     this.renderer.dispose();
     if (this.container.contains(this.renderer.domElement)) {
       this.container.removeChild(this.renderer.domElement);

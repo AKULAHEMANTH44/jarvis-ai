@@ -355,7 +355,9 @@ export const RightDiagnosticsHUD: React.FC<RightDiagnosticsHUDProps> = ({
                     </span>
                   </div>
                   {(selectedObject?.modelId || currentModelId) === item.id && (
-                    <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping" />
+                    <span className="text-[9px] font-mono text-cyan-300 border border-cyan-400/50 px-1.5 py-0.5 rounded">
+                      ACTIVE
+                    </span>
                   )}
                 </button>
               ))}

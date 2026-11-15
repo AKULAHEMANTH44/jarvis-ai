@@ -334,4 +334,80 @@ describe('GestureEngine Phase 2 Technical Validation', () => {
     expect(resMid.dispersionControl?.dispersion).toBeLessThan(0.8);
     expect(resMid.dispersionControl?.phase).toBe('RECONSTRUCTING');
   });
+
+  it('prevents rotation spikes, swipe misfires, and cross-hand blending across SPHERE_ROTATE <-> TWO_HAND_ZOOM transitions', () => {
+    engine.updateCalibration({ smoothingFactor: 0.65, mirrorX: false });
+
+    // 1. Single hand rotating sphere strongly to the right -> builds up smoothedRotVel
+    const r0 = createMockLandmarks({ offsetX: 0.20 });
+    const r1 = createMockLandmarks({ offsetX: 0.24 });
+    engine.processResults(createMockResult([r0]), 100);
+    const spin = engine.processResults(createMockResult([r1]), 133);
+    expect(spin.activeGesture).toBe('SPHERE_ROTATE');
+    expect(spin.sphericalRotationDelta!.y).toBeGreaterThan(0);
+
+    // 2. Second hand (Left at -0.25) enters at slot 0, pushing Right (+0.24) to slot 1, then spreads apart -> TWO_HAND_ZOOM
+    const leftHand1 = createMockLandmarks({ offsetX: -0.25 });
+    const rightHand1 = createMockLandmarks({ offsetX: 0.24 });
+    engine.processResults(
+      {
+        landmarks: [leftHand1, rightHand1],
+        worldLandmarks: [leftHand1, rightHand1],
+        handednesses: [
+          [{ index: 0, score: 0.98, categoryName: 'Left', displayName: 'Left' }],
+          [{ index: 1, score: 0.98, categoryName: 'Right', displayName: 'Right' }]
+        ]
+      },
+      166
+    );
+    const leftHand2 = createMockLandmarks({ offsetX: -0.35 });
+    const rightHand2 = createMockLandmarks({ offsetX: 0.24 });
+    const zoom2 = engine.processResults(
+      {
+        landmarks: [leftHand2, rightHand2],
+        worldLandmarks: [leftHand2, rightHand2],
+        handednesses: [
+          [{ index: 0, score: 0.98, categoryName: 'Left', displayName: 'Left' }],
+          [{ index: 1, score: 0.98, categoryName: 'Right', displayName: 'Right' }]
+        ]
+      },
+      200
+    );
+    expect(zoom2.activeGesture).toBe('TWO_HAND_ZOOM');
+    expect(zoom2.sphericalRotationDelta).toBeUndefined();
+    // Slot matching preserves exact centroids without cross-hand Left/Right blending
+    expect(zoom2.hands[0].centroid.x).toBeCloseTo(0.18, 1);
+    expect(zoom2.hands[1].centroid.x).toBeCloseTo(0.74, 1);
+
+    // 3. Left hand leaves camera frame -> Right hand swaps back into rawHands[0]
+    const rightOnlyResult: HandLandmarkerResult = {
+      landmarks: [createMockLandmarks({ offsetX: 0.24 })],
+      worldLandmarks: [createMockLandmarks({ offsetX: 0.24 })],
+      handednesses: [[{ index: 0, score: 0.98, categoryName: 'Right', displayName: 'Right' }]]
+    };
+    const exitFrame1 = engine.processResults(rightOnlyResult, 200);
+    // Must stay matched to Right hand (~0.74), NOT interpolated from Left (~0.25)
+    expect(exitFrame1.hands[0].centroid.x).toBeCloseTo(0.74, 1);
+    expect(exitFrame1.sphericalRotationDelta).toBeUndefined();
+    expect(exitFrame1.activeGesture).not.toBe('SWIPE_RIGHT');
+    expect(exitFrame1.activeGesture).not.toBe('SPHERE_ROTATE');
+
+    // Second stabilization frame absorbs transition tremor without rotation spike
+    const exitFrame2 = engine.processResults(rightOnlyResult, 233);
+    expect(exitFrame2.sphericalRotationDelta).toBeUndefined();
+
+    // 4. Subsequent stationary hand does NOT replay stale rotational velocity from before TWO_HAND_ZOOM
+    const stationary = engine.processResults(rightOnlyResult, 266);
+    expect(stationary.sphericalRotationDelta).toBeUndefined();
+
+    // 5. Moving LEFT (-X) rotates smoothly negatively (zero stale +Y spike from step 1)
+    const moveLeftResult: HandLandmarkerResult = {
+      landmarks: [createMockLandmarks({ offsetX: 0.21 })],
+      worldLandmarks: [createMockLandmarks({ offsetX: 0.21 })],
+      handednesses: [[{ index: 0, score: 0.98, categoryName: 'Right', displayName: 'Right' }]]
+    };
+    const resumed = engine.processResults(moveLeftResult, 300);
+    expect(resumed.activeGesture).toBe('SPHERE_ROTATE');
+    expect(resumed.sphericalRotationDelta!.y).toBeLessThan(0);
+  });
 });

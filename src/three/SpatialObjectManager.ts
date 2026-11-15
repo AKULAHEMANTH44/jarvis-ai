@@ -471,12 +471,19 @@ export class SpatialObjectManager {
     );
   }
 
+  private refreshSelectionVisibility() {
+    const showMultiBox = this.instances.size > 1;
+    this.instances.forEach((inst) => {
+      inst.selectionBox.visible = showMultiBox && inst.isSelected && this.showBoundingBoxes;
+    });
+  }
+
   public select(id: string | null) {
     this.selectedInstanceId = id;
     this.instances.forEach((inst) => {
       inst.isSelected = inst.id === id;
-      inst.selectionBox.visible = inst.isSelected && this.showBoundingBoxes;
     });
+    this.refreshSelectionVisibility();
   }
 
   public getSelected(): SpatialInstance | null {
@@ -719,6 +726,9 @@ export class SpatialObjectManager {
       inst.reconstructedObj.setRenderMode(mode);
       return;
     }
+    if (inst.visionSphereObj) {
+      return;
+    }
 
     inst.modelGroup.traverse((child) => {
       if (child instanceof THREE.Mesh) {
@@ -743,8 +753,22 @@ export class SpatialObjectManager {
 
   public setShowBoundingBoxes(show: boolean) {
     this.showBoundingBoxes = show;
+    this.refreshSelectionVisibility();
+  }
+
+  public setInitializationProgress(progress: number) {
     this.instances.forEach((inst) => {
-      inst.selectionBox.visible = inst.isSelected && show;
+      inst.visionSphereObj?.setInitProgress(progress);
+    });
+  }
+
+  public setCoreActivity(activity: {
+    isListening?: boolean;
+    isSpeaking?: boolean;
+    isProcessing?: boolean;
+  }) {
+    this.instances.forEach((inst) => {
+      inst.visionSphereObj?.setCoreActivity(activity);
     });
   }
 
@@ -939,7 +963,8 @@ export class SpatialObjectManager {
   }
 
   public update(time: number, speedMultiplier: number = 1.0, delta: number = 0.016) {
-    const lerpFactor = 0.12;
+    const clampedDt = Math.max(0.001, Math.min(0.1, delta));
+    const lerpFactor = 1 - Math.exp(-8.5 * clampedDt);
 
     this.instances.forEach((inst) => {
       inst.currentPosition.lerp(inst.targetPosition, lerpFactor);
@@ -953,7 +978,7 @@ export class SpatialObjectManager {
       inst.currentRotation.z += (inst.targetRotation.z - inst.currentRotation.z) * lerpFactor;
       inst.group.rotation.copy(inst.currentRotation);
 
-      if (inst.isSelected) {
+      if (inst.selectionBox.visible) {
         inst.selectionBox.rotation.y += inst.isFrozen ? 0.002 : 0.015;
       }
 
