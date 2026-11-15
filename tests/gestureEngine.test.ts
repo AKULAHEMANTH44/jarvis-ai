@@ -10,13 +10,16 @@ function createMockLandmarks(options: {
   isPointing?: boolean;
   offsetZ?: number;
   offsetX?: number;
+  rollAngle?: number; // angle in radians from vertical
 }) {
   const {
     isPinching = false,
     isOpenPalm = false,
     isFist = false,
+    isPointing = false,
     offsetZ = 0,
-    offsetX = 0
+    offsetX = 0,
+    rollAngle = 0
   } = options;
 
   // 21 landmarks
@@ -25,22 +28,47 @@ function createMockLandmarks(options: {
   // Wrist at (0.5, 0.8)
   landmarks[0] = { x: 0.5 + offsetX, y: 0.8, z: offsetZ };
 
+  // Middle MCP (9) positioned relative to wrist according to rollAngle
+  const mcpDist = 0.35;
+  const rad = -Math.PI / 2 + rollAngle;
+  landmarks[9] = {
+    x: landmarks[0].x + Math.cos(rad) * mcpDist,
+    y: landmarks[0].y + Math.sin(rad) * mcpDist,
+    z: offsetZ
+  };
+  landmarks[5] = { x: landmarks[9].x - 0.08, y: landmarks[9].y, z: offsetZ };
+  landmarks[17] = { x: landmarks[9].x + 0.08, y: landmarks[9].y, z: offsetZ };
+
+  // Default relaxed natural pose (separated fingers, no accidental pinch)
+  landmarks[4] = { x: landmarks[9].x - 0.15, y: landmarks[9].y - 0.1, z: offsetZ }; // Thumb
+  landmarks[8] = { x: landmarks[9].x - 0.04, y: landmarks[9].y - 0.18, z: offsetZ }; // Index
+  landmarks[12] = { x: landmarks[9].x, y: landmarks[9].y - 0.19, z: offsetZ }; // Middle
+  landmarks[16] = { x: landmarks[9].x + 0.05, y: landmarks[9].y - 0.17, z: offsetZ }; // Ring
+  landmarks[20] = { x: landmarks[9].x + 0.12, y: landmarks[9].y - 0.14, z: offsetZ }; // Pinky
+
   if (isOpenPalm) {
     // Fingertips extended far from wrist
-    landmarks[4] = { x: 0.3 + offsetX, y: 0.4, z: offsetZ }; // Thumb
-    landmarks[8] = { x: 0.45 + offsetX, y: 0.2, z: offsetZ }; // Index
-    landmarks[12] = { x: 0.5 + offsetX, y: 0.18, z: offsetZ }; // Middle
-    landmarks[16] = { x: 0.55 + offsetX, y: 0.22, z: offsetZ }; // Ring
-    landmarks[20] = { x: 0.65 + offsetX, y: 0.25, z: offsetZ }; // Pinky
+    landmarks[4] = { x: landmarks[9].x - 0.2, y: landmarks[9].y - 0.15, z: offsetZ }; // Thumb
+    landmarks[8] = { x: landmarks[9].x - 0.06, y: landmarks[9].y - 0.3, z: offsetZ }; // Index
+    landmarks[12] = { x: landmarks[9].x, y: landmarks[9].y - 0.32, z: offsetZ }; // Middle
+    landmarks[16] = { x: landmarks[9].x + 0.06, y: landmarks[9].y - 0.28, z: offsetZ }; // Ring
+    landmarks[20] = { x: landmarks[9].x + 0.15, y: landmarks[9].y - 0.22, z: offsetZ }; // Pinky
   } else if (isFist) {
-    // Fingertips curled right at palm/wrist
-    landmarks[4] = { x: 0.48 + offsetX, y: 0.75, z: offsetZ };
-    landmarks[8] = { x: 0.49 + offsetX, y: 0.74, z: offsetZ };
-    landmarks[12] = { x: 0.5 + offsetX, y: 0.74, z: offsetZ };
-    landmarks[16] = { x: 0.51 + offsetX, y: 0.75, z: offsetZ };
-    landmarks[20] = { x: 0.52 + offsetX, y: 0.76, z: offsetZ };
+    // Fingertips curled right at wrist
+    landmarks[4] = { x: landmarks[0].x - 0.02, y: landmarks[0].y - 0.05, z: offsetZ };
+    landmarks[8] = { x: landmarks[0].x - 0.01, y: landmarks[0].y - 0.06, z: offsetZ };
+    landmarks[12] = { x: landmarks[0].x, y: landmarks[0].y - 0.06, z: offsetZ };
+    landmarks[16] = { x: landmarks[0].x + 0.01, y: landmarks[0].y - 0.05, z: offsetZ };
+    landmarks[20] = { x: landmarks[0].x + 0.02, y: landmarks[0].y - 0.04, z: offsetZ };
+  } else if (isPointing) {
+    // Index and middle extended, ring and pinky curled
+    landmarks[4] = { x: landmarks[0].x - 0.05, y: landmarks[0].y - 0.1, z: offsetZ };
+    landmarks[8] = { x: landmarks[9].x - 0.05, y: landmarks[9].y - 0.28, z: offsetZ };
+    landmarks[12] = { x: landmarks[9].x, y: landmarks[9].y - 0.29, z: offsetZ };
+    landmarks[16] = { x: landmarks[0].x + 0.02, y: landmarks[0].y - 0.05, z: offsetZ };
+    landmarks[20] = { x: landmarks[0].x + 0.03, y: landmarks[0].y - 0.04, z: offsetZ };
   } else if (isPinching) {
-    // Thumb tip and Index tip touching (distance < 0.03)
+    // Thumb tip and Index tip touching
     landmarks[4] = { x: 0.45 + offsetX, y: 0.5, z: offsetZ };
     landmarks[8] = { x: 0.455 + offsetX, y: 0.505, z: offsetZ };
   }
@@ -61,11 +89,12 @@ function createMockResult(hands: ReturnType<typeof createMockLandmarks>[]): Hand
   };
 }
 
-describe('GestureEngine', () => {
+describe('GestureEngine Phase 2 Technical Validation', () => {
   let engine: GestureEngine;
 
   beforeEach(() => {
     engine = new GestureEngine();
+    engine.resetCalibrationToDefaults();
   });
 
   it('detects OPEN_PALM when all fingers are extended', () => {
@@ -82,11 +111,47 @@ describe('GestureEngine', () => {
     expect(result.hands[0].isFist).toBe(true);
   });
 
-  it('detects PINCH when thumb and index tips are close', () => {
-    const hand = createMockLandmarks({ isPinching: true });
-    const result = engine.processResults(createMockResult([hand]), 100);
-    expect(result.activeGesture).toBe('PINCH');
-    expect(result.hands[0].isPinching).toBe(true);
+  it('detects PINCH and produces valid frame-by-frame delta translations for MOVE_PINCHED', () => {
+    // Frame 1: Initial pinch grab
+    const h1 = createMockLandmarks({ isPinching: true, offsetX: 0 });
+    const r1 = engine.processResults(createMockResult([h1]), 100);
+    expect(r1.activeGesture).toBe('PINCH');
+    expect(r1.hands[0].isPinching).toBe(true);
+
+    // Frame 2: Move pinched hand slightly to right (X + 0.05)
+    const h2 = createMockLandmarks({ isPinching: true, offsetX: 0.05 });
+    const r2 = engine.processResults(createMockResult([h2]), 133);
+    expect(r2.activeGesture).toBe('MOVE_PINCHED');
+    expect(r2.deltaTranslation).toBeDefined();
+    expect(r2.deltaTranslation!.x).toBeGreaterThan(0);
+
+    // Frame 3: Move pinched hand slightly further (X + 0.07)
+    const h3 = createMockLandmarks({ isPinching: true, offsetX: 0.07 });
+    const r3 = engine.processResults(createMockResult([h3]), 166);
+    expect(r3.activeGesture).toBe('MOVE_PINCHED');
+    // Frame delta should be ~ (0.07 - 0.05) * 6 = 0.12, NOT cumulative runaway
+    expect(r3.deltaTranslation!.x).toBeCloseTo(0.12, 1);
+  });
+
+  it('accurately normalizes wrist roll: upright hand is 0, tilted is non-zero', () => {
+    // Upright hand
+    const uprightHand = createMockLandmarks({ rollAngle: 0 });
+    const rUpright = engine.processResults(createMockResult([uprightHand]), 100);
+    expect(rUpright.hands[0].wristRotation.roll).toBeCloseTo(0, 1);
+
+    // Hand tilted 45 degrees (+0.785 rad) on fresh engine
+    const tiltedEngine = new GestureEngine();
+    const tiltedHand = createMockLandmarks({ rollAngle: 0.785 });
+    const rTilted = tiltedEngine.processResults(createMockResult([tiltedHand]), 100);
+    expect(rTilted.hands[0].wristRotation.roll).toBeCloseTo(0.785, 1);
+    expect(rTilted.activeGesture).toBe('ROTATE_WRIST');
+  });
+
+  it('detects TWO_FINGER_POINT when index and middle are extended and others curled', () => {
+    const pointHand = createMockLandmarks({ isPointing: true });
+    const result = engine.processResults(createMockResult([pointHand]), 100);
+    expect(result.activeGesture).toBe('TWO_FINGER_POINT');
+    expect(result.hands[0].isPointing).toBe(true);
   });
 
   it('detects TWO_OPEN_PALMS when both hands are open', () => {
@@ -97,13 +162,11 @@ describe('GestureEngine', () => {
     expect(result.hands.length).toBe(2);
   });
 
-  it('detects TWO_HAND_ZOOM when distance between hands changes', () => {
-    // Frame 1: distance = 0.4
+  it('detects TWO_HAND_ZOOM when distance between hands changes smoothly', () => {
     const h1 = createMockLandmarks({ isOpenPalm: false, offsetX: -0.2 });
     const h2 = createMockLandmarks({ isOpenPalm: false, offsetX: 0.2 });
     engine.processResults(createMockResult([h1, h2]), 100);
 
-    // Frame 2: distance expands to 0.6
     const h1Expanded = createMockLandmarks({ isOpenPalm: false, offsetX: -0.3 });
     const h2Expanded = createMockLandmarks({ isOpenPalm: false, offsetX: 0.3 });
     const result2 = engine.processResults(createMockResult([h1Expanded, h2Expanded]), 200);
@@ -112,32 +175,48 @@ describe('GestureEngine', () => {
     expect(result2.deltaScale).toBeGreaterThan(1.0);
   });
 
-  it('detects PUSH_FORWARD on rapid negative Z velocity with open palm', () => {
-    // Frame 1 at z = 0.5
+  it('enforces gesture cooldown on transient actions like PUSH_FORWARD and SWIPE', () => {
+    // Frame 1: Hand push forward
     const h1 = createMockLandmarks({ isOpenPalm: true, offsetZ: 0.5 });
     engine.processResults(createMockResult([h1]), 100);
 
-    // Frame 2 at z = 0.1 (moved rapidly toward camera)
+    // Frame 2 at z = 0.1 -> triggers PUSH_FORWARD
     const h2 = createMockLandmarks({ isOpenPalm: true, offsetZ: 0.1 });
-    const result2 = engine.processResults(createMockResult([h2]), 200);
+    const r2 = engine.processResults(createMockResult([h2]), 133);
+    expect(r2.activeGesture).toBe('PUSH_FORWARD');
 
-    expect(result2.activeGesture).toBe('PUSH_FORWARD');
+    // Frame 3 only 50ms later -> cooldown should prevent duplicate shockwave trigger
+    const h3 = createMockLandmarks({ isOpenPalm: true, offsetZ: 0.05 });
+    const r3 = engine.processResults(createMockResult([h3]), 183);
+    expect(r3.activeGesture).not.toBe('PUSH_FORWARD');
   });
 
-  it('detects PULL_BACK on rapid positive Z velocity', () => {
-    // Frame 1 at z = 0.1
+  it('detects PULL_BACK on rapid positive Z movement away from camera', () => {
     const h1 = createMockLandmarks({ isOpenPalm: false, offsetZ: 0.1 });
-    engine.processResults(createMockResult([h1]), 100);
+    engine.processResults(createMockResult([h1]), 1000);
 
-    // Frame 2 at z = 0.5 (pulled away from camera)
     const h2 = createMockLandmarks({ isOpenPalm: false, offsetZ: 0.5 });
-    const result2 = engine.processResults(createMockResult([h2]), 200);
-
-    expect(result2.activeGesture).toBe('PULL_BACK');
+    const r2 = engine.processResults(createMockResult([h2]), 1033);
+    expect(r2.activeGesture).toBe('PULL_BACK');
   });
 
-  it('updates calibration settings dynamically', () => {
-    engine.updateCalibration({ pinchThreshold: 0.08 });
-    expect(engine.getCalibration().pinchThreshold).toBe(0.08);
+  it('handles hand-loss recovery cleanly when hand leaves sensor frame', () => {
+    const hand = createMockLandmarks({ isPinching: true });
+    engine.processResults(createMockResult([hand]), 100);
+
+    // Hand leaves camera frame completely
+    const emptyResult = engine.processResults(createMockResult([]), 133);
+    expect(emptyResult.activeGesture).toBe('NONE');
+    expect(emptyResult.hands.length).toBe(0);
+    expect(emptyResult.description).toContain('Awaiting');
+  });
+
+  it('persists and restores calibration parameters', () => {
+    engine.saveCalibration({ pinchThreshold: 0.095, pushSensitivity: -0.05 });
+    expect(engine.getCalibration().pinchThreshold).toBe(0.095);
+    expect(engine.getCalibration().pushSensitivity).toBe(-0.05);
+
+    const restored = engine.resetCalibrationToDefaults();
+    expect(restored.pinchThreshold).toBe(DEFAULT_CALIBRATION.pinchThreshold);
   });
 });

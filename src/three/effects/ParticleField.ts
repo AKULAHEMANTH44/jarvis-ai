@@ -7,16 +7,16 @@ export class ParticleFieldEffect {
   private originalPositions: Float32Array;
   private velocities: Float32Array;
 
-  constructor(count = 1200, colorThemeHex = 0x00f0ff) {
+  constructor(count = 1500, colorThemeHex = 0x00f0ff) {
     this.count = count;
     this.positions = new Float32Array(count * 3);
     this.originalPositions = new Float32Array(count * 3);
     this.velocities = new Float32Array(count * 3);
 
     for (let i = 0; i < count; i++) {
-      const x = (Math.random() - 0.5) * 18;
-      const y = (Math.random() - 0.5) * 12;
-      const z = (Math.random() - 0.5) * 14;
+      const x = (Math.random() - 0.5) * 20;
+      const y = (Math.random() - 0.5) * 14;
+      const z = (Math.random() - 0.5) * 16;
 
       this.positions[i * 3] = x;
       this.positions[i * 3 + 1] = y;
@@ -26,9 +26,9 @@ export class ParticleFieldEffect {
       this.originalPositions[i * 3 + 1] = y;
       this.originalPositions[i * 3 + 2] = z;
 
-      this.velocities[i * 3] = (Math.random() - 0.5) * 0.05;
-      this.velocities[i * 3 + 1] = (Math.random() - 0.5) * 0.05;
-      this.velocities[i * 3 + 2] = (Math.random() - 0.5) * 0.05;
+      this.velocities[i * 3] = (Math.random() - 0.5) * 0.04;
+      this.velocities[i * 3 + 1] = (Math.random() - 0.5) * 0.04;
+      this.velocities[i * 3 + 2] = (Math.random() - 0.5) * 0.04;
     }
 
     const geo = new THREE.BufferGeometry();
@@ -36,9 +36,9 @@ export class ParticleFieldEffect {
 
     const mat = new THREE.PointsMaterial({
       color: colorThemeHex,
-      size: 0.06,
+      size: 0.07,
       transparent: true,
-      opacity: 0.65,
+      opacity: 0.7,
       blending: THREE.AdditiveBlending
     });
 
@@ -51,25 +51,40 @@ export class ParticleFieldEffect {
 
   public update(time: number, handCentroid?: { x: number; y: number; z: number }) {
     for (let i = 0; i < this.count; i++) {
-      // Gentle idle harmonic drifting
-      this.positions[i * 3] = this.originalPositions[i * 3] + Math.sin(time * 0.8 + i) * 0.25;
-      this.positions[i * 3 + 1] = this.originalPositions[i * 3 + 1] + Math.cos(time * 0.6 + i * 2) * 0.25;
-      this.positions[i * 3 + 2] = this.originalPositions[i * 3 + 2] + Math.sin(time * 0.4 + i * 3) * 0.25;
+      // Harmonic idle floating
+      const ox = this.originalPositions[i * 3];
+      const oy = this.originalPositions[i * 3 + 1];
+      const oz = this.originalPositions[i * 3 + 2];
 
-      // Subtle hand interaction repulsion if hand is nearby
+      let targetX = ox + Math.sin(time * 0.7 + i * 0.5) * 0.35;
+      let targetY = oy + Math.cos(time * 0.5 + i * 0.7) * 0.35;
+      let targetZ = oz + Math.sin(time * 0.3 + i * 1.1) * 0.35;
+
+      // Real-time hand proximity displacement (parting effect)
       if (handCentroid) {
-        // Map 0..1 hand coords to 3D space: x: -5..5, y: -4..4
-        const hx = (handCentroid.x - 0.5) * 10;
-        const hy = -(handCentroid.y - 0.5) * 8;
-        const dx = this.positions[i * 3] - hx;
-        const dy = this.positions[i * 3 + 1] - hy;
-        const distSq = dx * dx + dy * dy;
-        if (distSq < 4.0 && distSq > 0.01) {
-          const force = (2.0 - Math.sqrt(distSq)) * 0.15;
-          this.positions[i * 3] += (dx / Math.sqrt(distSq)) * force;
-          this.positions[i * 3 + 1] += (dy / Math.sqrt(distSq)) * force;
+        // Map normalized hand coords [0..1] to Three.js world space
+        const hx = (handCentroid.x - 0.5) * 12;
+        const hy = -(handCentroid.y - 0.5) * 9;
+        const hz = (handCentroid.z || 0) * 8;
+
+        const dx = targetX - hx;
+        const dy = targetY - hy;
+        const dz = targetZ - hz;
+        const distSq = dx * dx + dy * dy + dz * dz;
+
+        if (distSq < 6.0 && distSq > 0.04) {
+          const dist = Math.sqrt(distSq);
+          const force = (2.45 - dist) * 0.28;
+          targetX += (dx / dist) * force;
+          targetY += (dy / dist) * force;
+          targetZ += (dz / dist) * force;
         }
       }
+
+      // Smooth interpolation towards target position
+      this.positions[i * 3] += (targetX - this.positions[i * 3]) * 0.1;
+      this.positions[i * 3 + 1] += (targetY - this.positions[i * 3 + 1]) * 0.1;
+      this.positions[i * 3 + 2] += (targetZ - this.positions[i * 3 + 2]) * 0.1;
     }
     this.points.geometry.attributes.position.needsUpdate = true;
   }

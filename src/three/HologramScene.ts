@@ -31,7 +31,7 @@ export class HologramSceneManager {
   private particleField: ParticleFieldEffect;
   private ringGimbals: RingGimbalsEffect;
 
-  // Transforms & Inertia
+  // Transforms & Interpolation
   public targetPosition = new THREE.Vector3(0, 0, 0);
   public currentPosition = new THREE.Vector3(0, 0, 0);
   public targetRotation = new THREE.Euler(0, 0, 0);
@@ -41,7 +41,10 @@ export class HologramSceneManager {
   public autoRotate: boolean = true;
   public rotationSpeed: number = 1.0;
 
-  private isDragging: boolean = false;
+  // User manipulation pause
+  private lastUserInteractionTime: number = 0;
+  private activeHandCentroid?: { x: number; y: number; z: number };
+
   private settings: HologramVisualSettings;
 
   constructor(container: HTMLElement, initialSettings: HologramVisualSettings) {
@@ -59,7 +62,7 @@ export class HologramSceneManager {
     this.renderer.setSize(container.clientWidth, container.clientHeight);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.2;
+    this.renderer.toneMappingExposure = 1.25;
     container.appendChild(this.renderer.domElement);
 
     // 2. Camera
@@ -72,18 +75,18 @@ export class HologramSceneManager {
     this.camera.position.set(0, 0, 7.5);
 
     // 3. Lighting
-    const ambient = new THREE.AmbientLight(0x003355, 1.2);
+    const ambient = new THREE.AmbientLight(0x003355, 1.4);
     this.scene.add(ambient);
 
-    const dirLight1 = new THREE.DirectionalLight(0x00f0ff, 2.0);
+    const dirLight1 = new THREE.DirectionalLight(0x00f0ff, 2.2);
     dirLight1.position.set(5, 5, 5);
     this.scene.add(dirLight1);
 
-    const dirLight2 = new THREE.DirectionalLight(0x0077ff, 1.5);
+    const dirLight2 = new THREE.DirectionalLight(0x0077ff, 1.6);
     dirLight2.position.set(-5, -3, 3);
     this.scene.add(dirLight2);
 
-    const pointLight = new THREE.PointLight(0xffffff, 2.0, 12);
+    const pointLight = new THREE.PointLight(0xffffff, 2.2, 14);
     pointLight.position.set(0, 0, 2);
     this.scene.add(pointLight);
 
@@ -91,7 +94,6 @@ export class HologramSceneManager {
     this.modelRoot = new THREE.Group();
     this.scene.add(this.modelRoot);
 
-    // Color theme hex
     const colorHex = this.getThemeHex(initialSettings.colorTheme);
 
     // Instantiate 3D Models
@@ -101,7 +103,6 @@ export class HologramSceneManager {
     this.holoGlobe = new HolographicGlobeObject(colorHex);
     this.molecularHelix = new MolecularHelixObject(colorHex);
 
-    // Add all to root, make default visible
     this.modelRoot.add(this.arcReactor.group);
     this.modelRoot.add(this.tesseract.group);
     this.modelRoot.add(this.ironArmor.group);
@@ -114,16 +115,16 @@ export class HologramSceneManager {
     this.ringGimbals = new RingGimbalsEffect(colorHex);
     this.scene.add(this.ringGimbals.group);
 
-    this.particleField = new ParticleFieldEffect(1200, colorHex);
+    this.particleField = new ParticleFieldEffect(1500, colorHex);
     this.scene.add(this.particleField.points);
 
     this.shockwave = new EnergyShockwaveEffect(colorHex);
     this.scene.add(this.shockwave.group);
 
-    // 6. Event Listeners
+    // 6. Resize listener
     window.addEventListener('resize', this.onWindowResize);
 
-    // Start Render Loop
+    // Start loop
     this.animate();
   }
 
@@ -146,7 +147,7 @@ export class HologramSceneManager {
     this.molecularHelix.group.visible = modelId === 'molecular_dna';
 
     // Model entrance pop animation
-    this.currentScale = 0.4;
+    this.currentScale = 0.35;
   }
 
   public getModelId(): HologramModelId {
@@ -203,34 +204,45 @@ export class HologramSceneManager {
     }
   }
 
+  public setHandCentroid(centroid?: { x: number; y: number; z: number }) {
+    this.activeHandCentroid = centroid;
+  }
+
   public triggerShockwave() {
     this.shockwave.trigger(this.modelRoot.position.clone());
   }
 
   public resetTransform() {
     this.targetPosition.set(0, 0, 0);
+    // Normalize current rotation angles to [-PI, PI] to prevent infinite backward spin
+    this.currentRotation.x = (this.currentRotation.x % (Math.PI * 2));
+    this.currentRotation.y = (this.currentRotation.y % (Math.PI * 2));
+    this.currentRotation.z = (this.currentRotation.z % (Math.PI * 2));
     this.targetRotation.set(0, 0, 0);
     this.targetScale = 1.0;
   }
 
   public applyDeltaTranslation(dx: number, dy: number, dz: number) {
+    this.lastUserInteractionTime = performance.now();
     this.targetPosition.x += dx;
     this.targetPosition.y += dy;
     this.targetPosition.z += dz;
 
-    // Constrain within bounds
+    // Viewport bounds clamping
     this.targetPosition.x = Math.max(-3.5, Math.min(3.5, this.targetPosition.x));
     this.targetPosition.y = Math.max(-2.5, Math.min(2.5, this.targetPosition.y));
     this.targetPosition.z = Math.max(-2.0, Math.min(2.0, this.targetPosition.z));
   }
 
   public applyDeltaRotation(rx: number, ry: number, rz: number) {
+    this.lastUserInteractionTime = performance.now();
     this.targetRotation.x += rx;
     this.targetRotation.y += ry;
     this.targetRotation.z += rz;
   }
 
   public applyScaleMultiplier(multiplier: number) {
+    this.lastUserInteractionTime = performance.now();
     this.targetScale *= multiplier;
     this.targetScale = Math.max(0.4, Math.min(2.8, this.targetScale));
   }
@@ -247,8 +259,9 @@ export class HologramSceneManager {
   private animate = () => {
     const delta = this.clock.getDelta();
     const elapsedTime = this.clock.getElapsedTime();
+    const now = performance.now();
 
-    // Smooth transform damping (Interpolation / Lerp)
+    // Smooth transform damping
     const lerpFactor = 0.12;
     this.currentPosition.lerp(this.targetPosition, lerpFactor);
     this.modelRoot.position.copy(this.currentPosition);
@@ -260,10 +273,12 @@ export class HologramSceneManager {
     const levitationY = Math.sin(elapsedTime * 1.5) * 0.08;
     this.modelRoot.position.y += levitationY;
 
-    // Rotation interpolation
-    if (this.autoRotate) {
+    // Auto-rotation resumes only when user hasn't actively manipulated within 1.2 seconds
+    const isUserActive = (now - this.lastUserInteractionTime) < 1200;
+    if (this.autoRotate && !isUserActive) {
       this.targetRotation.y += 0.008 * this.rotationSpeed;
     }
+
     this.currentRotation.x += (this.targetRotation.x - this.currentRotation.x) * lerpFactor;
     this.currentRotation.y += (this.targetRotation.y - this.currentRotation.y) * lerpFactor;
     this.currentRotation.z += (this.targetRotation.z - this.currentRotation.z) * lerpFactor;
@@ -283,9 +298,9 @@ export class HologramSceneManager {
       this.molecularHelix.update(elapsedTime, speed);
     }
 
-    // Update Environmental Effects
+    // Update Environmental Effects with active hand proximity
     this.ringGimbals.update(elapsedTime, speed);
-    this.particleField.update(elapsedTime);
+    this.particleField.update(elapsedTime, this.activeHandCentroid);
     this.shockwave.update(delta);
 
     // Render Scene

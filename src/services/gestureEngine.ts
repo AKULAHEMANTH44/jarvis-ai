@@ -14,11 +14,13 @@ export const DEFAULT_CALIBRATION: GestureCalibrationSettings = {
   smoothingFactor: 0.65,
   pushSensitivity: -0.035, // Negative delta Z = moving toward camera
   pullSensitivity: 0.035,  // Positive delta Z = moving away from camera
-  swipeSensitivity: 0.06
+  swipeSensitivity: 0.055
 };
 
+const STORAGE_KEY = 'jarvis_gesture_calibration';
+
 // Euclidean distance between two 3D landmarks
-function distance3D(p1: Landmark3D, p2: Landmark3D): number {
+export function distance3D(p1: Landmark3D, p2: Landmark3D): number {
   const dx = p1.x - p2.x;
   const dy = p1.y - p2.y;
   const dz = (p1.z || 0) - (p2.z || 0);
@@ -26,21 +28,87 @@ function distance3D(p1: Landmark3D, p2: Landmark3D): number {
 }
 
 export class GestureEngine {
-  private calibration: GestureCalibrationSettings = { ...DEFAULT_CALIBRATION };
+  private calibration: GestureCalibrationSettings;
   private prevCentroids: Landmark3D[] = [];
+  private prevTimestamp: number = 0;
+  private smoothedLandmarks: Landmark3D[][] = [];
   private prevPinchState: boolean = false;
   private lastPinchTimestamp: number = 0;
+  private lastPinchCentroid: Landmark3D | null = null;
   private prevGesture: GestureType = 'NONE';
   private gestureHoldFrames: number = 0;
   private prevTwoHandDistance: number | null = null;
-  private initialObjectGrabPosition: Landmark3D | null = null;
+  private smoothedTwoHandDistance: number | null = null;
+
+  // Gesture cooldown map to prevent rapid transient re-triggers
+  private gestureCooldowns: Record<string, number> = {
+    SWIPE_RIGHT: 500,
+    SWIPE_LEFT: 500,
+    PUSH_FORWARD: 850,
+    PULL_BACK: 650,
+    DOUBLE_PINCH: 450
+  };
+  private lastGestureTriggerTime: Record<string, number> = {};
+
+  constructor() {
+    this.calibration = this.loadCalibration();
+  }
+
+  private loadCalibration(): GestureCalibrationSettings {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      try {
+        const saved = window.localStorage.getItem(STORAGE_KEY);
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          return { ...DEFAULT_CALIBRATION, ...parsed };
+        }
+      } catch (e) {
+        console.warn('Failed to load gesture calibration from storage:', e);
+      }
+    }
+    return { ...DEFAULT_CALIBRATION };
+  }
+
+  public saveCalibration(settings: Partial<GestureCalibrationSettings>) {
+    this.calibration = { ...this.calibration, ...settings };
+    if (typeof window !== 'undefined' && window.localStorage) {
+      try {
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(this.calibration));
+      } catch (e) {
+        console.warn('Failed to save calibration to storage:', e);
+      }
+    }
+  }
+
+  public resetCalibrationToDefaults(): GestureCalibrationSettings {
+    this.calibration = { ...DEFAULT_CALIBRATION };
+    if (typeof window !== 'undefined' && window.localStorage) {
+      try {
+        window.localStorage.removeItem(STORAGE_KEY);
+      } catch {
+        // ignore
+      }
+    }
+    return { ...this.calibration };
+  }
 
   public updateCalibration(settings: Partial<GestureCalibrationSettings>) {
-    this.calibration = { ...this.calibration, ...settings };
+    this.saveCalibration(settings);
   }
 
   public getCalibration(): GestureCalibrationSettings {
     return { ...this.calibration };
+  }
+
+  private checkCooldown(gesture: string, timestamp: number): boolean {
+    const cooldown = this.gestureCooldowns[gesture];
+    if (!cooldown) return true;
+    const lastTime = this.lastGestureTriggerTime[gesture];
+    if (lastTime === undefined || (timestamp - lastTime) >= cooldown) {
+      this.lastGestureTriggerTime[gesture] = timestamp;
+      return true;
+    }
+    return false;
   }
 
   public processResults(
@@ -50,24 +118,33 @@ export class GestureEngine {
     const rawHands = rawResult.landmarks;
     const rawHandedness = rawResult.handednesses;
 
+    const dt = this.prevTimestamp > 0 ? Math.max(0.008, Math.min(0.1, (timestamp - this.prevTimestamp) / 1000)) : 0.033;
+    this.prevTimestamp = timestamp;
+
+    // Hand-loss recovery: cleanly clear transient tracking states when no hands detected
     if (!rawHands || rawHands.length === 0) {
       this.prevCentroids = [];
       this.prevTwoHandDistance = null;
-      this.initialObjectGrabPosition = null;
+      this.smoothedTwoHandDistance = null;
+      this.lastPinchCentroid = null;
+      this.prevPinchState = false;
+      this.smoothedLandmarks = [];
+      this.prevGesture = 'NONE';
       return {
         activeGesture: 'NONE',
         confidence: 0,
-        description: 'Awaiting hand presence in sensor field',
+        description: 'Awaiting hand presence in optical field',
         hands: [],
         timestamp
       };
     }
 
     const detectedHands: DetectedHand[] = [];
+    const alpha = this.calibration.smoothingFactor;
 
-    // Analyze each detected hand
+    // Process each detected hand
     for (let i = 0; i < rawHands.length; i++) {
-      const landmarks = rawHands[i];
+      const currentRaw = rawHands[i];
       const handedness = rawHandedness && rawHandedness[i] && rawHandedness[i][0]
         ? (rawHandedness[i][0].displayName as 'Left' | 'Right')
         : (i === 0 ? 'Right' : 'Left');
@@ -75,13 +152,17 @@ export class GestureEngine {
         ? rawHandedness[i][0].score
         : 0.85;
 
-      // Key landmark indices:
-      // 0: Wrist
-      // 4: Thumb Tip, 3: Thumb IP, 2: Thumb MCP
-      // 8: Index Tip, 6: Index PIP, 5: Index MCP
-      // 12: Middle Tip, 10: Middle PIP, 9: Middle MCP
-      // 16: Ring Tip, 14: Ring PIP, 13: Ring MCP
-      // 20: Pinky Tip, 18: Pinky PIP, 17: Pinky MCP
+      // Temporal landmark smoothing
+      if (!this.smoothedLandmarks[i]) {
+        this.smoothedLandmarks[i] = currentRaw.map(p => ({ x: p.x, y: p.y, z: p.z || 0 }));
+      } else {
+        for (let j = 0; j < currentRaw.length; j++) {
+          this.smoothedLandmarks[i][j].x = this.smoothedLandmarks[i][j].x * (1 - alpha) + currentRaw[j].x * alpha;
+          this.smoothedLandmarks[i][j].y = this.smoothedLandmarks[i][j].y * (1 - alpha) + currentRaw[j].y * alpha;
+          this.smoothedLandmarks[i][j].z = this.smoothedLandmarks[i][j].z * (1 - alpha) + (currentRaw[j].z || 0) * alpha;
+        }
+      }
+      const landmarks = this.smoothedLandmarks[i];
 
       const wrist = landmarks[0];
       const thumbTip = landmarks[4];
@@ -90,55 +171,50 @@ export class GestureEngine {
       const ringTip = landmarks[16];
       const pinkyTip = landmarks[20];
 
-      // Centroid (average of wrist, index MCP, middle MCP, pinky MCP)
+      // Hand centroid
       const centroid: Landmark3D = {
         x: (wrist.x + landmarks[5].x + landmarks[9].x + landmarks[17].x) / 4,
         y: (wrist.y + landmarks[5].y + landmarks[9].y + landmarks[17].y) / 4,
         z: (wrist.z + landmarks[5].z + landmarks[9].z + landmarks[17].z) / 4
       };
 
-      // Velocity calculation
+      // Frame-rate normalized velocity
       let velocity: Landmark3D = { x: 0, y: 0, z: 0 };
       if (this.prevCentroids[i]) {
-        const rawVel = {
-          x: centroid.x - this.prevCentroids[i].x,
-          y: centroid.y - this.prevCentroids[i].y,
-          z: centroid.z - this.prevCentroids[i].z
-        };
-        // Exponential smoothing
-        const alpha = this.calibration.smoothingFactor;
+        const timeFactor = 0.033 / dt;
         velocity = {
-          x: rawVel.x * alpha,
-          y: rawVel.y * alpha,
-          z: rawVel.z * alpha
+          x: (centroid.x - this.prevCentroids[i].x) * timeFactor,
+          y: (centroid.y - this.prevCentroids[i].y) * timeFactor,
+          z: (centroid.z - this.prevCentroids[i].z) * timeFactor
         };
       }
       this.prevCentroids[i] = centroid;
 
       // Distances from wrist to fingertips
-      const dThumb = distance3D(wrist, thumbTip);
       const dIndex = distance3D(wrist, indexTip);
       const dMiddle = distance3D(wrist, middleTip);
       const dRing = distance3D(wrist, ringTip);
       const dPinky = distance3D(wrist, pinkyTip);
       const avgFingertipDist = (dIndex + dMiddle + dRing + dPinky) / 4;
 
-      // Fist check: all fingertips close to wrist
+      // Fist check
       const isFist =
         dIndex < this.calibration.fistThreshold &&
         dMiddle < this.calibration.fistThreshold &&
         dRing < this.calibration.fistThreshold &&
         dPinky < this.calibration.fistThreshold;
 
-      // Pinch distance: thumb tip to index tip (only when not in a fist)
+      // Pinch distance
       const pinchDist = distance3D(thumbTip, indexTip);
       const isPinching = !isFist && pinchDist < this.calibration.pinchThreshold;
 
-      // Open palm check: all fingertips extended away from wrist
+      // Open palm check: ALL 4 fingers extended away from wrist
       const isOpenPalm =
         avgFingertipDist > this.calibration.openPalmThreshold &&
-        dIndex > this.calibration.openPalmThreshold * 0.9 &&
-        dMiddle > this.calibration.openPalmThreshold * 0.9 &&
+        dIndex > this.calibration.openPalmThreshold * 0.85 &&
+        dMiddle > this.calibration.openPalmThreshold * 0.85 &&
+        dRing > this.calibration.openPalmThreshold * 0.75 &&
+        dPinky > this.calibration.openPalmThreshold * 0.75 &&
         !isFist &&
         !isPinching;
 
@@ -146,13 +222,19 @@ export class GestureEngine {
       const isPointing =
         dIndex > this.calibration.openPalmThreshold * 0.85 &&
         dMiddle > this.calibration.openPalmThreshold * 0.85 &&
-        dRing < this.calibration.fistThreshold * 1.3 &&
-        dPinky < this.calibration.fistThreshold * 1.3;
+        dRing < this.calibration.fistThreshold * 1.4 &&
+        dPinky < this.calibration.fistThreshold * 1.4 &&
+        !isOpenPalm &&
+        !isPinching;
 
-      // Wrist rotation estimate (roll, pitch, yaw)
-      const roll = Math.atan2(landmarks[9].y - wrist.y, landmarks[9].x - wrist.x);
-      const pitch = Math.atan2(landmarks[9].z - wrist.z, landmarks[9].y - wrist.y);
-      const yaw = Math.atan2(landmarks[5].x - landmarks[17].x, landmarks[5].z - landmarks[17].z);
+      // Accurate Wrist Orientation
+      const rawAngle = Math.atan2(landmarks[9].y - wrist.y, landmarks[9].x - wrist.x);
+      let roll = rawAngle - (-Math.PI / 2);
+      while (roll > Math.PI) roll -= 2 * Math.PI;
+      while (roll < -Math.PI) roll += 2 * Math.PI;
+
+      const pitch = landmarks[9].z - wrist.z;
+      const yaw = Math.atan2(landmarks[5].z - landmarks[17].z, landmarks[5].x - landmarks[17].x);
 
       detectedHands.push({
         handedness,
@@ -169,7 +251,6 @@ export class GestureEngine {
       });
     }
 
-    // MULTI-HAND AND COMPOSITE GESTURE EVALUATION
     let activeGesture: GestureType = 'NONE';
     let description = 'Hand active';
     let deltaScale: number | undefined = undefined;
@@ -179,106 +260,126 @@ export class GestureEngine {
 
     const primaryHand = detectedHands[0];
 
-    // Check G: TWO OPEN PALMS
-    if (detectedHands.length >= 2 && detectedHands[0].isOpenPalm && detectedHands[1].isOpenPalm) {
-      activeGesture = 'TWO_OPEN_PALMS';
-      description = 'Two open palms: Wide Holographic Interface Engaged';
-    }
-    // Check F: TWO-HAND MOVEMENT (ZOOM / SCALE)
-    else if (detectedHands.length >= 2) {
+    // Check F & G: TWO HANDS (ZOOM vs WIDE INTERFACE)
+    if (detectedHands.length >= 2) {
       currentTwoHandDistance = distance3D(detectedHands[0].centroid, detectedHands[1].centroid);
-      if (this.prevTwoHandDistance !== null) {
-        const delta = currentTwoHandDistance - this.prevTwoHandDistance;
-        if (Math.abs(delta) > 0.005) {
-          activeGesture = 'TWO_HAND_ZOOM';
-          deltaScale = 1 + delta * 2.5;
-          description = `Two-hand Zoom: Scale factor ${(deltaScale).toFixed(2)}x`;
-        }
+      if (this.smoothedTwoHandDistance === null) {
+        this.smoothedTwoHandDistance = currentTwoHandDistance;
+      } else {
+        this.smoothedTwoHandDistance = this.smoothedTwoHandDistance * 0.7 + currentTwoHandDistance * 0.3;
       }
-      this.prevTwoHandDistance = currentTwoHandDistance;
+
+      const delta = this.prevTwoHandDistance !== null ? (this.smoothedTwoHandDistance - this.prevTwoHandDistance) : 0;
+      this.prevTwoHandDistance = this.smoothedTwoHandDistance;
+
+      if (Math.abs(delta) > 0.004) {
+        activeGesture = 'TWO_HAND_ZOOM';
+        deltaScale = 1 + delta * 3.0;
+        description = `Two-hand Zoom: Scale factor ${(deltaScale).toFixed(2)}x`;
+      } else if (detectedHands[0].isOpenPalm && detectedHands[1].isOpenPalm) {
+        activeGesture = 'TWO_OPEN_PALMS';
+        description = 'Two open palms: Wide Holographic Interface Engaged';
+      }
     }
 
-    // If no multi-hand gesture matched, evaluate single primary hand
+    // Single hand gesture evaluation
     if (activeGesture === 'NONE' && primaryHand) {
       const vel = primaryHand.velocity;
 
-      // Check K: HAND PUSH FORWARD (Rapid movement toward camera - negative Z velocity)
+      // Check K: HAND PUSH FORWARD (Rapid movement toward camera)
       if (vel.z < this.calibration.pushSensitivity && primaryHand.isOpenPalm) {
-        activeGesture = 'PUSH_FORWARD';
-        description = 'Push Forward: Cinematic Energy Wave Triggered';
+        if (this.checkCooldown('PUSH_FORWARD', timestamp)) {
+          activeGesture = 'PUSH_FORWARD';
+          description = 'Push Forward: Cinematic Energy Wave Triggered';
+        }
       }
-      // Check L: HAND PULL BACK (Rapid movement away from camera - positive Z velocity)
+      // Check L: HAND PULL BACK (Rapid movement away from camera)
       else if (vel.z > this.calibration.pullSensitivity) {
-        activeGesture = 'PULL_BACK';
-        description = 'Pull Back: Reset Object to Anchor';
+        if (this.checkCooldown('PULL_BACK', timestamp)) {
+          activeGesture = 'PULL_BACK';
+          description = 'Pull Back: Reset Object to Anchor';
+        }
       }
-      // Check H: QUICK HAND SWIPE (High X velocity)
-      else if (vel.x > this.calibration.swipeSensitivity) {
-        activeGesture = 'SWIPE_RIGHT';
-        description = 'Quick Swipe Right: Next Holographic Module';
-      } else if (vel.x < -this.calibration.swipeSensitivity) {
-        activeGesture = 'SWIPE_LEFT';
-        description = 'Quick Swipe Left: Previous Holographic Module';
+      // Check H: QUICK HAND SWIPES (Horizontal speed threshold)
+      else if (vel.x > this.calibration.swipeSensitivity && !primaryHand.isPinching) {
+        if (this.checkCooldown('SWIPE_RIGHT', timestamp)) {
+          activeGesture = 'SWIPE_RIGHT';
+          description = 'Quick Swipe Right: Next Holographic Module';
+        }
+      } else if (vel.x < -this.calibration.swipeSensitivity && !primaryHand.isPinching) {
+        if (this.checkCooldown('SWIPE_LEFT', timestamp)) {
+          activeGesture = 'SWIPE_LEFT';
+          description = 'Quick Swipe Left: Previous Holographic Module';
+        }
       }
       // Check B: CLOSED FIST
       else if (primaryHand.isFist) {
         activeGesture = 'CLOSED_FIST';
         description = 'Closed Fist: Movement Paused / Visual Standby';
       }
-      // Check A: OPEN PALM
-      else if (primaryHand.isOpenPalm) {
-        activeGesture = 'OPEN_PALM';
-        description = 'Open Palm: Holographic System Active';
-      }
       // Check I: TWO-FINGER POINT
       else if (primaryHand.isPointing) {
         activeGesture = 'TWO_FINGER_POINT';
         description = 'Two-Finger Point: Precision Laser Control';
       }
+      // Check E: ROTATE WRIST (When wrist tilt exceeds 0.38 rad from upright vertical)
+      else if (Math.abs(primaryHand.wristRotation.roll) > 0.38) {
+        activeGesture = 'ROTATE_WRIST';
+        deltaRotation = {
+          x: primaryHand.wristRotation.pitch * 0.08,
+          y: primaryHand.wristRotation.roll * 0.1,
+          z: primaryHand.wristRotation.yaw * 0.08
+        };
+        description = `Wrist Rotate: Rolling ${primaryHand.wristRotation.roll.toFixed(2)} rad`;
+      }
+      // Check A: OPEN PALM (Upright vertical palm)
+      else if (primaryHand.isOpenPalm) {
+        activeGesture = 'OPEN_PALM';
+        description = 'Open Palm: Holographic System Active';
+      }
       // Check J: DOUBLE PINCH
       else if (primaryHand.isPinching && !this.prevPinchState) {
         const timeSinceLastPinch = this.lastPinchTimestamp > 0 ? timestamp - this.lastPinchTimestamp : 99999;
+        this.lastPinchCentroid = { ...primaryHand.centroid };
         if (timeSinceLastPinch > 80 && timeSinceLastPinch < 450) {
-          activeGesture = 'DOUBLE_PINCH';
-          description = 'Double Pinch: Diagnostic Pulse Activated';
-          this.lastPinchTimestamp = 0;
+          if (this.checkCooldown('DOUBLE_PINCH', timestamp)) {
+            activeGesture = 'DOUBLE_PINCH';
+            description = 'Double Pinch: Disassembly Blueprint Toggle';
+            this.lastPinchTimestamp = 0;
+          }
         } else {
           this.lastPinchTimestamp = timestamp;
           activeGesture = 'PINCH';
           description = 'Pinch: Object Acquired / Interacting';
         }
       }
-      // Check C & D: PINCH and MOVE PINCHED HAND
+      // Check C & D: PINCH and MOVE PINCHED HAND (True delta calculation)
       else if (primaryHand.isPinching) {
-        if (!this.initialObjectGrabPosition) {
-          this.initialObjectGrabPosition = { ...primaryHand.centroid };
+        if (!this.lastPinchCentroid) {
+          this.lastPinchCentroid = { ...primaryHand.centroid };
           activeGesture = 'PINCH';
           description = 'Pinch Grab: Holographic Object Selected';
         } else {
-          // If pinching and translating
-          activeGesture = 'MOVE_PINCHED';
-          deltaTranslation = {
-            x: (primaryHand.centroid.x - this.initialObjectGrabPosition.x) * 4.0,
-            y: -(primaryHand.centroid.y - this.initialObjectGrabPosition.y) * 4.0,
-            z: (primaryHand.centroid.z - this.initialObjectGrabPosition.z) * 4.0
-          };
-          description = `Move Pinched: Translating 3D Object (ΔX:${deltaTranslation.x.toFixed(2)}, ΔY:${deltaTranslation.y.toFixed(2)})`;
+          const moveDist = distance3D(primaryHand.centroid, this.lastPinchCentroid);
+          if (moveDist > 0.003) {
+            activeGesture = 'MOVE_PINCHED';
+            deltaTranslation = {
+              x: (primaryHand.centroid.x - this.lastPinchCentroid.x) * 6.0,
+              y: -(primaryHand.centroid.y - this.lastPinchCentroid.y) * 6.0,
+              z: (primaryHand.centroid.z - this.lastPinchCentroid.z) * 6.0
+            };
+            this.lastPinchCentroid = { ...primaryHand.centroid };
+            description = `Move Pinched: Translating 3D Object (ΔX:${deltaTranslation.x.toFixed(3)}, ΔY:${deltaTranslation.y.toFixed(3)})`;
+          } else {
+            activeGesture = 'PINCH';
+            description = 'Pinch Grab: Holographic Object Held';
+          }
         }
-      }
-      // Check E: ROTATE WRIST (When hand is tilted significantly and not in rest state)
-      else if (Math.abs(primaryHand.wristRotation.roll) > 0.6 || Math.abs(primaryHand.wristRotation.pitch) > 0.6) {
-        activeGesture = 'ROTATE_WRIST';
-        deltaRotation = {
-          x: primaryHand.wristRotation.pitch * 0.08,
-          y: primaryHand.wristRotation.roll * 0.08,
-          z: primaryHand.wristRotation.yaw * 0.08
-        };
-        description = `Wrist Rotate: Rolling ${primaryHand.wristRotation.roll.toFixed(2)} rad`;
       }
     }
 
     if (primaryHand && !primaryHand.isPinching) {
-      this.initialObjectGrabPosition = null;
+      this.lastPinchCentroid = null;
     }
     this.prevPinchState = primaryHand ? primaryHand.isPinching : false;
 

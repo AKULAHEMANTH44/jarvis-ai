@@ -46,6 +46,7 @@ class SpeechService {
   private onMessageCallback: ((msg: AssistantMessage) => void) | null = null;
   private selectedVoice: SpeechSynthesisVoice | null = null;
   private isSpeaking: boolean = false;
+  private restartTimeout: number | null = null;
 
   constructor() {
     this.initSpeechSynthesis();
@@ -88,8 +89,8 @@ class SpeechService {
       if (this.selectedVoice) {
         utterance.voice = this.selectedVoice;
       }
-      utterance.rate = 1.0;
-      utterance.pitch = 0.95; // Slightly lower, calm British AI pitch
+      utterance.rate = 1.02;
+      utterance.pitch = 0.95; // Calm British AI timbre
       utterance.volume = 1.0;
 
       utterance.onstart = () => {
@@ -141,6 +142,9 @@ class SpeechService {
       this.recognition.lang = 'en-US';
 
       this.recognition.onresult = (event: SpeechRecognitionEvent) => {
+        // Prevent feedback loop while JARVIS is speaking
+        if (this.isSpeaking) return;
+
         const lastResult = event.results[event.results.length - 1];
         if (lastResult.isFinal) {
           const rawTranscript = lastResult[0].transcript.trim();
@@ -156,13 +160,17 @@ class SpeechService {
       };
 
       this.recognition.onend = () => {
-        // Automatically restart listening if still enabled
         if (this.isListening) {
-          try {
-            this.recognition?.start();
-          } catch {
-            // ignore
-          }
+          if (this.restartTimeout) clearTimeout(this.restartTimeout);
+          this.restartTimeout = window.setTimeout(() => {
+            if (this.isListening) {
+              try {
+                this.recognition?.start();
+              } catch {
+                // Ignore transient busy states
+              }
+            }
+          }, 150);
         }
       };
 
@@ -178,6 +186,10 @@ class SpeechService {
 
   public stopListening() {
     this.isListening = false;
+    if (this.restartTimeout) {
+      clearTimeout(this.restartTimeout);
+      this.restartTimeout = null;
+    }
     if (this.recognition) {
       try {
         this.recognition.stop();

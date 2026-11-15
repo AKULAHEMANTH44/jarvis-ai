@@ -10,6 +10,7 @@ interface LeftVisionHUDProps {
   gestureResult: GestureDetectionResult | null;
   calibration: GestureCalibrationSettings;
   onUpdateCalibration: (cal: Partial<GestureCalibrationSettings>) => void;
+  onResetCalibration?: () => void;
   videoRef: React.RefObject<HTMLVideoElement>;
 }
 
@@ -35,6 +36,7 @@ export const LeftVisionHUD: React.FC<LeftVisionHUDProps> = ({
   gestureResult,
   calibration,
   onUpdateCalibration,
+  onResetCalibration,
   videoRef
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -336,6 +338,19 @@ export const LeftVisionHUD: React.FC<LeftVisionHUDProps> = ({
                 className="w-full accent-cyan-400 h-1 bg-cyan-950 rounded cursor-pointer"
               />
             </div>
+
+            {/* Reset Defaults button */}
+            {onResetCalibration && (
+              <button
+                onClick={() => {
+                  audioService.playChirp(1000);
+                  onResetCalibration();
+                }}
+                className="w-full mt-2 py-1 rounded bg-cyan-950/40 hover:bg-cyan-900/50 border border-cyan-500/30 text-[10px] font-mono text-cyan-300 transition-all text-center"
+              >
+                RESTORE FACTORY CALIBRATION
+              </button>
+            )}
           </div>
         ) : (
           <div className="text-[10px] font-mono text-cyan-400/60 cursor-pointer" onClick={() => setShowCalibration(true)}>

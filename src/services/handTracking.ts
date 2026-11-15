@@ -7,6 +7,7 @@ export class HandTrackingService {
   private stream: MediaStream | null = null;
   private animationFrameId: number | null = null;
   private lastVideoTime: number = -1;
+  private lastTimestampMs: number = 0;
   private fps: number = 0;
   private frameCount: number = 0;
   private lastFpsUpdate: number = performance.now();
@@ -29,7 +30,7 @@ export class HandTrackingService {
       }
 
       // Try local model first, then fallback to storage URL
-      let modelAssetPath = '/models/hand_landmarker.task';
+      const modelAssetPath = '/models/hand_landmarker.task';
       try {
         this.handLandmarker = await HandLandmarker.createFromOptions(vision, {
           baseOptions: {
@@ -101,6 +102,7 @@ export class HandTrackingService {
 
       await this.videoElement.play();
       this.isRunning = true;
+      this.lastTimestampMs = 0;
       this.processVideo();
       return true;
     } catch (err) {
@@ -113,7 +115,13 @@ export class HandTrackingService {
   private processVideo = () => {
     if (!this.isRunning || !this.videoElement || !this.handLandmarker) return;
 
-    const now = performance.now();
+    let now = performance.now();
+    // Guarantee strictly monotonically increasing timestamp for MediaPipe VIDEO mode
+    if (now <= this.lastTimestampMs) {
+      now = this.lastTimestampMs + 1;
+    }
+    this.lastTimestampMs = now;
+
     this.frameCount++;
     if (now - this.lastFpsUpdate >= 1000) {
       this.fps = Math.round((this.frameCount * 1000) / (now - this.lastFpsUpdate));
@@ -142,12 +150,17 @@ export class HandTrackingService {
       cancelAnimationFrame(this.animationFrameId);
       this.animationFrameId = null;
     }
+    if (this.videoElement) {
+      try {
+        this.videoElement.pause();
+      } catch {
+        // ignore
+      }
+      this.videoElement.srcObject = null;
+    }
     if (this.stream) {
       this.stream.getTracks().forEach((track) => track.stop());
       this.stream = null;
-    }
-    if (this.videoElement) {
-      this.videoElement.srcObject = null;
     }
   }
 

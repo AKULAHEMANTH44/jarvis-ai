@@ -331,6 +331,9 @@ export const App: React.FC = () => {
       handTrackingService.stop();
       setIsCameraActive(false);
       setGestureResult(null);
+      if (sceneManagerRef.current) {
+        sceneManagerRef.current.setHandCentroid(undefined);
+      }
     } else {
       if (!videoRef.current) return;
       const started = await handTrackingService.startCamera(
@@ -339,6 +342,9 @@ export const App: React.FC = () => {
           setFps(currentFps);
           const detection = gestureEngine.processResults(result);
           setGestureResult(detection);
+          if (sceneManagerRef.current) {
+            sceneManagerRef.current.setHandCentroid(detection.hands[0]?.centroid);
+          }
         }
       );
       setIsCameraActive(started);
@@ -350,10 +356,19 @@ export const App: React.FC = () => {
 
   // GESTURE DISPATCH ENGINE: Translates gesture detection results into 3D interactions
   useEffect(() => {
-    if (!gestureResult || gestureResult.activeGesture === 'NONE') return;
-
+    if (!gestureResult) return;
     const g = gestureResult.activeGesture;
     const scene = sceneManagerRef.current;
+
+    // Detect pinch release
+    if (lastGestureRef.current === 'PINCH' && g !== 'PINCH' && g !== 'MOVE_PINCHED') {
+      audioService.playPinchRelease();
+    }
+
+    if (g === 'NONE') {
+      lastGestureRef.current = 'NONE';
+      return;
+    }
 
     // A. OPEN PALM
     if (g === 'OPEN_PALM') {
@@ -371,16 +386,16 @@ export const App: React.FC = () => {
     }
     // C. PINCH
     else if (g === 'PINCH') {
-      if (lastGestureRef.current !== 'PINCH') {
+      if (lastGestureRef.current !== 'PINCH' && lastGestureRef.current !== 'MOVE_PINCHED') {
         audioService.playPinchGrab();
       }
     }
     // D. MOVE PINCHED HAND
     else if (g === 'MOVE_PINCHED' && gestureResult.deltaTranslation && scene) {
       scene.applyDeltaTranslation(
-        gestureResult.deltaTranslation.x * 0.04,
-        gestureResult.deltaTranslation.y * 0.04,
-        gestureResult.deltaTranslation.z * 0.04
+        gestureResult.deltaTranslation.x,
+        gestureResult.deltaTranslation.y,
+        gestureResult.deltaTranslation.z
       );
     }
     // E. ROTATE WRIST
@@ -463,6 +478,10 @@ export const App: React.FC = () => {
               onUpdateCalibration={(cal) => {
                 setCalibration((prev) => ({ ...prev, ...cal }));
                 gestureEngine.updateCalibration(cal);
+              }}
+              onResetCalibration={() => {
+                const defaults = gestureEngine.resetCalibrationToDefaults();
+                setCalibration(defaults);
               }}
               videoRef={videoRef}
             />
