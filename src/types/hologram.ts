@@ -98,6 +98,7 @@ export interface HologramVisualSettings {
   explosionAmount: number;   // 0.0 to 1.0
   dispersionAmount: number;  // 0.0 to 1.0 (two-hand / continuous particle dispersion)
   particleIntensity: number; // 0.3 to 2.0
+  particleSpeed: number;     // 0.2 to 2.5
   orbitalSpeed: number;      // 0.0 to 2.5
   coreBrightness: number;    // 0.3 to 2.0
   scanSpeed: number;         // 0.2 to 2.5

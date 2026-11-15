@@ -82,6 +82,8 @@ export class ParticleFieldEffect {
   private maxCount: number = 5000;
   private geometry: THREE.BufferGeometry;
   private material: THREE.ShaderMaterial;
+  private particleSpeed: number = 1.0;
+  private simTime: number = 0;
 
   constructor(count = 1500, colorThemeHex = 0x00f0ff) {
     this.count = Math.max(200, Math.min(this.maxCount, count));
@@ -163,12 +165,22 @@ export class ParticleFieldEffect {
     this.material.uniforms.uInitProgress.value = Math.max(0, Math.min(1, progress));
   }
 
+  public setParticleSpeed(speed: number) {
+    this.particleSpeed = Math.max(0.15, Math.min(3.0, speed));
+  }
+
   public setDispersion(dispersion: number) {
     this.material.uniforms.uDispersion.value = Math.max(0, Math.min(1, dispersion));
   }
 
-  public update(time: number, handCentroid?: { x: number; y: number; z: number }) {
-    this.material.uniforms.uTime.value = time;
+  public update(time: number, handCentroid?: { x: number; y: number; z: number }, delta: number = 0.016) {
+    const dt = Math.max(0.001, Math.min(0.1, delta));
+    if (this.simTime === 0 && time > 0 && this.particleSpeed === 1.0) {
+      this.simTime = time;
+    } else {
+      this.simTime += dt * this.particleSpeed;
+    }
+    this.material.uniforms.uTime.value = this.simTime;
     if (handCentroid) {
       this.material.uniforms.uHandActive.value = 1.0;
       (this.material.uniforms.uHandPos.value as THREE.Vector3).set(

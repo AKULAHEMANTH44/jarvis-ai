@@ -105,7 +105,7 @@ export const LeftVisionHUD: React.FC<LeftVisionHUDProps> = ({
   const activeHand = gestureResult?.hands[0];
 
   return (
-    <div className="flex flex-col space-y-3 w-80 text-xs">
+    <div className="flex flex-col space-y-3 w-full text-xs">
       {/* 1. Camera & Skeleton Vision Viewport */}
       <HolographicPanel
         title="OPTICAL SENSOR // CV-MK7"
@@ -296,6 +296,9 @@ export const LeftVisionHUD: React.FC<LeftVisionHUDProps> = ({
         icon={<Sliders className="w-4 h-4 text-cyan-400" />}
         headerRight={
           <button
+            type="button"
+            aria-label="Toggle Calibration Controls"
+            aria-expanded={showCalibration}
             onClick={() => {
               audioService.playChirp(1200);
               setShowCalibration(!showCalibration);
@@ -442,6 +445,9 @@ export const LeftVisionHUD: React.FC<LeftVisionHUDProps> = ({
         icon={<Sparkles className="w-4 h-4 text-cyan-400" />}
         headerRight={
           <button
+            type="button"
+            aria-label="Toggle Gesture Manual"
+            aria-expanded={showGuide}
             onClick={() => {
               audioService.playChirp(1200);
               setShowGuide(!showGuide);

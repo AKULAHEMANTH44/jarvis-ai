@@ -14,9 +14,29 @@ export class HandTrackingService {
   private onResultsCallback: ((result: HandLandmarkerResult, fps: number) => void) | null = null;
   private isInitializing: boolean = false;
   private lastError: string | null = null;
+  private minConfidence: number = 0.5;
 
   public getLastError(): string | null {
     return this.lastError;
+  }
+
+  public getConfidenceThreshold(): number {
+    return this.minConfidence;
+  }
+
+  public setConfidenceThreshold(threshold: number) {
+    this.minConfidence = Math.max(0.2, Math.min(0.95, threshold));
+    if (this.handLandmarker && typeof this.handLandmarker.setOptions === 'function') {
+      void this.handLandmarker
+        .setOptions({
+          minHandDetectionConfidence: this.minConfidence,
+          minHandPresenceConfidence: this.minConfidence,
+          minTrackingConfidence: this.minConfidence
+        })
+        .catch(() => {
+          // Safe ignore if runtime rejects live option update; software confidence filter remains active
+        });
+    }
   }
 
   public async getCameraPermissionState(): Promise<PermissionState | 'unsupported'> {
@@ -55,6 +75,7 @@ export class HandTrackingService {
 
       const localModel = '/models/hand_landmarker.task';
       const remoteModel = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
+      const conf = this.minConfidence;
 
       // 1. Try local model with GPU
       try {
@@ -62,9 +83,9 @@ export class HandTrackingService {
           baseOptions: { modelAssetPath: localModel, delegate: 'GPU' },
           runningMode: 'VIDEO',
           numHands: 2,
-          minHandDetectionConfidence: 0.5,
-          minHandPresenceConfidence: 0.5,
-          minTrackingConfidence: 0.5
+          minHandDetectionConfidence: conf,
+          minHandPresenceConfidence: conf,
+          minTrackingConfidence: conf
         });
       } catch {
         // 2. Try local model with CPU (important for environments without WebGL GPU delegate)
@@ -73,9 +94,9 @@ export class HandTrackingService {
             baseOptions: { modelAssetPath: localModel, delegate: 'CPU' },
             runningMode: 'VIDEO',
             numHands: 2,
-            minHandDetectionConfidence: 0.5,
-            minHandPresenceConfidence: 0.5,
-            minTrackingConfidence: 0.5
+            minHandDetectionConfidence: conf,
+            minHandPresenceConfidence: conf,
+            minTrackingConfidence: conf
           });
         } catch {
           // 3. Fallback to remote model with CPU
@@ -84,9 +105,9 @@ export class HandTrackingService {
               baseOptions: { modelAssetPath: remoteModel, delegate: 'CPU' },
               runningMode: 'VIDEO',
               numHands: 2,
-              minHandDetectionConfidence: 0.5,
-              minHandPresenceConfidence: 0.5,
-              minTrackingConfidence: 0.5
+              minHandDetectionConfidence: conf,
+              minHandPresenceConfidence: conf,
+              minTrackingConfidence: conf
             });
           } catch (cpuError) {
             console.warn('HandLandmarker initialization failed:', cpuError);

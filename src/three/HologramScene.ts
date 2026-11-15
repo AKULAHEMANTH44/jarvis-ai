@@ -83,6 +83,8 @@ export class HologramSceneManager {
   private baseCameraZ: number = 6.55;
   private settings: HologramVisualSettings;
   private angularVelocity: THREE.Vector3 = new THREE.Vector3(0, 0, 0);
+  private rotationDamping: number = 6.5;
+  private isTrackingLostFeedback: boolean = false;
   private lastDispersionAmount: number = 0;
   private lastDispersionShockwaveTime: number = 0;
   private initProgress: number = 1.0;
@@ -118,7 +120,8 @@ export class HologramSceneManager {
     this.renderer.domElement.addEventListener('webglcontextlost', this.onContextLost);
     this.renderer.domElement.addEventListener('webglcontextrestored', this.onContextRestored);
 
-    // 2. Camera (framed so Vision X sphere fills ~70% of viewport with generous cosmic breathing room)
+    // 2. Camera (responsive framing so Vision X sphere dominates ~75-85% of viewport across desktop/tablet/mobile)
+    this.baseCameraZ = this.computeAdaptiveCameraZ(width, height);
     this.camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 100);
     this.camera.position.set(0, 0, this.baseCameraZ);
     this.camera.lookAt(0, 0, 0);
@@ -190,6 +193,7 @@ export class HologramSceneManager {
       (window as unknown as Record<string, unknown>).__JARVIS_SCENE__ = {
         getModelId: () => this.getModelId(),
         getDispersion: () => this.spatialManager.getSelected()?.visionSphereObj?.getDispersion() ?? this.lastDispersionAmount,
+        getAngularVelocity: () => this.getAngularVelocity(),
         getStates: () => this.getSpatialStates(),
         getInitProgress: () => this.initProgress,
         setDispersion: (v: number) => this.setDispersion(v)
@@ -734,10 +738,15 @@ export class HologramSceneManager {
       );
     }
 
+    if (settings.particleSpeed !== undefined) {
+      this.particleField.setParticleSpeed(settings.particleSpeed);
+    }
+
     this.spatialManager.getAll().forEach((inst) => {
       inst.visionSphereObj?.setParameters({
         rotationSpeed: this.settings.rotationSpeed,
         particleIntensity: this.settings.particleIntensity,
+        particleSpeed: this.settings.particleSpeed,
         orbitalSpeed: this.settings.orbitalSpeed,
         coreBrightness: this.settings.coreBrightness,
         scanSpeed: this.settings.scanSpeed,
@@ -842,6 +851,20 @@ export class HologramSceneManager {
     this.angularVelocity.set(0, 0, 0);
   }
 
+  public setRotationDamping(damping: number) {
+    this.rotationDamping = Math.max(1.5, Math.min(18.0, damping));
+  }
+
+  public setInteractionFeedback(feedback: { isTrackingLost?: boolean }) {
+    if (feedback.isTrackingLost !== undefined) {
+      this.isTrackingLostFeedback = feedback.isTrackingLost;
+    }
+  }
+
+  public getAngularVelocity(): number {
+    return this.angularVelocity.length() * 30;
+  }
+
   public applyScaleMultiplier(multiplier: number) {
     this.lastUserInteractionTime = performance.now();
     const selected = this.spatialManager.getSelected();
@@ -851,10 +874,21 @@ export class HologramSceneManager {
     selected.targetScale = Math.max(0.3, Math.min(3.2, selected.targetScale));
   }
 
+  private computeAdaptiveCameraZ(width: number, height: number): number {
+    const aspect = width / Math.max(1, height);
+    // Vision sphere outer radius is ~2.74; at fov=45deg on landscape desktop z=6.45 frames it at ~80% height
+    if (aspect >= 1.15) {
+      return 6.45;
+    }
+    // Pull back gracefully on narrow tablet/portrait/mobile viewports so horizontal outer arcs do not clip
+    return Math.min(11.5, Math.max(6.45, 6.45 / Math.max(0.54, aspect * 0.9)));
+  }
+
   private onWindowResize = () => {
     if (!this.container || !this.renderer || !this.camera) return;
     const width = Math.max(1, this.container.clientWidth);
     const height = Math.max(1, this.container.clientHeight);
+    this.baseCameraZ = this.computeAdaptiveCameraZ(width, height);
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height);
@@ -912,7 +946,7 @@ export class HologramSceneManager {
         selected.targetRotation.y += this.angularVelocity.y;
         selected.targetRotation.z += this.angularVelocity.z;
 
-        const damp = Math.exp(-6.5 * delta);
+        const damp = Math.exp(-this.rotationDamping * delta);
         this.angularVelocity.multiplyScalar(damp);
         if (this.angularVelocity.lengthSq() < 1e-7) {
           this.angularVelocity.set(0, 0, 0);
@@ -926,8 +960,20 @@ export class HologramSceneManager {
 
     this.spatialManager.update(elapsedTime, speed, delta);
 
+    const activeDispersion =
+      selected?.visionSphereObj?.getDispersion() ??
+      selected?.currentDisintegration ??
+      this.lastDispersionAmount;
+    const isReconstructing = selected?.dispersionPhase === 'RECONSTRUCTING';
+
+    this.ringGimbals.setInteractionFeedback({
+      rotationSpeed: this.angularVelocity.length() * 30,
+      dispersion: activeDispersion,
+      isReconstructing,
+      isTrackingLost: this.isTrackingLostFeedback
+    });
     this.ringGimbals.update(elapsedTime, speed);
-    this.particleField.update(elapsedTime, this.activeHandCentroid);
+    this.particleField.update(elapsedTime, this.activeHandCentroid, delta);
     this.shockwave.update(delta);
 
     if (this.laserReticle.visible) {

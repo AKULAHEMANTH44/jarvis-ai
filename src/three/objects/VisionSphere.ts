@@ -9,6 +9,7 @@ import { ComponentAnchor } from './RealWorldCatalog';
 export interface VisionSphereLayerParams {
   rotationSpeed?: number;
   particleIntensity?: number;
+  particleSpeed?: number;
   orbitalSpeed?: number;
   coreBrightness?: number;
   dispersionIntensity?: number;
@@ -142,6 +143,7 @@ export class VisionSphereObject {
   // Independent layer parameters
   private layerRotationSpeed: number = 1.0;
   private particleIntensity: number = 1.25;
+  private particleSpeed: number = 1.0;
   private orbitalSpeed: number = 1.0;
   private coreBrightness: number = 1.4;
   private dispersionIntensity: number = 1.0;
@@ -604,6 +606,7 @@ export class VisionSphereObject {
   public setParameters(params: VisionSphereLayerParams) {
     if (params.rotationSpeed !== undefined) this.layerRotationSpeed = params.rotationSpeed;
     if (params.particleIntensity !== undefined) this.particleIntensity = params.particleIntensity;
+    if (params.particleSpeed !== undefined) this.particleSpeed = params.particleSpeed;
     if (params.orbitalSpeed !== undefined) this.orbitalSpeed = params.orbitalSpeed;
     if (params.coreBrightness !== undefined) this.coreBrightness = params.coreBrightness;
     if (params.dispersionIntensity !== undefined) this.dispersionIntensity = params.dispersionIntensity;
@@ -616,7 +619,8 @@ export class VisionSphereObject {
 
     this.particleEngine.setParameters({
       intensity: 0.9 * this.particleIntensity * (0.6 + this.glowIntensity * 0.3),
-      repulsion: 0.25 * this.dispersionIntensity
+      repulsion: 0.25 * this.dispersionIntensity,
+      particleSpeed: this.particleSpeed
     });
     this.coreShaderMat.uniforms.uBrightness.value = this.coreBrightness;
   }
@@ -662,10 +666,15 @@ export class VisionSphereObject {
 
     // 1. Update GPU reversible particle engine & light-trail filament web
     this.particleEngine.update(time, dt);
+    const pState = this.particleEngine.getState();
+    const isReconstructing = pState === 'RECONSTRUCTING';
+    const reconGlowBoost = isReconstructing ? 0.28 : 0.0;
+
     this.particleEngine.setParameters({
-      intensity: (0.9 + d * 0.48 + this.voiceEnergy * 0.25) * this.particleIntensity * (0.65 + this.glowIntensity * 0.25),
+      intensity: (0.9 + d * 0.48 + reconGlowBoost * 0.5 + this.voiceEnergy * 0.25) * this.particleIntensity * (0.65 + this.glowIntensity * 0.25),
       opacity: Math.min(1, 0.9 + d * 0.1),
       repulsion: 0.25 * this.dispersionIntensity,
+      particleSpeed: this.particleSpeed,
       voiceEnergy: this.voiceEnergy
     });
 
@@ -685,10 +694,10 @@ export class VisionSphereObject {
         sec.sepVector.y * sectorSpread,
         sec.baseZ + sec.sepVector.z * sectorSpread * 1.25
       );
-      sec.material.opacity = sec.baseOpacity * ringFade;
+      sec.material.opacity = Math.min(1.0, sec.baseOpacity * ringFade + (isReconstructing ? reconGlowBoost * ringFade : 0));
     });
     this.radialTicks.rotation.z -= 0.0022 * rotMult;
-    this.tickMat.opacity = 0.65 * ringFade;
+    this.tickMat.opacity = Math.min(1.0, (0.65 + reconGlowBoost) * ringFade);
 
     // 3. Inner gyroscopic orbital rings
     this.innerRingsGroup.scale.setScalar((0.85 + 0.15 * ringInit) * structuralSeparation);
@@ -699,7 +708,7 @@ export class VisionSphereObject {
     });
     this.innerRingMats.forEach((m, idx) => {
       const baseOp = idx === 0 ? 0.74 : idx === 1 ? 0.56 : idx === 2 ? 0.66 : 0.6;
-      (m as THREE.MeshBasicMaterial).opacity = baseOp * ringFade;
+      (m as THREE.MeshBasicMaterial).opacity = Math.min(1.0, (baseOp + reconGlowBoost) * ringFade);
     });
 
     // 4. Lat/Long Grid & Dual Geodesic Lattice

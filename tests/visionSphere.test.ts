@@ -109,6 +109,19 @@ describe('ReversibleParticleEngine & VISION 1.2 Sphere', () => {
     sphere.setCoreActivity({ isListening: false, isSpeaking: false, isProcessing: false });
     sphere.update(1.4, 1.0, 0.016);
 
+    // Particle speed & exact coordinate preservation after dispersion cycle
+    sphere.setParameters({ particleSpeed: 1.8 });
+    sphere.setDispersion(0.6);
+    for (let i = 0; i < 20; i++) sphere.update(1.5 + i * 0.05, 1.0, 0.05);
+    expect(sphere.getDispersion()).toBeGreaterThan(0.4);
+    sphere.setDispersion(0.0);
+    for (let i = 0; i < 60; i++) sphere.update(2.6 + i * 0.05, 1.0, 0.05);
+    expect(sphere.getDispersion()).toBeCloseTo(0, 3);
+
+    const origin = engine.getOriginalPosition(10);
+    const restored = engine.computeParticlePositionAt(10, 0);
+    expect(restored.distanceTo(origin)).toBeLessThan(1e-5);
+
     sphere.dispose();
   });
 });

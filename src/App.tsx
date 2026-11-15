@@ -24,16 +24,31 @@ import {
 import {
   GestureCalibrationSettings,
   GestureDetectionResult,
-  GestureType
+  GestureType,
+  SpatialVisualFeedback
 } from './types/gesture';
 import { AssistantMessage, VoiceCommand, DesktopPermissionRequest } from './types/assistant';
 import { handTrackingService } from './services/handTracking';
-import { gestureEngine, DEFAULT_CALIBRATION } from './services/gestureEngine';
+import { gestureEngine } from './services/gestureEngine';
+import { spatialInteractionController } from './services/spatialInteractionController';
 import { audioService } from './services/soundFx';
 import { speechService } from './services/speechService';
 import { desktopBridge } from './services/desktopBridge';
 import { automationEngine } from './services/automationEngine';
 import { contextualAI } from './services/contextualAI';
+import {
+  HudDrawerId,
+  HudLayoutState,
+  isRightDrawer,
+  toggleDrawerState,
+  openDrawerState,
+  closeDrawerState,
+  enterVisionHomeState,
+  toggleFocusModeState,
+  handleEscapeKeyState,
+  shouldShowProjectedLabels
+} from './utils/hudState';
+import { X } from 'lucide-react';
 
 export const App: React.FC = () => {
   const autostart =
@@ -49,21 +64,33 @@ export const App: React.FC = () => {
   const [laserTarget, setLaserTarget] = useState<LaserTargetInfo | null>(null);
   const [componentLabels, setComponentLabels] = useState<ComponentLabel2D[]>([]);
   const [activeGestureFeedback, setActiveGestureFeedback] = useState<string | null>(null);
+  const [spatialFeedback, setSpatialFeedback] = useState<SpatialVisualFeedback | null>(null);
   const [isProcessingCommand, setIsProcessingCommand] = useState<boolean>(false);
 
-  // Discreet Collapsible Edge Drawers (default closed so Vision X core dominates the viewport)
-  const [leftDrawerOpen, setLeftDrawerOpen] = useState<boolean>(false);
-  const [rightDrawerMode, setRightDrawerMode] = useState<'CLOSED' | 'LAB' | 'DIAGNOSTICS'>('CLOSED');
-  const [voiceDrawerOpen, setVoiceDrawerOpen] = useState<boolean>(false);
+  // Unified Hologram-First Contextual HUD & Focus Mode State
+  const [hudState, setHudState] = useState<HudLayoutState>({
+    activeDrawer: null,
+    isFocusMode: false
+  });
+  const tabNonceRef = useRef<number>(1);
+  const nextNonce = () => {
+    tabNonceRef.current += 1;
+    return tabNonceRef.current;
+  };
 
   const [requestedWorkspaceTab, setRequestedWorkspaceTab] = useState<{
     tab: 'OBJECTS' | 'LAB' | 'AUTOMATION' | 'NOTES' | 'TIMER';
     nonce: number;
-  } | null>(null);
+  } | null>({ tab: 'LAB', nonce: 1 });
+  const [taskSubTab, setTaskSubTab] = useState<'AUTOMATION' | 'NOTES' | 'TIMER'>('AUTOMATION');
+  const [requestedTaskTab, setRequestedTaskTab] = useState<{
+    tab: 'AUTOMATION' | 'NOTES' | 'TIMER';
+    nonce: number;
+  }>({ tab: 'AUTOMATION', nonce: 1 });
   const [requestedDiagnosticsTab, setRequestedDiagnosticsTab] = useState<{
     tab: 'MODELS' | 'DIAGNOSTICS' | 'SETTINGS';
     nonce: number;
-  } | null>(null);
+  } | null>({ tab: 'MODELS', nonce: 1 });
 
   // Modals & Panels State
   const [permissionRequest, setPermissionRequest] = useState<DesktopPermissionRequest | null>(null);
@@ -72,30 +99,51 @@ export const App: React.FC = () => {
     'STARK INDUSTRIES // MARK VII MEMORANDUM\n• VISION 1.2 spatial sphere core calibrated\n• Fusion harmonic stabilized at 142.8 GHz\n• Multi-object spatial collision matrix active\n• Local-first autonomous intelligence engaged'
   );
 
-  // Visual & Calibration Settings
-  const [visualSettings, setVisualSettings] = useState<HologramVisualSettings>({
-    wireframe: true,
-    renderMode: 'HYBRID',
-    glowIntensity: 1.5,
-    rotationSpeed: 1.0,
-    particleCount: 2500,
-    colorTheme: 'cyan',
-    hologramColor: '#00f0ff',
-    explodedView: false,
-    explosionAmount: 0,
-    dispersionAmount: 0,
-    particleIntensity: 1.2,
-    orbitalSpeed: 1.0,
-    coreBrightness: 1.3,
-    scanSpeed: 1.0,
-    reducedEffects: false,
-    showComponentLabels: true,
-    pulseEnabled: true,
-    showBoundingBoxes: true,
-    spatialFormation: 'FREE',
-    sliceEnabled: false,
-    sliceAxis: 'y',
-    sliceOffset: 0
+  // Visual & Calibration Settings (persisted locally)
+  const [visualSettings, setVisualSettings] = useState<HologramVisualSettings>(() => {
+    const defaults: HologramVisualSettings = {
+      wireframe: true,
+      renderMode: 'HYBRID',
+      glowIntensity: 1.5,
+      rotationSpeed: 1.0,
+      particleCount: 2500,
+      colorTheme: 'cyan',
+      hologramColor: '#00f0ff',
+      explodedView: false,
+      explosionAmount: 0,
+      dispersionAmount: 0,
+      particleIntensity: 1.2,
+      particleSpeed: 1.0,
+      orbitalSpeed: 1.0,
+      coreBrightness: 1.3,
+      scanSpeed: 1.0,
+      reducedEffects: false,
+      showComponentLabels: true,
+      pulseEnabled: true,
+      showBoundingBoxes: true,
+      spatialFormation: 'FREE',
+      sliceEnabled: false,
+      sliceAxis: 'y',
+      sliceOffset: 0
+    };
+    if (typeof window !== 'undefined' && window.localStorage) {
+      try {
+        const saved = window.localStorage.getItem('jarvis_visual_settings_v2');
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          return {
+            ...defaults,
+            ...parsed,
+            explodedView: false,
+            explosionAmount: 0,
+            dispersionAmount: 0
+          };
+        }
+      } catch {
+        // fallback to defaults
+      }
+    }
+    return defaults;
   });
 
   const [calibration, setCalibration] = useState<GestureCalibrationSettings>(() => {
@@ -109,6 +157,24 @@ export const App: React.FC = () => {
     }
     return gestureEngine.getCalibration();
   });
+
+  // Persist user visual settings cleanly & sync tracking confidence / rotation damping
+  useEffect(() => {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      try {
+        const { explodedView: _e, explosionAmount: _ea, dispersionAmount: _da, ...persistable } = visualSettings;
+        window.localStorage.setItem('jarvis_visual_settings_v2', JSON.stringify(persistable));
+      } catch {
+        // ignore storage quota errors
+      }
+    }
+    spatialInteractionController.setExternalDispersion(visualSettings.dispersionAmount);
+  }, [visualSettings]);
+
+  useEffect(() => {
+    handTrackingService.setConfidenceThreshold(calibration.confidenceThreshold);
+    sceneManagerRef.current?.setRotationDamping(calibration.rotationDamping);
+  }, [calibration.confidenceThreshold, calibration.rotationDamping]);
 
   // Camera & Tracking State
   const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
@@ -693,39 +759,93 @@ export const App: React.FC = () => {
         feedbackText: 'Reconstructing particles back into exact original geometry.'
       },
       {
-        patterns: ['return to normal view', 'return to normal', 'normal view'],
+        patterns: ['return to normal view', 'return to normal', 'normal view', 'vision mode', 'exit focus'],
         description: 'Return to normal assembled view',
         category: 'NAVIGATION',
         action: () => {
           setMode('WORKSPACE');
-          setLeftDrawerOpen(false);
-          setRightDrawerMode('CLOSED');
-          setVoiceDrawerOpen(false);
+          setHudState(enterVisionHomeState());
           handleReconstruct();
           handleResetTransform();
         },
         feedbackText: 'Restoring clean spatial focus and assembled holographic core.'
       },
       {
-        patterns: ['open the object laboratory', 'open object laboratory', 'open laboratory', 'object laboratory'],
+        patterns: ['focus mode', 'enter focus', 'immersive mode'],
+        description: 'Enter full immersive Focus mode',
+        category: 'NAVIGATION',
+        action: () => {
+          setMode('WORKSPACE');
+          setHudState({ activeDrawer: null, isFocusMode: true });
+          audioService.playActivationWhoosh();
+        },
+        feedbackText: 'Engaging immersive Focus mode.'
+      },
+      {
+        patterns: ['open the object laboratory', 'open object laboratory', 'open laboratory', 'object laboratory', 'open lab'],
         description: 'Open Reconstruction & Manipulation Lab panel',
         category: 'NAVIGATION',
         action: () => {
           setMode('WORKSPACE');
-          setRightDrawerMode('LAB');
-          setRequestedWorkspaceTab({ tab: 'LAB', nonce: Date.now() });
+          setHudState((prev) => openDrawerState(prev, 'LAB'));
+          setRequestedWorkspaceTab({ tab: 'LAB', nonce: nextNonce() });
           audioService.playActivationWhoosh();
         },
         feedbackText: 'Opening the holographic Object Reconstruction Laboratory.'
       },
       {
-        patterns: ['show diagnostics', 'open diagnostics'],
+        patterns: ['open models', 'show models', 'model repository'],
+        description: 'Open Holographic Models drawer',
+        category: 'NAVIGATION',
+        action: () => {
+          setMode('WORKSPACE');
+          setHudState((prev) => openDrawerState(prev, 'MODELS'));
+          audioService.playChirp(1350);
+        },
+        feedbackText: 'Opening holographic repository.'
+      },
+      {
+        patterns: ['open gesture controls', 'open camera', 'gesture controls'],
+        description: 'Open Optical & Gesture drawer',
+        category: 'NAVIGATION',
+        action: () => {
+          setMode('WORKSPACE');
+          setHudState((prev) => openDrawerState(prev, 'GESTURE'));
+          audioService.playChirp(1350);
+        },
+        feedbackText: 'Opening optical sensor and gesture controls.'
+      },
+      {
+        patterns: ['open tasks', 'show tasks', 'task engine'],
+        description: 'Open Autonomous Task Engine',
+        category: 'NAVIGATION',
+        action: () => {
+          setMode('WORKSPACE');
+          setHudState((prev) => openDrawerState(prev, 'TASKS'));
+          setTaskSubTab('AUTOMATION');
+          setRequestedTaskTab({ tab: 'AUTOMATION', nonce: nextNonce() });
+          audioService.playChirp(1350);
+        },
+        feedbackText: 'Opening Autonomous Task Engine.'
+      },
+      {
+        patterns: ['open voice console', 'show voice console'],
+        description: 'Open Vocal Console',
+        category: 'NAVIGATION',
+        action: () => {
+          setMode('WORKSPACE');
+          setHudState((prev) => openDrawerState(prev, 'VOICE'));
+          audioService.playChirp(1350);
+        },
+        feedbackText: 'Opening J.A.R.V.I.S. Vocal Console.'
+      },
+      {
+        patterns: ['show diagnostics', 'open diagnostics', 'open telemetry'],
         description: 'Show reactor diagnostics & telemetry panel',
         category: 'NAVIGATION',
         action: () => {
           setMode('WORKSPACE');
-          setRightDrawerMode('DIAGNOSTICS');
-          setRequestedDiagnosticsTab({ tab: 'DIAGNOSTICS', nonce: Date.now() });
+          setHudState((prev) => openDrawerState(prev, 'TELEMETRY'));
           audioService.playChirp(1400);
         },
         feedbackText: 'Displaying live holographic diagnostics telemetry.'
@@ -736,8 +856,9 @@ export const App: React.FC = () => {
         category: 'AUTOMATION',
         action: () => {
           setMode('WORKSPACE');
-          setRightDrawerMode('DIAGNOSTICS');
-          setRequestedDiagnosticsTab({ tab: 'DIAGNOSTICS', nonce: Date.now() });
+          setHudState((prev) => openDrawerState(prev, 'TASKS'));
+          setTaskSubTab('AUTOMATION');
+          setRequestedTaskTab({ tab: 'AUTOMATION', nonce: nextNonce() });
           automationEngine.createTask(
             'Autonomous Optical & Containment Sweep',
             'Verify camera frames, landmark smoothing, and containment flux.',
@@ -932,6 +1053,10 @@ export const App: React.FC = () => {
         description: 'Autonomous overclock workflow',
         category: 'AUTOMATION',
         action: () => {
+          setMode('WORKSPACE');
+          setHudState((prev) => openDrawerState(prev, 'TASKS'));
+          setTaskSubTab('AUTOMATION');
+          setRequestedTaskTab({ tab: 'AUTOMATION', nonce: nextNonce() });
           automationEngine.createTask(
             'Reactor Overclock & High-Yield Pulse Protocol',
             'Overclock containment output and discharge radial shockwave wave.',
@@ -946,11 +1071,14 @@ export const App: React.FC = () => {
         feedbackText: 'Starting high-yield overclock workflow. Security verification required.'
       },
       {
-        patterns: ['open ai settings', 'configure ai', 'ai settings'],
-        description: 'Open AI provider modal',
+        patterns: ['open ai settings', 'configure ai', 'ai settings', 'open config'],
+        description: 'Open Rendering & AI Config drawer',
         category: 'SYSTEM',
-        action: () => setIsAIConfigOpen(true),
-        feedbackText: 'Opening AI intelligence provider configuration panel.'
+        action: () => {
+          setMode('WORKSPACE');
+          setHudState((prev) => openDrawerState(prev, 'CONFIG'));
+        },
+        feedbackText: 'Opening rendering and intelligence configuration.'
       },
       {
         patterns: ['save notes', 'export notes', 'save file'],
@@ -1066,15 +1194,18 @@ export const App: React.FC = () => {
     if (isCameraActive) {
       handTrackingService.stop();
       gestureEngine.recalibrateNeutral();
+      spatialInteractionController.reset();
       lastGestureRef.current = 'NONE';
       lastDispatchedGestureRef.current = null;
       setIsCameraActive(false);
       setCameraError(null);
       setGestureResult(null);
       setActiveGestureFeedback(null);
+      setSpatialFeedback(null);
       setLaserTarget(null);
       if (sceneManagerRef.current) {
         sceneManagerRef.current.clearRotationInertia();
+        sceneManagerRef.current.setInteractionFeedback({ isTrackingLost: false });
         sceneManagerRef.current.setHandCentroid(undefined);
         sceneManagerRef.current.updateLaserPointer(0, 0, false);
       }
@@ -1082,15 +1213,13 @@ export const App: React.FC = () => {
     } else {
       if (!videoRef.current) return;
       setCameraError(null);
+      handTrackingService.setConfidenceThreshold(calibration.confidenceThreshold);
       const started = await handTrackingService.startCamera(
         videoRef.current,
         (result, currentFps) => {
           setFps(currentFps);
           const detection = gestureEngine.processResults(result);
           setGestureResult(detection);
-          if (sceneManagerRef.current) {
-            sceneManagerRef.current.setHandCentroid(detection.hands[0]?.centroid);
-          }
         }
       );
       setIsCameraActive(started);
@@ -1103,178 +1232,163 @@ export const App: React.FC = () => {
         appendMessage('JARVIS', errMsg, 'ALERT');
       }
     }
-  }, [appendMessage, isCameraActive]);
+  }, [appendMessage, calibration.confidenceThreshold, isCameraActive]);
 
-  // GESTURE DISPATCH ENGINE
+  // CENTRALIZED SPATIAL INTERACTION DISPATCH ENGINE
   useEffect(() => {
     if (!gestureResult || lastDispatchedGestureRef.current === gestureResult) return;
     lastDispatchedGestureRef.current = gestureResult;
 
-    const g = gestureResult.activeGesture;
+    const cmd = spatialInteractionController.process(gestureResult, calibration);
     const scene = sceneManagerRef.current;
+    const g = gestureResult.activeGesture;
+
+    setSpatialFeedback(cmd.feedback);
+    if (scene) {
+      scene.setRotationDamping(calibration.rotationDamping);
+      scene.setHandCentroid(cmd.handCentroid);
+      scene.setInteractionFeedback({
+        isTrackingLost:
+          cmd.trackingStatus === 'TEMPORARY_LOSS' || cmd.trackingStatus === 'LOST'
+      });
+    }
 
     if (lastGestureRef.current === 'PINCH' && g !== 'PINCH' && g !== 'MOVE_PINCHED') {
       audioService.playPinchRelease();
     }
 
     // Update or clear 3D Laser Targeting Reticle
-    if (g !== 'TWO_FINGER_POINT' && scene) {
+    if (cmd.discreteGesture !== 'TWO_FINGER_POINT' && scene) {
       scene.updateLaserPointer(0, 0, false);
       setLaserTarget((prev) => (prev ? null : prev));
     }
 
-    if (gestureResult.trackingLost) {
-      setActiveGestureFeedback('OPTICAL TRACKING LOST // STABILIZING');
+    if (cmd.shouldClearInertia && scene) {
+      scene.clearRotationInertia();
+    }
+
+    if (cmd.trackingStatus === 'TEMPORARY_LOSS' || cmd.trackingStatus === 'RECOVERING') {
+      setActiveGestureFeedback(cmd.feedback.badgeText);
+      lastGestureRef.current = 'NONE';
+      return;
     }
 
     if (g === 'NONE') {
       lastGestureRef.current = 'NONE';
-      if (!gestureResult.trackingLost) {
-        setActiveGestureFeedback((prev) => (prev ? null : prev));
-      }
+      setActiveGestureFeedback(cmd.feedback.badgeText);
       return;
     }
 
-    // Apply continuous two-hand particle dispersion when present
-    if (gestureResult.dispersionControl && scene) {
-      const disp = gestureResult.dispersionControl;
-      scene.setDispersion(disp.dispersion, disp.phase);
-      setVisualSettings((v) =>
-        Math.abs(v.dispersionAmount - disp.dispersion) >= 0.015
-          ? { ...v, dispersionAmount: disp.dispersion }
-          : v
-      );
-    }
-
-    // A. OPEN PALM (Activate interaction / unfreeze)
-    if (g === 'OPEN_PALM') {
-      setActiveGestureFeedback('GESTURE // OPEN PALM · INTERACTION ACTIVE');
-      if (scene && selectedObjectId) {
-        scene.spatialManager.setFrozen(selectedObjectId, false);
-      }
-      setMode((prev) => {
-        if (prev === 'STANDBY') {
-          audioService.playActivationWhoosh();
-          return 'WORKSPACE';
-        }
-        return prev;
-      });
-    }
-    // B. CLOSED FIST (Hold / Freeze active object)
-    else if (g === 'CLOSED_FIST') {
-      setActiveGestureFeedback('GESTURE // CLOSED FIST · OBJECT FROZEN');
-      if (scene) scene.clearRotationInertia();
-      if (lastGestureRef.current !== 'CLOSED_FIST') {
-        audioService.playChirp(820);
-        if (scene && selectedObjectId) {
-          scene.spatialManager.setFrozen(selectedObjectId, true);
-          syncSpatialStates();
-        }
-      }
-    }
-    // C. PINCH
-    else if (g === 'PINCH') {
-      setActiveGestureFeedback('GESTURE // PINCH · TARGET GRABBED');
-      if (scene) scene.clearRotationInertia();
-      if (lastGestureRef.current !== 'PINCH' && lastGestureRef.current !== 'MOVE_PINCHED') {
-        audioService.playPinchGrab();
-      }
-    }
-    // D. MOVE PINCHED HAND
-    else if (g === 'MOVE_PINCHED' && gestureResult.deltaTranslation && scene) {
-      setActiveGestureFeedback('GESTURE // TRANSLATE OBJECT');
-      scene.applyDeltaTranslation(
-        gestureResult.deltaTranslation.x,
-        gestureResult.deltaTranslation.y,
-        gestureResult.deltaTranslation.z
-      );
-    }
-    // E. ROTATE WRIST
-    else if (g === 'ROTATE_WRIST' && gestureResult.deltaRotation && scene) {
-      setActiveGestureFeedback('GESTURE // WRIST ROTATION');
-      scene.applyDeltaRotation(
-        gestureResult.deltaRotation.x,
-        gestureResult.deltaRotation.y,
-        gestureResult.deltaRotation.z
-      );
-    }
-    // E2. CONTINUOUS HAND SPHERE ROTATION
-    else if (g === 'SPHERE_ROTATE' && gestureResult.sphericalRotationDelta && scene) {
-      const { x, y, z } = gestureResult.sphericalRotationDelta;
-      setActiveGestureFeedback('GESTURE // SPHERICAL ROTATION');
-      scene.applySphericalRotation(x, y, z);
-    }
-    // F. TWO-HAND MOVEMENT (ZOOM / DISPERSION)
-    else if (g === 'TWO_HAND_ZOOM' && scene) {
-      scene.clearRotationInertia();
-      if (gestureResult.dispersionControl) {
-        setActiveGestureFeedback(
-          `GESTURE // DISPERSION ${Math.round(gestureResult.dispersionControl.dispersion * 100)}% (${gestureResult.dispersionControl.phase})`
+    // Tier 1: Two-hand spatial dispersion & scale control (suspends conflicting single-hand actions)
+    if (cmd.priorityTier === 1) {
+      if (cmd.dispersionControl && scene) {
+        const disp = cmd.dispersionControl;
+        scene.setDispersion(disp.dispersion, disp.phase);
+        setVisualSettings((v) =>
+          Math.abs(v.dispersionAmount - disp.dispersion) >= 0.015
+            ? { ...v, dispersionAmount: disp.dispersion }
+            : v
         );
-      } else {
-        setActiveGestureFeedback('GESTURE // TWO-HAND SCALE');
       }
-      if (gestureResult.deltaScale && Math.abs(gestureResult.deltaScale - 1.0) > 0.002) {
-        scene.applyScaleMultiplier(gestureResult.deltaScale);
+      if (cmd.scaleMultiplier && scene) {
+        scene.applyScaleMultiplier(cmd.scaleMultiplier);
       }
-    }
-    // G. TWO OPEN PALMS
-    else if (g === 'TWO_OPEN_PALMS') {
-      if (scene) scene.clearRotationInertia();
-      if (gestureResult.dispersionControl) {
-        setActiveGestureFeedback(
-          `GESTURE // WIDE INTERFACE · DISPERSION ${Math.round(gestureResult.dispersionControl.dispersion * 100)}%`
-        );
-      } else {
-        setActiveGestureFeedback('GESTURE // CINEMATIC MODE');
-      }
-      if (lastGestureRef.current !== 'TWO_OPEN_PALMS') {
+      if (cmd.discreteGesture === 'TWO_OPEN_PALMS' && lastGestureRef.current !== 'TWO_OPEN_PALMS') {
         audioService.playActivationWhoosh();
         setMode('CINEMATIC');
       }
-    }
-    // H. QUICK SWIPES
-    else if (g === 'SWIPE_RIGHT' && lastGestureRef.current !== 'SWIPE_RIGHT') {
-      setActiveGestureFeedback('GESTURE // SWIPE NEXT MODULE');
-      handleNextModel();
-    } else if (g === 'SWIPE_LEFT' && lastGestureRef.current !== 'SWIPE_LEFT') {
-      setActiveGestureFeedback('GESTURE // SWIPE PREV MODULE');
-      handlePrevModel();
-    }
-    // I. TWO-FINGER POINT (Precision 3D Laser Targeting Reticle)
-    else if (g === 'TWO_FINGER_POINT' && scene && gestureResult.hands[0]) {
-      setActiveGestureFeedback('GESTURE // PRECISION LASER RETICLE');
-      const indexTip = gestureResult.hands[0].landmarks[8];
-      if (indexTip) {
-        const ndcX = (1 - indexTip.x) * 2 - 1;
-        const ndcY = -(indexTip.y * 2 - 1);
-        const hit = scene.updateLaserPointer(ndcX, ndcY, true);
-        setLaserTarget(hit);
-      }
-    }
-    // J. DOUBLE PINCH (Toggle Exploded View)
-    else if (g === 'DOUBLE_PINCH' && lastGestureRef.current !== 'DOUBLE_PINCH') {
-      setActiveGestureFeedback('GESTURE // EXPLODED ASSEMBLY TOGGLE');
-      audioService.playChirp(1500);
-      setVisualSettings((v) => {
-        const next = !v.explodedView;
-        return { ...v, explodedView: next, explosionAmount: next ? 1.0 : 0.0 };
-      });
-    }
-    // K. HAND PUSH FORWARD (Virtual Energy Displacement Shockwave)
-    else if (g === 'PUSH_FORWARD' && lastGestureRef.current !== 'PUSH_FORWARD') {
-      setActiveGestureFeedback('GESTURE // PUSH ENERGY DISPLACEMENT');
-      handleTriggerShockwave();
-    }
-    // L. HAND PULL BACK (Reconstruct / Retrieve Object)
-    else if (g === 'PULL_BACK' && lastGestureRef.current !== 'PULL_BACK') {
-      setActiveGestureFeedback('GESTURE // PULL RECONSTRUCT & RETRIEVE');
-      handleReconstruct();
-      handleResetTransform();
+      setActiveGestureFeedback(cmd.feedback.badgeText);
+      lastGestureRef.current = g;
+      return;
     }
 
+    // Tier 2: Active Hand Rotation (Spherical Rotation & Wrist Roll)
+    if (cmd.priorityTier === 2 && scene) {
+      if (cmd.rotationDelta) {
+        scene.applySphericalRotation(cmd.rotationDelta.x, cmd.rotationDelta.y, cmd.rotationDelta.z);
+      } else if (cmd.deltaRotation) {
+        scene.applyDeltaRotation(cmd.deltaRotation.x, cmd.deltaRotation.y, cmd.deltaRotation.z);
+      }
+      setActiveGestureFeedback(cmd.feedback.badgeText);
+      lastGestureRef.current = g;
+      return;
+    }
+
+    // Tier 3: Pinch Selection, 3D Translation, Double-Pinch Exploded View
+    if (cmd.priorityTier === 3) {
+      if (cmd.discreteGesture === 'PINCH') {
+        if (lastGestureRef.current !== 'PINCH' && lastGestureRef.current !== 'MOVE_PINCHED') {
+          audioService.playPinchGrab();
+        }
+      } else if (cmd.discreteGesture === 'MOVE_PINCHED' && cmd.translationDelta && scene) {
+        scene.applyDeltaTranslation(
+          cmd.translationDelta.x,
+          cmd.translationDelta.y,
+          cmd.translationDelta.z
+        );
+      } else if (cmd.discreteGesture === 'DOUBLE_PINCH' && lastGestureRef.current !== 'DOUBLE_PINCH') {
+        audioService.playChirp(1500);
+        setVisualSettings((v) => {
+          const next = !v.explodedView;
+          return { ...v, explodedView: next, explosionAmount: next ? 1.0 : 0.0 };
+        });
+      }
+      setActiveGestureFeedback(cmd.feedback.badgeText);
+      lastGestureRef.current = g;
+      return;
+    }
+
+    // Tier 4: Discrete Poses
+    if (cmd.priorityTier === 4) {
+      if (cmd.discreteGesture === 'OPEN_PALM') {
+        if (scene && selectedObjectId) {
+          scene.spatialManager.setFrozen(selectedObjectId, false);
+        }
+        setMode((prev) => {
+          if (prev === 'STANDBY') {
+            audioService.playActivationWhoosh();
+            return 'WORKSPACE';
+          }
+          return prev;
+        });
+      } else if (cmd.discreteGesture === 'CLOSED_FIST') {
+        if (lastGestureRef.current !== 'CLOSED_FIST') {
+          audioService.playChirp(820);
+          if (scene && selectedObjectId) {
+            scene.spatialManager.setFrozen(selectedObjectId, true);
+            syncSpatialStates();
+          }
+        }
+      } else if (cmd.discreteGesture === 'TWO_FINGER_POINT' && scene && cmd.laserPointNdc) {
+        const hit = scene.updateLaserPointer(cmd.laserPointNdc.x, cmd.laserPointNdc.y, true);
+        setLaserTarget(hit);
+      } else if (cmd.discreteGesture === 'PUSH_FORWARD' && lastGestureRef.current !== 'PUSH_FORWARD') {
+        handleTriggerShockwave();
+      } else if (cmd.discreteGesture === 'PULL_BACK' && lastGestureRef.current !== 'PULL_BACK') {
+        handleReconstruct();
+        handleResetTransform();
+      }
+      setActiveGestureFeedback(cmd.feedback.badgeText);
+      lastGestureRef.current = g;
+      return;
+    }
+
+    // Tier 5: Navigation Swipes
+    if (cmd.priorityTier === 5 && cmd.navigationSwipe) {
+      if (cmd.navigationSwipe === 'SWIPE_RIGHT' && lastGestureRef.current !== 'SWIPE_RIGHT') {
+        handleNextModel();
+      } else if (cmd.navigationSwipe === 'SWIPE_LEFT' && lastGestureRef.current !== 'SWIPE_LEFT') {
+        handlePrevModel();
+      }
+      setActiveGestureFeedback(cmd.feedback.badgeText);
+      lastGestureRef.current = g;
+      return;
+    }
+
+    setActiveGestureFeedback(cmd.feedback.badgeText);
     lastGestureRef.current = g;
   }, [
+    calibration,
     gestureResult,
     handleNextModel,
     handlePrevModel,
@@ -1303,14 +1417,46 @@ export const App: React.FC = () => {
     }
   }, [isVoiceActive, isSpeaking, isProcessingCommand]);
 
-  // Project 2D component callout labels smoothly when Exploded View or VISION 1.2 CORE is active
+  // Sync Right Drawer sub-tabs deterministically when activeDrawer changes
   useEffect(() => {
-    const shouldShowLabels =
-      visualSettings.showComponentLabels &&
-      (visualSettings.explosionAmount > 0.15 ||
-        (currentModelId === 'vision_sphere' &&
-          !visualSettings.reducedEffects &&
-          visualSettings.dispersionAmount < 0.85));
+    if (hudState.activeDrawer === 'MODELS') {
+      setRequestedDiagnosticsTab({ tab: 'MODELS', nonce: nextNonce() });
+    } else if (hudState.activeDrawer === 'TELEMETRY') {
+      setRequestedDiagnosticsTab({ tab: 'DIAGNOSTICS', nonce: nextNonce() });
+    } else if (hudState.activeDrawer === 'CONFIG') {
+      setRequestedDiagnosticsTab({ tab: 'SETTINGS', nonce: nextNonce() });
+    } else if (hudState.activeDrawer === 'LAB') {
+      setRequestedWorkspaceTab({ tab: 'LAB', nonce: nextNonce() });
+    } else if (hudState.activeDrawer === 'TASKS') {
+      setRequestedTaskTab({ tab: taskSubTab, nonce: nextNonce() });
+    }
+  }, [hudState.activeDrawer, taskSubTab]);
+
+  // Escape closes active drawer first, then exits Focus mode
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (isAIConfigOpen) {
+        setIsAIConfigOpen(false);
+        return;
+      }
+      setHudState((prev) => handleEscapeKeyState(prev));
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isAIConfigOpen]);
+
+  // Project 2D component callout labels smoothly when Exploded View or VISION 1.2 CORE is active (hidden in Focus/Standby)
+  useEffect(() => {
+    const shouldShowLabels = shouldShowProjectedLabels({
+      showComponentLabels: visualSettings.showComponentLabels,
+      isFocusMode: hudState.isFocusMode,
+      isStandby: mode === 'STANDBY',
+      explosionAmount: visualSettings.explosionAmount,
+      currentModelId,
+      reducedEffects: visualSettings.reducedEffects,
+      dispersionAmount: visualSettings.dispersionAmount
+    });
 
     if (!shouldShowLabels) {
       if (componentLabels.length > 0) setComponentLabels([]);
@@ -1330,6 +1476,8 @@ export const App: React.FC = () => {
     visualSettings.reducedEffects,
     visualSettings.dispersionAmount,
     currentModelId,
+    hudState.isFocusMode,
+    mode,
     componentLabels.length
   ]);
 
@@ -1350,28 +1498,37 @@ export const App: React.FC = () => {
     ? 'LISTENING'
     : 'ACTIVE';
 
-  const isDispersed = visualSettings.dispersionAmount >= 0.45 || Boolean(selectedSpatialObj?.isDisintegrated);
-  const hasOpenDrawers = leftDrawerOpen || rightDrawerMode !== 'CLOSED' || voiceDrawerOpen;
+  const handleSelectVisionHome = useCallback(() => {
+    setMode('WORKSPACE');
+    setHudState(enterVisionHomeState());
+  }, []);
 
-  const handleToggleDispersion = useCallback(() => {
-    if (isDispersed) {
-      handleReconstruct();
-    } else {
-      setVisualSettings((v) => ({ ...v, dispersionAmount: 1.0 }));
-      sceneManagerRef.current?.setDispersion(1.0, 'DISPERSED');
-      handleDisintegrate();
-    }
-  }, [handleDisintegrate, handleReconstruct, isDispersed]);
+  const handleSelectDrawer = useCallback((drawer: HudDrawerId) => {
+    setMode('WORKSPACE');
+    setHudState((prev) => toggleDrawerState(prev, drawer));
+  }, []);
 
-  const handleToggleCollapseAll = useCallback(() => {
-    if (hasOpenDrawers) {
-      setLeftDrawerOpen(false);
-      setRightDrawerMode('CLOSED');
-      setVoiceDrawerOpen(false);
-    } else {
-      setRightDrawerMode('LAB');
-    }
-  }, [hasOpenDrawers]);
+  const handleSwitchDrawer = useCallback((drawer: HudDrawerId) => {
+    setMode('WORKSPACE');
+    setHudState((prev) => openDrawerState(prev, drawer));
+  }, []);
+
+  const handleToggleFocusMode = useCallback(() => {
+    setMode('WORKSPACE');
+    setHudState((prev) => toggleFocusModeState(prev));
+  }, []);
+
+  const handleResetEnvironment = useCallback(() => {
+    setVisualSettings((v) => ({
+      ...v,
+      explodedView: false,
+      explosionAmount: 0,
+      dispersionAmount: 0,
+      sliceEnabled: false
+    }));
+    handleReconstruct();
+    handleResetTransform();
+  }, [handleReconstruct, handleResetTransform]);
 
   const handleBootProgress = useCallback((p: number) => {
     sceneManagerRef.current?.setInitializationProgress(p);
@@ -1381,6 +1538,15 @@ export const App: React.FC = () => {
     sceneManagerRef.current?.skipInitialization();
     setShowBootOverlay(false);
   }, []);
+
+  const showLeftDrawer =
+    mode !== 'STANDBY' && !hudState.isFocusMode && hudState.activeDrawer === 'GESTURE';
+  const showRightDrawer =
+    mode !== 'STANDBY' && !hudState.isFocusMode && isRightDrawer(hudState.activeDrawer);
+  const showTaskConsole =
+    mode !== 'STANDBY' && !hudState.isFocusMode && hudState.activeDrawer === 'TASKS';
+  const showVoiceConsole =
+    mode !== 'STANDBY' && !hudState.isFocusMode && hudState.activeDrawer === 'VOICE';
 
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-[#02060c] font-mono text-cyan-400 select-none flex flex-col">
@@ -1406,36 +1572,54 @@ export const App: React.FC = () => {
         laserTarget={laserTarget}
         componentLabels={componentLabels}
         activeGestureFeedback={activeGestureFeedback}
+        spatialFeedback={spatialFeedback}
         isTrackingLost={isTrackingLost}
         startAtInitZero={!autostart}
+        hideProjectedLabels={hudState.isFocusMode || mode === 'STANDBY'}
       />
 
-      {/* 2. Slim Top Telemetry Bar */}
+      {/* 2. Slim 3-Zone Top Navigation Bar (or Minimal Focus Header) */}
       {mode !== 'STANDBY' && (
         <TopStatusBar
-          mode={mode}
           fps={fps}
           coreState={coreActivityLabel}
-          onModeChange={(nextMode) => {
-            setMode(nextMode);
-            if (nextMode === 'CINEMATIC') {
-              setLeftDrawerOpen(false);
-              setRightDrawerMode('CLOSED');
-              setVoiceDrawerOpen(false);
-            }
-          }}
-          hasOpenDrawers={hasOpenDrawers}
-          onToggleCollapseAll={handleToggleCollapseAll}
+          isCameraActive={isCameraActive}
+          isVoiceActive={isVoiceActive}
+          activeDrawer={hudState.activeDrawer}
+          isFocusMode={hudState.isFocusMode}
+          onSelectVisionHome={handleSelectVisionHome}
+          onSelectDrawer={handleSelectDrawer}
+          onToggleFocusMode={handleToggleFocusMode}
         />
       )}
 
-      {/* 3. Unobstructed Center Spatial Area with Collapsible Edge Drawers */}
-      {mode !== 'STANDBY' && (
-        <div className="relative z-20 flex-1 pointer-events-none flex justify-between items-stretch p-3 overflow-hidden">
-          {/* Left Edge Column: Collapsible Optical Sensor & Vocal Stream */}
-          <div className="flex flex-col justify-between items-start space-y-2 max-h-full">
-            {leftDrawerOpen && (
-              <div className="pointer-events-auto overflow-y-auto max-h-full pr-1 animate-fade-in">
+      {/* 3. Contextual Drawers & Floating Consoles (Overlay with pointer-events-none wrapper so 3D canvas remains unobstructed) */}
+      {mode !== 'STANDBY' && !hudState.isFocusMode && (
+        <div className="pointer-events-none fixed inset-0 z-30">
+          {/* Left Sliding Drawer: Optical Sensor, Gesture Engine, Calibration, Manual */}
+          {showLeftDrawer && (
+            <aside
+              aria-label="Optical and Gesture Drawer"
+              data-testid="left-gesture-drawer"
+              className="pointer-events-auto fixed left-3 top-14 bottom-20 w-[min(340px,92vw)] flex flex-col rounded-xl bg-[#020914]/88 border border-cyan-500/35 shadow-[0_0_28px_rgba(0,240,255,0.16)] overflow-hidden animate-fade-in"
+            >
+              <div className="flex items-center justify-between px-3 py-2 border-b border-cyan-500/25 bg-black/40 shrink-0">
+                <span className="font-orbitron font-bold text-[10px] tracking-[0.16em] text-white">
+                  OPTICAL & GESTURE SYSTEM
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    audioService.playChirp(1000);
+                    setHudState(closeDrawerState);
+                  }}
+                  aria-label="Close Gesture Drawer"
+                  className="p-1 rounded border border-cyan-500/30 text-cyan-300 hover:text-white hover:border-cyan-400 transition-colors"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto p-2.5">
                 <LeftVisionHUD
                   isCameraActive={isCameraActive}
                   cameraError={cameraError}
@@ -1458,29 +1642,177 @@ export const App: React.FC = () => {
                   videoRef={videoRef}
                 />
               </div>
-            )}
+            </aside>
+          )}
 
-            {voiceDrawerOpen && (
-              <div className="pointer-events-auto mt-auto animate-fade-in">
-                <VoiceConsoleHUD
-                  messages={messages}
-                  onSendCommand={handleSendConsoleCommand}
-                  isListening={isVoiceActive}
-                  isSpeaking={isSpeaking}
-                  isProcessing={isProcessingCommand}
-                  onClearHistory={() => setMessages((prev) => prev.slice(0, 1))}
-                />
+          {/* Right Sliding Drawer: Models, Reconstruction Lab, Telemetry, Configuration */}
+          {showRightDrawer && (
+            <aside
+              aria-label="Workspace and Telemetry Drawer"
+              data-testid="right-workspace-drawer"
+              className="pointer-events-auto fixed right-3 top-14 bottom-20 w-[min(368px,92vw)] flex flex-col rounded-xl bg-[#020914]/88 border border-cyan-500/35 shadow-[0_0_28px_rgba(0,240,255,0.16)] overflow-hidden animate-fade-in"
+            >
+              <div className="flex items-center justify-between gap-2 px-2.5 py-2 border-b border-cyan-500/25 bg-black/40 shrink-0">
+                <div className="flex items-center gap-1 overflow-x-auto no-scrollbar" role="tablist" aria-label="Right Drawer Sections">
+                  {(['MODELS', 'LAB', 'TELEMETRY', 'CONFIG'] as const).map((tab) => {
+                    const isTabActive = hudState.activeDrawer === tab;
+                    return (
+                      <button
+                        key={tab}
+                        type="button"
+                        role="tab"
+                        aria-selected={isTabActive}
+                        onClick={() => {
+                          audioService.playChirp(1300);
+                          handleSwitchDrawer(tab);
+                        }}
+                        className={`px-2 py-1 rounded font-orbitron text-[9.5px] tracking-wider whitespace-nowrap shrink-0 border transition-colors ${
+                          isTabActive
+                            ? 'border-cyan-400 bg-cyan-500/25 text-white font-bold'
+                            : 'border-transparent text-cyan-300/75 hover:text-white hover:border-cyan-500/30'
+                        }`}
+                      >
+                        {tab}
+                      </button>
+                    );
+                  })}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    audioService.playChirp(1000);
+                    setHudState(closeDrawerState);
+                  }}
+                  aria-label="Close Workspace Drawer"
+                  className="p-1 rounded border border-cyan-500/30 text-cyan-300 hover:text-white hover:border-cyan-400 shrink-0 transition-colors"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
               </div>
-            )}
-          </div>
 
-          {/* Center remains 100% open & unobstructed for the Vision X Hologram */}
-          <div className="flex-1 pointer-events-none" />
+              <div className="flex-1 overflow-y-auto p-2.5">
+                {hudState.activeDrawer === 'LAB' ? (
+                  <FloatingSpatialPanels
+                    spatialObjects={spatialObjects}
+                    selectedObjectId={selectedObjectId}
+                    visualSettings={visualSettings}
+                    isCameraActive={isCameraActive}
+                    onUpdateVisualSettings={(settings) =>
+                      setVisualSettings((v) => ({ ...v, ...settings }))
+                    }
+                    onSelectObject={handleSelectObject}
+                    onAddObject={handleAddSpatialObject}
+                    onDuplicateObject={handleDuplicateObject}
+                    onDeleteObject={handleDeleteObject}
+                    onToggleLockObject={handleToggleLockObject}
+                    onTransformObject={handleTransformObject}
+                    onResetSelectedTransform={handleResetTransform}
+                    onGroupAll={handleGroupAll}
+                    onUngroupObject={handleUngroupObject}
+                    onApplyFormation={handleApplyFormation}
+                    onSynthesizePreset={handleSynthesizePreset}
+                    onImportMeshFile={handleImportMeshFile}
+                    onReconstructImages={handleReconstructImages}
+                    onCaptureWebcamScan={handleCaptureWebcamScan}
+                    onTriggerRescan={handleTriggerRescan}
+                    onRotate360={handleRotate360}
+                    onDisintegrate={handleDisintegrate}
+                    onReconstruct={handleReconstruct}
+                    notes={notes}
+                    onUpdateNotes={setNotes}
+                    requestedTab={requestedWorkspaceTab}
+                    visibleTabs={['OBJECTS', 'LAB']}
+                  />
+                ) : (
+                  <RightDiagnosticsHUD
+                    currentModelId={currentModelId}
+                    selectedObject={selectedSpatialObj}
+                    onSelectModel={handleSelectModel}
+                    visualSettings={visualSettings}
+                    onUpdateVisualSettings={(settings) =>
+                      setVisualSettings((v) => ({ ...v, ...settings }))
+                    }
+                    onOpenAIConfig={() => setIsAIConfigOpen(true)}
+                    isCameraActive={isCameraActive}
+                    onToggleCamera={handleToggleCamera}
+                    calibration={calibration}
+                    onUpdateCalibration={(cal) => {
+                      setCalibration((prev) => ({ ...prev, ...cal }));
+                      gestureEngine.updateCalibration(cal);
+                    }}
+                    onResetCalibration={() => {
+                      const defaults = gestureEngine.resetCalibrationToDefaults();
+                      gestureEngine.updateCalibration({ mirrorX: true });
+                      setCalibration({ ...defaults, mirrorX: true });
+                    }}
+                    onRecalibrateNeutral={() => {
+                      gestureEngine.recalibrateNeutral();
+                      appendMessage('JARVIS', 'Neutral optical hand anchor recalibrated.', 'INFO');
+                    }}
+                    requestedTab={requestedDiagnosticsTab}
+                    hideTabBar
+                  />
+                )}
+              </div>
+            </aside>
+          )}
 
-          {/* Right Edge Column: Collapsible Object Lab OR Diagnostics & Model Catalog */}
-          <div className="flex flex-col justify-start items-end max-h-full">
-            {rightDrawerMode === 'LAB' && (
-              <div className="pointer-events-auto overflow-y-auto max-h-full pl-1 animate-fade-in">
+          {/* Bottom-Center Contextual Panel: Autonomous Task Engine (+ Memo & Clock) */}
+          {showTaskConsole && (
+            <section
+              aria-label="Autonomous Task Engine"
+              data-testid="tasks-console-drawer"
+              className="pointer-events-auto fixed bottom-20 left-1/2 -translate-x-1/2 w-[min(560px,94vw)] max-h-[50vh] flex flex-col rounded-xl bg-[#020914]/90 border border-cyan-500/35 shadow-[0_0_28px_rgba(0,240,255,0.18)] overflow-hidden animate-fade-in"
+            >
+              <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-cyan-500/25 bg-black/40 shrink-0">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="font-orbitron font-bold text-[10px] tracking-[0.14em] text-white whitespace-nowrap">
+                    TASK ENGINE
+                  </span>
+                  <div className="flex items-center gap-1" role="tablist" aria-label="Task Engine Sections">
+                    {(
+                      [
+                        { id: 'AUTOMATION', label: 'TASKS' },
+                        { id: 'NOTES', label: 'MEMO' },
+                        { id: 'TIMER', label: 'CLOCK' }
+                      ] as const
+                    ).map((sub) => (
+                      <button
+                        key={sub.id}
+                        type="button"
+                        role="tab"
+                        aria-selected={taskSubTab === sub.id}
+                        onClick={() => {
+                          audioService.playChirp(1250);
+                          setTaskSubTab(sub.id);
+                          setRequestedTaskTab({ tab: sub.id, nonce: nextNonce() });
+                        }}
+                        className={`px-2 py-0.5 rounded font-orbitron text-[9px] tracking-wider border transition-colors ${
+                          taskSubTab === sub.id
+                            ? 'border-cyan-400 bg-cyan-500/25 text-white font-bold'
+                            : 'border-transparent text-cyan-300/75 hover:text-white'
+                        }`}
+                      >
+                        {sub.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    audioService.playChirp(1000);
+                    setHudState(closeDrawerState);
+                  }}
+                  aria-label="Close Task Console"
+                  className="p-1 rounded border border-cyan-500/30 text-cyan-300 hover:text-white hover:border-cyan-400 shrink-0 transition-colors"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-2.5">
                 <FloatingSpatialPanels
                   spatialObjects={spatialObjects}
                   selectedObjectId={selectedObjectId}
@@ -1509,65 +1841,53 @@ export const App: React.FC = () => {
                   onReconstruct={handleReconstruct}
                   notes={notes}
                   onUpdateNotes={setNotes}
-                  requestedTab={requestedWorkspaceTab}
+                  requestedTab={requestedTaskTab}
+                  visibleTabs={['AUTOMATION', 'NOTES', 'TIMER']}
+                  hideTabBar
                 />
               </div>
-            )}
+            </section>
+          )}
 
-            {rightDrawerMode === 'DIAGNOSTICS' && (
-              <div className="pointer-events-auto overflow-y-auto max-h-full pl-1 animate-fade-in">
-                <RightDiagnosticsHUD
-                  currentModelId={currentModelId}
-                  selectedObject={selectedSpatialObj}
-                  onSelectModel={handleSelectModel}
-                  visualSettings={visualSettings}
-                  onUpdateVisualSettings={(settings) =>
-                    setVisualSettings((v) => ({ ...v, ...settings }))
-                  }
-                  onOpenAIConfig={() => setIsAIConfigOpen(true)}
-                  requestedTab={requestedDiagnosticsTab}
-                />
-              </div>
-            )}
-          </div>
+          {/* Bottom-Center Contextual Panel: Vocal Console */}
+          {showVoiceConsole && (
+            <section
+              aria-label="JARVIS Vocal Console"
+              data-testid="voice-console-drawer"
+              className="pointer-events-auto fixed bottom-20 left-1/2 -translate-x-1/2 w-[min(540px,94vw)] max-h-[52vh] overflow-y-auto rounded-xl animate-fade-in"
+            >
+              <VoiceConsoleHUD
+                messages={messages}
+                onSendCommand={handleSendConsoleCommand}
+                isListening={isVoiceActive}
+                isSpeaking={isSpeaking}
+                isProcessing={isProcessingCommand}
+                voiceError={voiceError}
+                onToggleVoice={handleToggleVoice}
+                onClearHistory={() => setMessages((prev) => prev.slice(0, 1))}
+                onClose={() => setHudState(closeDrawerState)}
+              />
+            </section>
+          )}
         </div>
       )}
 
       {/* Hidden video element preserved when Optical drawer is collapsed so camera tracking keeps running */}
-      {!leftDrawerOpen && (
+      {!showLeftDrawer && (
         <video ref={videoRef} className="hidden" playsInline muted />
       )}
 
-      {/* 4. Unified Slim Bottom Command Dock */}
+      {/* 4. Compact Floating Bottom Control Strip */}
       {mode !== 'STANDBY' && (
         <BottomControlHUD
-          currentMode={mode}
-          onSelectMode={(nextMode) => {
-            setMode(nextMode);
-            if (nextMode === 'CINEMATIC') {
-              setLeftDrawerOpen(false);
-              setRightDrawerMode('CLOSED');
-              setVoiceDrawerOpen(false);
-            }
-          }}
-          isVoiceActive={isVoiceActive}
-          voiceError={voiceError}
-          onToggleVoice={handleToggleVoice}
-          onSendCommand={handleSendConsoleCommand}
-          onTriggerShockwave={handleTriggerShockwave}
-          onResetTransform={handleResetTransform}
+          activeDrawer={hudState.activeDrawer}
+          isFocusMode={hudState.isFocusMode}
           isCameraActive={isCameraActive}
-          onToggleCamera={handleToggleCamera}
-          isDispersed={isDispersed}
-          onToggleDispersion={handleToggleDispersion}
-          leftDrawerOpen={leftDrawerOpen}
-          onToggleLeftDrawer={() => setLeftDrawerOpen((prev) => !prev)}
-          rightDrawerMode={rightDrawerMode}
-          onToggleRightDrawer={(target) =>
-            setRightDrawerMode((prev) => (prev === target ? 'CLOSED' : target))
-          }
-          voiceDrawerOpen={voiceDrawerOpen}
-          onToggleVoiceDrawer={() => setVoiceDrawerOpen((prev) => !prev)}
+          isVoiceActive={isVoiceActive}
+          onSelectVisionHome={handleSelectVisionHome}
+          onSelectDrawer={handleSelectDrawer}
+          onResetTransform={handleResetEnvironment}
+          onToggleFocusMode={handleToggleFocusMode}
         />
       )}
 

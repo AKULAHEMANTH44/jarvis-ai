@@ -17,12 +17,17 @@ export const DEFAULT_CALIBRATION: GestureCalibrationSettings = {
   pullSensitivity: 0.035,  // Positive delta Z = moving away from camera
   swipeSensitivity: 0.055,
   rotationSensitivity: 4.8,
+  verticalSensitivity: 4.2,
+  wristRotationSensitivity: 1.0,
   rotationDeadZone: 0.0035,
   maxRotationSpeed: 0.18,
+  rotationDamping: 6.5,
   mirrorX: false,
   twoHandMinDist: 0.14,
   twoHandMaxDist: 0.62,
-  dispersionSmoothing: 0.28
+  twoHandSensitivity: 1.0,
+  dispersionSmoothing: 0.28,
+  confidenceThreshold: 0.5
 };
 
 const STORAGE_KEY = 'jarvis_gesture_calibration';
@@ -162,37 +167,9 @@ export class GestureEngine {
         : 0.033;
     this.prevTimestamp = timestamp;
 
-    // Hand-loss recovery: cleanly clear transient tracking states when no hands detected
-    if (!rawHands || rawHands.length === 0) {
-      const wasTracking = this.hadHandsPreviously;
-      this.hadHandsPreviously = false;
-      this.trackedHands = [];
-      this.neutralAnchor = null;
-      this.prevTwoHandDistance = null;
-      this.smoothedTwoHandDistance = null;
-      this.lastPinchCentroid = null;
-      this.prevPinchState = false;
-      this.smoothedRotVel = { x: 0, y: 0 };
-      this.twoHandExitStabilizeFrames = 0;
-      this.prevGesture = 'NONE';
-      return {
-        activeGesture: 'NONE',
-        confidence: 0,
-        description: 'Awaiting hand presence in optical field',
-        hands: [],
-        trackingLost: wasTracking,
-        timestamp
-      };
-    }
-
-    this.hadHandsPreviously = true;
-    const detectedHands: DetectedHand[] = [];
-    const alpha = this.calibration.smoothingFactor;
-    const prevTracked = this.trackedHands;
-
-    // Match incoming MediaPipe hands to persistent tracked identities by nearest centroid
-    // (with subtle handedness tie-breaker) so hand slot swaps never blend Left/Right hands.
-    const rawMeta = rawHands.map((currentRaw, i) => {
+    // Build raw metadata and filter out hands below configured tracking confidence threshold
+    const minConfidence = clamp(this.calibration.confidenceThreshold ?? 0.5, 0.2, 0.95);
+    const rawMetaAll = (rawHands || []).map((currentRaw, i) => {
       const handedness: 'Left' | 'Right' =
         rawHandedness && rawHandedness[i] && rawHandedness[i][0]
           ? (rawHandedness[i][0].displayName as 'Left' | 'Right')
@@ -215,6 +192,38 @@ export class GestureEngine {
       };
       return { currentRaw, handedness, confidence, rawCentroid };
     });
+
+    const rawMeta = rawMetaAll.filter((m) => m.confidence >= minConfidence);
+
+    // Hand-loss recovery: cleanly clear transient tracking states when no qualifying hands detected
+    if (rawMeta.length === 0) {
+      const wasTracking = this.hadHandsPreviously;
+      this.hadHandsPreviously = false;
+      this.trackedHands = [];
+      this.neutralAnchor = null;
+      this.prevTwoHandDistance = null;
+      this.smoothedTwoHandDistance = null;
+      this.lastPinchCentroid = null;
+      this.prevPinchState = false;
+      this.smoothedRotVel = { x: 0, y: 0 };
+      this.twoHandExitStabilizeFrames = 0;
+      this.prevGesture = 'NONE';
+      return {
+        activeGesture: 'NONE',
+        confidence: 0,
+        description: 'Awaiting hand presence in optical field',
+        hands: [],
+        trackingLost: wasTracking,
+        angularVelocity: 0,
+        rotationDirection: 'NONE',
+        timestamp
+      };
+    }
+
+    this.hadHandsPreviously = true;
+    const detectedHands: DetectedHand[] = [];
+    const alpha = this.calibration.smoothingFactor;
+    const prevTracked = this.trackedHands;
 
     const candidatePairs: Array<{ rawIdx: number; prevIdx: number; score: number }> = [];
     for (let r = 0; r < rawMeta.length; r++) {
@@ -388,8 +397,9 @@ export class GestureEngine {
       }
 
       const span = Math.max(0.05, this.calibration.twoHandMaxDist - this.calibration.twoHandMinDist);
+      const twoHandSens = clamp(this.calibration.twoHandSensitivity ?? 1.0, 0.4, 2.5);
       const normalizedDistance = clamp(
-        (this.smoothedTwoHandDistance - this.calibration.twoHandMinDist) / span,
+        ((this.smoothedTwoHandDistance - this.calibration.twoHandMinDist) / span) * twoHandSens,
         0,
         1
       );
@@ -477,11 +487,14 @@ export class GestureEngine {
 
         const rotAlpha = 0.45;
         const maxSpeed = this.calibration.maxRotationSpeed;
-        const gain = this.calibration.rotationSensitivity;
-        const targetRy = clamp(effDx * gain, -maxSpeed, maxSpeed);
-        const targetRx = clamp(effDy * gain, -maxSpeed, maxSpeed);
+        const gainX = this.calibration.rotationSensitivity;
+        const gainY = this.calibration.verticalSensitivity ?? this.calibration.rotationSensitivity;
+        const targetRy = clamp(effDx * gainX, -maxSpeed, maxSpeed);
+        const targetRx = clamp(effDy * gainY, -maxSpeed, maxSpeed);
         this.smoothedRotVel.x = this.smoothedRotVel.x * (1 - rotAlpha) + targetRx * rotAlpha;
         this.smoothedRotVel.y = this.smoothedRotVel.y * (1 - rotAlpha) + targetRy * rotAlpha;
+        if (effDx === 0 && Math.abs(this.smoothedRotVel.y) < 1e-4) this.smoothedRotVel.y = 0;
+        if (effDy === 0 && Math.abs(this.smoothedRotVel.x) < 1e-4) this.smoothedRotVel.x = 0;
       } else if (!prevC) {
         this.smoothedRotVel = { x: 0, y: 0 };
       }
@@ -532,10 +545,11 @@ export class GestureEngine {
       else if (Math.abs(primaryHand.wristRotation.roll) > 0.38) {
         activeGesture = 'ROTATE_WRIST';
         this.smoothedRotVel = { x: 0, y: 0 };
+        const wristGain = clamp(this.calibration.wristRotationSensitivity ?? 1.0, 0.2, 2.5);
         deltaRotation = {
-          x: primaryHand.wristRotation.pitch * 0.08,
-          y: primaryHand.wristRotation.roll * 0.1,
-          z: primaryHand.wristRotation.yaw * 0.08
+          x: primaryHand.wristRotation.pitch * 0.08 * wristGain,
+          y: primaryHand.wristRotation.roll * 0.1 * wristGain,
+          z: primaryHand.wristRotation.yaw * 0.08 * wristGain
         };
         sphericalRotationDelta = { ...deltaRotation };
         description = `Wrist Rotate: Rolling ${primaryHand.wristRotation.roll.toFixed(2)} rad`;
@@ -582,13 +596,18 @@ export class GestureEngine {
           }
         }
       }
-      // Check E2: CONTINUOUS HAND MOVEMENT -> SPHERE ROTATION (with dead zone & transition stabilization)
+      // Check E2: CONTINUOUS HAND MOVEMENT -> SPHERE ROTATION (with dead zone & fine wrist adjustment)
       else if (!isTransitionStabilizing && (Math.abs(effDx) > 0 || Math.abs(effDy) > 0)) {
         activeGesture = 'SPHERE_ROTATE';
+        const wristGain = clamp(this.calibration.wristRotationSensitivity ?? 1.0, 0.2, 2.5);
+        const fineWristZ =
+          Math.abs(primaryHand.wristRotation.roll) > 0.08
+            ? primaryHand.wristRotation.roll * 0.025 * wristGain
+            : 0;
         sphericalRotationDelta = {
           x: this.smoothedRotVel.x,
           y: this.smoothedRotVel.y,
-          z: 0
+          z: fineWristZ
         };
         const dirLabel =
           Math.abs(effDx) >= Math.abs(effDy)
@@ -622,6 +641,24 @@ export class GestureEngine {
       this.prevGesture = activeGesture;
     }
 
+    let angularVelocity = 0;
+    let rotationDirection: GestureDetectionResult['rotationDirection'] = 'NONE';
+    if (sphericalRotationDelta && (activeGesture === 'SPHERE_ROTATE' || activeGesture === 'ROTATE_WRIST')) {
+      const mag = Math.hypot(
+        sphericalRotationDelta.x,
+        sphericalRotationDelta.y,
+        sphericalRotationDelta.z
+      );
+      angularVelocity = mag / dt;
+      if (activeGesture === 'ROTATE_WRIST') {
+        rotationDirection = 'ROLL';
+      } else if (Math.abs(sphericalRotationDelta.y) >= Math.abs(sphericalRotationDelta.x)) {
+        rotationDirection = sphericalRotationDelta.y >= 0 ? 'RIGHT' : 'LEFT';
+      } else {
+        rotationDirection = sphericalRotationDelta.x < 0 ? 'UP' : 'DOWN';
+      }
+    }
+
     return {
       activeGesture,
       confidence: primaryHand ? primaryHand.confidence : 0,
@@ -634,6 +671,8 @@ export class GestureEngine {
       sphericalRotationDelta,
       deltaTranslation,
       dispersionControl,
+      angularVelocity,
+      rotationDirection,
       timestamp
     };
   }

@@ -7,6 +7,7 @@ import {
   HologramVisualSettings,
   SpatialObjectState
 } from '../../types/hologram';
+import { GestureCalibrationSettings } from '../../types/gesture';
 import { Layers, Cpu, Wrench, KeyRound } from 'lucide-react';
 import { audioService } from '../../services/soundFx';
 
@@ -17,7 +18,14 @@ interface RightDiagnosticsHUDProps {
   visualSettings: HologramVisualSettings;
   onUpdateVisualSettings: (settings: Partial<HologramVisualSettings>) => void;
   onOpenAIConfig?: () => void;
+  isCameraActive?: boolean;
+  onToggleCamera?: () => void;
+  calibration?: GestureCalibrationSettings;
+  onUpdateCalibration?: (cal: Partial<GestureCalibrationSettings>) => void;
+  onResetCalibration?: () => void;
+  onRecalibrateNeutral?: () => void;
   requestedTab?: { tab: 'MODELS' | 'DIAGNOSTICS' | 'SETTINGS'; nonce: number } | null;
+  hideTabBar?: boolean;
 }
 
 const MODEL_CATALOG: HologramModelInfo[] = [
@@ -264,7 +272,14 @@ export const RightDiagnosticsHUD: React.FC<RightDiagnosticsHUDProps> = ({
   visualSettings,
   onUpdateVisualSettings,
   onOpenAIConfig,
-  requestedTab
+  isCameraActive = false,
+  onToggleCamera,
+  calibration,
+  onUpdateCalibration,
+  onResetCalibration,
+  onRecalibrateNeutral,
+  requestedTab,
+  hideTabBar = false
 }) => {
   const [activeTab, setActiveTab] = useState<'MODELS' | 'DIAGNOSTICS' | 'SETTINGS'>('MODELS');
 
@@ -292,40 +307,42 @@ export const RightDiagnosticsHUD: React.FC<RightDiagnosticsHUDProps> = ({
   };
 
   return (
-    <div className="flex flex-col space-y-3 w-80 text-xs">
-      {/* Tab Navigation */}
-      <div className="flex rounded-lg bg-black/70 border border-cyan-500/30 p-1 space-x-1">
-        <button
-          onClick={() => handleTabChange('MODELS')}
-          className={`flex-1 py-1 rounded font-orbitron text-[10px] tracking-wider transition-all ${
-            activeTab === 'MODELS'
-              ? 'bg-cyan-500/30 text-white border border-cyan-400 font-bold'
-              : 'text-cyan-400/70 hover:text-cyan-300'
-          }`}
-        >
-          MODELS
-        </button>
-        <button
-          onClick={() => handleTabChange('DIAGNOSTICS')}
-          className={`flex-1 py-1 rounded font-orbitron text-[10px] tracking-wider transition-all ${
-            activeTab === 'DIAGNOSTICS'
-              ? 'bg-cyan-500/30 text-white border border-cyan-400 font-bold'
-              : 'text-cyan-400/70 hover:text-cyan-300'
-          }`}
-        >
-          TELEMETRY
-        </button>
-        <button
-          onClick={() => handleTabChange('SETTINGS')}
-          className={`flex-1 py-1 rounded font-orbitron text-[10px] tracking-wider transition-all ${
-            activeTab === 'SETTINGS'
-              ? 'bg-cyan-500/30 text-white border border-cyan-400 font-bold'
-              : 'text-cyan-400/70 hover:text-cyan-300'
-          }`}
-        >
-          CONFIG
-        </button>
-      </div>
+    <div className="flex flex-col space-y-3 w-full text-xs">
+      {/* Tab Navigation (optional when controlled by drawer header) */}
+      {!hideTabBar && (
+        <div className="flex rounded-lg bg-black/70 border border-cyan-500/30 p-1 space-x-1">
+          <button
+            onClick={() => handleTabChange('MODELS')}
+            className={`flex-1 py-1 rounded font-orbitron text-[10px] tracking-wider transition-all ${
+              activeTab === 'MODELS'
+                ? 'bg-cyan-500/30 text-white border border-cyan-400 font-bold'
+                : 'text-cyan-400/70 hover:text-cyan-300'
+            }`}
+          >
+            MODELS
+          </button>
+          <button
+            onClick={() => handleTabChange('DIAGNOSTICS')}
+            className={`flex-1 py-1 rounded font-orbitron text-[10px] tracking-wider transition-all ${
+              activeTab === 'DIAGNOSTICS'
+                ? 'bg-cyan-500/30 text-white border border-cyan-400 font-bold'
+                : 'text-cyan-400/70 hover:text-cyan-300'
+            }`}
+          >
+            TELEMETRY
+          </button>
+          <button
+            onClick={() => handleTabChange('SETTINGS')}
+            className={`flex-1 py-1 rounded font-orbitron text-[10px] tracking-wider transition-all ${
+              activeTab === 'SETTINGS'
+                ? 'bg-cyan-500/30 text-white border border-cyan-400 font-bold'
+                : 'text-cyan-400/70 hover:text-cyan-300'
+            }`}
+          >
+            CONFIG
+          </button>
+        </div>
+      )}
 
       {/* TAB 1: 3D Holographic Models Selection */}
       {activeTab === 'MODELS' && (
@@ -504,16 +521,183 @@ export const RightDiagnosticsHUD: React.FC<RightDiagnosticsHUDProps> = ({
         </HolographicPanel>
       )}
 
-      {/* TAB 3: Configuration, Visual Sliders & AI Provider */}
+      {/* TAB 3: Configuration, Hand Spatial Tuning, Visual Sliders & AI Provider */}
       {activeTab === 'SETTINGS' && (
         <HolographicPanel
           title="SYSTEM & RENDER CONFIG"
-          subtitle="NEURAL & HOLOGRAPHIC TUNING"
+          subtitle="SPATIAL TRACKING & HOLOGRAM TUNING"
           icon={<KeyRound className="w-4 h-4 text-cyan-400" />}
         >
           <div className="space-y-3 font-mono text-xs">
-            {/* Live Hologram Rendering Parameters */}
+            {/* 1. Hand Tracking & Calibration Settings */}
+            {calibration && onUpdateCalibration && (
+              <div className="p-2.5 rounded bg-black/50 border border-cyan-500/30 space-y-2 text-[10px]">
+                <div className="flex items-center justify-between pb-1 border-b border-cyan-500/20">
+                  <span className="font-bold text-white tracking-wider">HAND TRACKING</span>
+                  {onToggleCamera && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        audioService.playChirp(isCameraActive ? 800 : 1500);
+                        onToggleCamera();
+                      }}
+                      className={`px-2 py-0.5 rounded border text-[9px] font-bold transition-colors ${
+                        isCameraActive
+                          ? 'border-emerald-400 bg-emerald-500/20 text-emerald-200'
+                          : 'border-cyan-500/40 bg-cyan-950/40 text-cyan-300 hover:border-cyan-400'
+                      }`}
+                    >
+                      {isCameraActive ? 'ENABLED' : 'DISABLED'}
+                    </button>
+                  )}
+                </div>
+
+                <div>
+                  <div className="flex justify-between">
+                    <span>CONFIDENCE THRESHOLD</span>
+                    <span>{Math.round(calibration.confidenceThreshold * 100)}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.20"
+                    max="0.90"
+                    step="0.05"
+                    value={calibration.confidenceThreshold}
+                    onChange={(e) => onUpdateCalibration({ confidenceThreshold: parseFloat(e.target.value) })}
+                    className="w-full accent-cyan-400 h-1 bg-cyan-950 rounded cursor-pointer"
+                  />
+                </div>
+
+                <div>
+                  <div className="flex justify-between">
+                    <span>ROTATION SENSITIVITY (H)</span>
+                    <span>{calibration.rotationSensitivity.toFixed(1)}x</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="1.5"
+                    max="9.0"
+                    step="0.1"
+                    value={calibration.rotationSensitivity}
+                    onChange={(e) => onUpdateCalibration({ rotationSensitivity: parseFloat(e.target.value) })}
+                    className="w-full accent-cyan-400 h-1 bg-cyan-950 rounded cursor-pointer"
+                  />
+                </div>
+
+                <div>
+                  <div className="flex justify-between">
+                    <span>VERTICAL SENSITIVITY (V)</span>
+                    <span>{calibration.verticalSensitivity.toFixed(1)}x</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="1.5"
+                    max="9.0"
+                    step="0.1"
+                    value={calibration.verticalSensitivity}
+                    onChange={(e) => onUpdateCalibration({ verticalSensitivity: parseFloat(e.target.value) })}
+                    className="w-full accent-cyan-400 h-1 bg-cyan-950 rounded cursor-pointer"
+                  />
+                </div>
+
+                <div>
+                  <div className="flex justify-between">
+                    <span>ROTATION DAMPING</span>
+                    <span>{calibration.rotationDamping.toFixed(1)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="2.0"
+                    max="14.0"
+                    step="0.5"
+                    value={calibration.rotationDamping}
+                    onChange={(e) => onUpdateCalibration({ rotationDamping: parseFloat(e.target.value) })}
+                    className="w-full accent-cyan-400 h-1 bg-cyan-950 rounded cursor-pointer"
+                  />
+                </div>
+
+                <div>
+                  <div className="flex justify-between">
+                    <span>TWO-HAND DISPERSION SENSITIVITY</span>
+                    <span>{calibration.twoHandSensitivity.toFixed(2)}x</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.50"
+                    max="2.00"
+                    step="0.05"
+                    value={calibration.twoHandSensitivity}
+                    onChange={(e) => onUpdateCalibration({ twoHandSensitivity: parseFloat(e.target.value) })}
+                    className="w-full accent-cyan-400 h-1 bg-cyan-950 rounded cursor-pointer"
+                  />
+                </div>
+
+                <div>
+                  <div className="flex justify-between">
+                    <span>PINCH THRESHOLD</span>
+                    <span>{calibration.pinchThreshold.toFixed(3)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.025"
+                    max="0.095"
+                    step="0.005"
+                    value={calibration.pinchThreshold}
+                    onChange={(e) => onUpdateCalibration({ pinchThreshold: parseFloat(e.target.value) })}
+                    className="w-full accent-cyan-400 h-1 bg-cyan-950 rounded cursor-pointer"
+                  />
+                </div>
+
+                <div className="flex items-center justify-between pt-1 border-t border-cyan-500/20">
+                  <span>MIRROR WEBCAM X</span>
+                  <button
+                    type="button"
+                    onClick={() => onUpdateCalibration({ mirrorX: !calibration.mirrorX })}
+                    className={`px-2 py-0.5 rounded border text-[9px] ${
+                      calibration.mirrorX
+                        ? 'border-cyan-400 bg-cyan-500/25 text-white'
+                        : 'border-cyan-500/30 text-cyan-400/70'
+                    }`}
+                  >
+                    {calibration.mirrorX ? 'MIRRORED' : 'RAW'}
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-1.5 pt-1">
+                  {onRecalibrateNeutral && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        audioService.playChirp(1350);
+                        onRecalibrateNeutral();
+                      }}
+                      className="py-1 px-2 rounded bg-cyan-500/20 hover:bg-cyan-500/35 border border-cyan-400/60 text-[9px] text-white transition-colors"
+                    >
+                      CALIBRATE NEUTRAL
+                    </button>
+                  )}
+                  {onResetCalibration && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        audioService.playChirp(1000);
+                        onResetCalibration();
+                      }}
+                      className="py-1 px-2 rounded bg-cyan-950/40 hover:bg-cyan-900/50 border border-cyan-500/35 text-[9px] text-cyan-300 transition-colors"
+                    >
+                      RESET CALIBRATION
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* 2. Live Hologram & Particle Rendering Parameters */}
             <div className="p-2.5 rounded bg-black/50 border border-cyan-500/30 space-y-2 text-[10px]">
+              <div className="font-bold text-white tracking-wider pb-1 border-b border-cyan-500/20">
+                PARTICLE & HOLOGRAM ENGINE
+              </div>
+
               <div>
                 <div className="flex justify-between">
                   <span>GLOW INTENSITY</span>
@@ -628,7 +812,23 @@ export const RightDiagnosticsHUD: React.FC<RightDiagnosticsHUDProps> = ({
 
               <div>
                 <div className="flex justify-between">
-                  <span>PARTICLE FIELD DENSITY</span>
+                  <span>PARTICLE SPEED</span>
+                  <span>{visualSettings.particleSpeed.toFixed(1)}x</span>
+                </div>
+                <input
+                  type="range"
+                  min="0.2"
+                  max="2.5"
+                  step="0.1"
+                  value={visualSettings.particleSpeed}
+                  onChange={(e) => onUpdateVisualSettings({ particleSpeed: parseFloat(e.target.value) })}
+                  className="w-full accent-cyan-400 h-1 bg-cyan-950 rounded cursor-pointer"
+                />
+              </div>
+
+              <div>
+                <div className="flex justify-between">
+                  <span>PARTICLE DENSITY</span>
                   <span>{visualSettings.particleCount}</span>
                 </div>
                 <input
@@ -645,6 +845,7 @@ export const RightDiagnosticsHUD: React.FC<RightDiagnosticsHUDProps> = ({
               <div className="flex items-center justify-between pt-1 border-t border-cyan-500/20">
                 <span>BOUNDING BRACKETS</span>
                 <button
+                  type="button"
                   onClick={() => onUpdateVisualSettings({ showBoundingBoxes: !visualSettings.showBoundingBoxes })}
                   className={`px-2 py-0.5 rounded border text-[9px] ${
                     visualSettings.showBoundingBoxes
@@ -659,6 +860,7 @@ export const RightDiagnosticsHUD: React.FC<RightDiagnosticsHUDProps> = ({
               <div className="flex items-center justify-between pt-1 border-t border-cyan-500/20">
                 <span>COMPONENT LABELS</span>
                 <button
+                  type="button"
                   onClick={() => onUpdateVisualSettings({ showComponentLabels: !visualSettings.showComponentLabels })}
                   className={`px-2 py-0.5 rounded border text-[9px] ${
                     visualSettings.showComponentLabels
@@ -673,6 +875,7 @@ export const RightDiagnosticsHUD: React.FC<RightDiagnosticsHUDProps> = ({
               <div className="flex items-center justify-between pt-1 border-t border-cyan-500/20">
                 <span>REDUCED EFFECTS MODE</span>
                 <button
+                  type="button"
                   onClick={() => onUpdateVisualSettings({ reducedEffects: !visualSettings.reducedEffects })}
                   className={`px-2 py-0.5 rounded border text-[9px] ${
                     visualSettings.reducedEffects
@@ -691,6 +894,7 @@ export const RightDiagnosticsHUD: React.FC<RightDiagnosticsHUDProps> = ({
                 Connect external LLM provider (volatile RAM key only) or operate with local deterministic parser.
               </p>
               <button
+                type="button"
                 onClick={() => {
                   audioService.playChirp(1200);
                   if (onOpenAIConfig) onOpenAIConfig();

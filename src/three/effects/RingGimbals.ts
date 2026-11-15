@@ -15,9 +15,17 @@ export class RingGimbalsEffect {
   private isSpeaking: boolean = false;
   private energyBoost: number = 0;
   private ambientAttenuation: number = 1.0;
+  private baseColorHex: number = 0x00f0ff;
+
+  // Phase F spatial interaction visual feedback
+  private interactionRotationSpeed: number = 0;
+  private interactionDispersion: number = 0;
+  private isReconstructingFeedback: boolean = false;
+  private isTrackingLostFeedback: boolean = false;
 
   constructor(colorThemeHex = 0x00f0ff) {
     this.group = new THREE.Group();
+    this.baseColorHex = colorThemeHex;
 
     const geoA = new THREE.RingGeometry(3.75, 3.78, 96);
     const matA = new THREE.MeshBasicMaterial({
@@ -140,7 +148,28 @@ export class RingGimbalsEffect {
     if (activity.energyBoost !== undefined) this.energyBoost = Math.max(0, activity.energyBoost);
   }
 
+  public setInteractionFeedback(feedback: {
+    rotationSpeed?: number;
+    dispersion?: number;
+    isReconstructing?: boolean;
+    isTrackingLost?: boolean;
+  }) {
+    if (feedback.rotationSpeed !== undefined) {
+      this.interactionRotationSpeed = Math.max(0, feedback.rotationSpeed);
+    }
+    if (feedback.dispersion !== undefined) {
+      this.interactionDispersion = Math.max(0, Math.min(1, feedback.dispersion));
+    }
+    if (feedback.isReconstructing !== undefined) {
+      this.isReconstructingFeedback = feedback.isReconstructing;
+    }
+    if (feedback.isTrackingLost !== undefined) {
+      this.isTrackingLostFeedback = feedback.isTrackingLost;
+    }
+  }
+
   public setColorTheme(hex: number) {
+    this.baseColorHex = hex;
     this.group.traverse((child) => {
       if (child instanceof THREE.Mesh) {
         (child.material as THREE.MeshBasicMaterial).color.setHex(hex);
@@ -155,10 +184,15 @@ export class RingGimbalsEffect {
   public update(time: number, speedMultiplier: number = 1.0) {
     this.energyBoost = Math.max(0, this.energyBoost - 0.015);
 
+    const rotEnergy = Math.min(1.0, this.interactionRotationSpeed / 3.5);
+    const dispEnergy = this.interactionDispersion;
+    const reconEnergy = this.isReconstructingFeedback ? 0.85 : 0;
+
     const stateMult =
       1.0 +
       (this.isListening ? 0.65 : 0) +
       (this.isSpeaking ? 1.15 : 0) +
+      rotEnergy * 1.45 +
       this.energyBoost * 2.2;
 
     const effective = speedMultiplier * stateMult;
@@ -173,17 +207,30 @@ export class RingGimbalsEffect {
     const amp = this.isSpeaking ? 0.045 : this.isListening ? 0.025 : 0.008;
     const freq = this.isSpeaking ? 8.0 : this.isListening ? 4.5 : 1.5;
     const pulse = 1 + Math.sin(time * freq) * amp + this.energyBoost * 0.04;
+
+    const radialExpand = 1 + dispEnergy * 0.14;
+    this.ringA.scale.set(radialExpand, radialExpand, 1);
+    this.ringB.scale.set(1 + dispEnergy * 0.1 + rotEnergy * 0.03, 1 + dispEnergy * 0.1 + rotEnergy * 0.03, 1);
     this.ringD.scale.set(pulse, pulse, 1);
     this.ringC.scale.set(1 + (pulse - 1) * 0.6, 1 + (pulse - 1) * 0.6, 1);
 
+    // Subtle amber warning tint on tracking loss, theme color otherwise
+    const activeColor = this.isTrackingLostFeedback ? 0xffaa33 : this.baseColorHex;
+    (this.ringB.material as THREE.MeshBasicMaterial).color.setHex(activeColor);
+    (this.ringC.material as THREE.MeshBasicMaterial).color.setHex(activeColor);
+
     const att = this.ambientAttenuation;
-    const targetOpacityBoost = this.isSpeaking ? 0.28 : this.isListening ? 0.16 : 0;
-    (this.ringA.material as THREE.MeshBasicMaterial).opacity = 0.28 * att;
-    (this.ringB.material as THREE.MeshBasicMaterial).opacity = Math.min(0.9, (0.34 + targetOpacityBoost) * att);
-    (this.ringC.material as THREE.MeshBasicMaterial).opacity = 0.26 * att;
+    const targetOpacityBoost =
+      (this.isSpeaking ? 0.28 : this.isListening ? 0.16 : 0) +
+      rotEnergy * 0.42 +
+      dispEnergy * 0.26 +
+      reconEnergy * 0.32;
+    (this.ringA.material as THREE.MeshBasicMaterial).opacity = Math.min(0.85, (0.28 + dispEnergy * 0.35) * att);
+    (this.ringB.material as THREE.MeshBasicMaterial).opacity = Math.min(0.95, (0.34 + targetOpacityBoost) * att + rotEnergy * 0.35);
+    (this.ringC.material as THREE.MeshBasicMaterial).opacity = Math.min(0.85, (0.26 + reconEnergy * 0.35) * att);
     (this.ringD.material as THREE.MeshBasicMaterial).opacity = Math.min(0.95, (0.3 + targetOpacityBoost * 1.1) * att);
-    (this.orbitalTicks.material as THREE.LineBasicMaterial).opacity = 0.36 * att;
-    (this.orbitalParticles.material as THREE.PointsMaterial).opacity = 0.55 * att;
+    (this.orbitalTicks.material as THREE.LineBasicMaterial).opacity = Math.min(0.85, (0.36 + rotEnergy * 0.3) * att);
+    (this.orbitalParticles.material as THREE.PointsMaterial).opacity = Math.min(0.9, (0.55 + dispEnergy * 0.25) * att);
     (this.crosshairH.material as THREE.LineBasicMaterial).opacity = 0.14 * att;
     (this.crosshairV.material as THREE.LineBasicMaterial).opacity = 0.14 * att;
   }

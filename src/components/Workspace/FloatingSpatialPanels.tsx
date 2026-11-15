@@ -72,6 +72,8 @@ interface FloatingSpatialPanelsProps {
   notes: string;
   onUpdateNotes: (notes: string) => void;
   requestedTab?: { tab: 'OBJECTS' | 'LAB' | 'AUTOMATION' | 'NOTES' | 'TIMER'; nonce: number } | null;
+  hideTabBar?: boolean;
+  visibleTabs?: ('OBJECTS' | 'LAB' | 'AUTOMATION' | 'NOTES' | 'TIMER')[];
 }
 
 export const FloatingSpatialPanels: React.FC<FloatingSpatialPanelsProps> = ({
@@ -100,18 +102,23 @@ export const FloatingSpatialPanels: React.FC<FloatingSpatialPanelsProps> = ({
   onReconstruct,
   notes,
   onUpdateNotes,
-  requestedTab
+  requestedTab,
+  hideTabBar = false,
+  visibleTabs
 }) => {
   const [tasks, setTasks] = useState<AutomationTask[]>([]);
   const [timerSeconds, setTimerSeconds] = useState<number>(0);
   const [timerActive, setTimerActive] = useState<boolean>(false);
-  const [activeTab, setActiveTab] = useState<'OBJECTS' | 'LAB' | 'AUTOMATION' | 'NOTES' | 'TIMER'>('OBJECTS');
+  const [activeTab, setActiveTab] = useState<'OBJECTS' | 'LAB' | 'AUTOMATION' | 'NOTES' | 'TIMER'>(
+    visibleTabs?.[0] || 'OBJECTS'
+  );
   const [isMinimized, setIsMinimized] = useState<boolean>(false);
   const [copiedNote, setCopiedNote] = useState<boolean>(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
 
   const selectedObj = spatialObjects.find((o) => o.id === selectedObjectId) || spatialObjects[0] || null;
+  const displayedTabs = visibleTabs ?? (['OBJECTS', 'LAB', 'AUTOMATION', 'NOTES', 'TIMER'] as const);
 
   useEffect(() => {
     if (requestedTab) {
@@ -233,37 +240,42 @@ export const FloatingSpatialPanels: React.FC<FloatingSpatialPanelsProps> = ({
   const sliceAxes: SliceAxis[] = ['x', 'y', 'z'];
 
   return (
-    <div className="w-80 flex flex-col space-y-2 pointer-events-auto text-xs select-none">
+    <div className="w-full flex flex-col space-y-2 pointer-events-auto text-xs select-none">
       {/* Workspace Navigation Tabs + Minimize */}
-      <div className="flex items-center bg-black/75 border border-cyan-500/40 rounded-lg p-1 space-x-1">
-        {(['OBJECTS', 'LAB', 'AUTOMATION', 'NOTES', 'TIMER'] as const).map((tab) => (
+      {!hideTabBar && (
+        <div className="flex items-center bg-black/75 border border-cyan-500/40 rounded-lg p-1 space-x-1">
+          {displayedTabs.map((tab) => (
+            <button
+              key={tab}
+              type="button"
+              onClick={() => {
+                audioService.playChirp(1200);
+                setActiveTab(tab);
+                setIsMinimized(false);
+              }}
+              className={`flex-1 py-1 rounded font-orbitron text-[10px] tracking-wider transition-all ${
+                activeTab === tab && !isMinimized
+                  ? 'bg-cyan-500/30 text-white border border-cyan-400 font-bold'
+                  : 'text-cyan-400/70 hover:text-cyan-200'
+              }`}
+            >
+              {tab === 'OBJECTS' ? 'SPATIAL' : tab === 'LAB' ? 'LAB' : tab === 'AUTOMATION' ? 'TASKS' : tab === 'NOTES' ? 'MEMO' : 'CLOCK'}
+            </button>
+          ))}
           <button
-            key={tab}
+            type="button"
             onClick={() => {
-              audioService.playChirp(1200);
-              setActiveTab(tab);
-              setIsMinimized(false);
+              audioService.playChirp(1100);
+              setIsMinimized(!isMinimized);
             }}
-            className={`flex-1 py-1 rounded font-orbitron text-[10px] tracking-wider transition-all ${
-              activeTab === tab && !isMinimized
-                ? 'bg-cyan-500/30 text-white border border-cyan-400 font-bold'
-                : 'text-cyan-400/70 hover:text-cyan-200'
-            }`}
+            title={isMinimized ? 'Expand Workspace Panel' : 'Minimize Workspace Panel'}
+            aria-label={isMinimized ? 'Expand Workspace Panel' : 'Minimize Workspace Panel'}
+            className="p-1 rounded border border-cyan-500/30 text-cyan-400 hover:text-white hover:bg-cyan-500/20"
           >
-            {tab === 'OBJECTS' ? 'SPATIAL' : tab === 'LAB' ? 'LAB' : tab === 'AUTOMATION' ? 'AUTO' : tab === 'NOTES' ? 'MEMO' : 'CLOCK'}
+            {isMinimized ? <Maximize2 className="w-3.5 h-3.5" /> : <Minimize2 className="w-3.5 h-3.5" />}
           </button>
-        ))}
-        <button
-          onClick={() => {
-            audioService.playChirp(1100);
-            setIsMinimized(!isMinimized);
-          }}
-          title={isMinimized ? 'Expand Workspace Panel' : 'Minimize Workspace Panel'}
-          className="p-1 rounded border border-cyan-500/30 text-cyan-400 hover:text-white hover:bg-cyan-500/20"
-        >
-          {isMinimized ? <Maximize2 className="w-3.5 h-3.5" /> : <Minimize2 className="w-3.5 h-3.5" />}
-        </button>
-      </div>
+        </div>
+      )}
 
       {!isMinimized && (
         <>

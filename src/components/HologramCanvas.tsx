@@ -5,6 +5,7 @@ import {
   HologramVisualSettings,
   LaserTargetInfo
 } from '../types/hologram';
+import { SpatialVisualFeedback } from '../types/gesture';
 import { HologramSceneManager } from '../three/HologramScene';
 
 interface HologramCanvasProps {
@@ -17,8 +18,10 @@ interface HologramCanvasProps {
   laserTarget?: LaserTargetInfo | null;
   componentLabels?: ComponentLabel2D[];
   activeGestureFeedback?: string | null;
+  spatialFeedback?: SpatialVisualFeedback | null;
   isTrackingLost?: boolean;
   startAtInitZero?: boolean;
+  hideProjectedLabels?: boolean;
 }
 
 export const HologramCanvas: React.FC<HologramCanvasProps> = ({
@@ -30,8 +33,10 @@ export const HologramCanvas: React.FC<HologramCanvasProps> = ({
   laserTarget,
   componentLabels = [],
   activeGestureFeedback,
+  spatialFeedback,
   isTrackingLost = false,
-  startAtInitZero = false
+  startAtInitZero = false,
+  hideProjectedLabels = false
 }) => {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const dragStateRef = useRef<{
@@ -133,38 +138,102 @@ export const HologramCanvas: React.FC<HologramCanvasProps> = ({
       className="absolute inset-0 z-10 w-full h-full overflow-hidden flex items-center justify-center cursor-crosshair"
     >
       {/* Floating Component & VISION 1.2 Telemetry Callout Labels */}
-      {visualSettings.showComponentLabels &&
+      {!hideProjectedLabels &&
+        visualSettings.showComponentLabels &&
         (visualSettings.explosionAmount > 0.15 ||
           (currentModelId === 'vision_sphere' &&
             !visualSettings.reducedEffects &&
             visualSettings.dispersionAmount < 0.85)) &&
-        componentLabels.map((lbl) => (
+        componentLabels.map((lbl, idx) => (
           <div
             key={lbl.id}
             style={{ transform: `translate3d(${lbl.x}px, ${lbl.y}px, 0) translate(-50%, -100%)` }}
-            className="pointer-events-none absolute top-0 left-0 z-20"
+            className={`pointer-events-none absolute top-0 left-0 z-20 ${idx >= 3 ? 'hidden sm:block' : ''}`}
           >
             <div className="flex flex-col items-center">
-              <div className="px-2 py-0.5 rounded bg-[#020c18]/85 border border-cyan-400/70 text-[9px] font-mono text-cyan-200 whitespace-nowrap shadow-[0_0_10px_rgba(0,240,255,0.3)]">
+              <div className="px-1.5 sm:px-2 py-0.5 rounded bg-[#020c18]/85 border border-cyan-400/70 text-[7.5px] sm:text-[9px] font-mono text-cyan-200 whitespace-nowrap shadow-[0_0_10px_rgba(0,240,255,0.3)]">
                 {lbl.name}
               </div>
-              <div className="w-[1px] h-3 bg-cyan-400/70" />
+              <div className="w-[1px] h-2.5 sm:h-3 bg-cyan-400/70" />
               <div className="w-1.5 h-1.5 rounded-full bg-cyan-300 border border-white" />
             </div>
           </div>
         ))}
 
-      {/* Active Hand Gesture Visual Feedback Badge */}
-      {activeGestureFeedback && (
-        <div className="pointer-events-none absolute top-24 left-1/2 -translate-x-1/2 z-30 px-3 py-1 rounded border border-cyan-400/70 bg-black/75 text-cyan-200 font-orbitron text-[10px] tracking-widest shadow-[0_0_14px_rgba(0,240,255,0.35)]">
-          {activeGestureFeedback}
+      {/* Active Hand Gesture & Phase F Spatial Feedback Overlay */}
+      {!hideProjectedLabels && (activeGestureFeedback || (spatialFeedback && spatialFeedback.isRotating)) && (
+        <div
+          data-testid="spatial-interaction-badge"
+          className="pointer-events-none absolute top-16 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2.5 px-3 py-1 rounded border border-cyan-400/70 bg-black/75 text-cyan-200 font-orbitron text-[10px] tracking-widest shadow-[0_0_14px_rgba(0,240,255,0.28)]"
+        >
+          {spatialFeedback?.isRotating && (
+            <span className="text-white font-bold">
+              {spatialFeedback.rotationDirection === 'RIGHT'
+                ? '→'
+                : spatialFeedback.rotationDirection === 'LEFT'
+                ? '←'
+                : spatialFeedback.rotationDirection === 'UP'
+                ? '↑'
+                : spatialFeedback.rotationDirection === 'DOWN'
+                ? '↓'
+                : '↻'}
+            </span>
+          )}
+          <span>{spatialFeedback?.badgeText || activeGestureFeedback}</span>
+          {spatialFeedback?.isRotating && (
+            <span className="font-mono text-[9.5px] text-cyan-300 border-l border-cyan-500/40 pl-2">
+              {spatialFeedback.rotationSpeed.toFixed(1)} rad/s
+            </span>
+          )}
         </div>
       )}
 
+      {/* Radial Dispersion & Reconstruction Progress Telemetry Bar */}
+      {!hideProjectedLabels &&
+        (visualSettings.dispersionAmount > 0.02 ||
+          spatialFeedback?.dispersionPhase === 'RECONSTRUCTING') && (
+          <div
+            data-testid="dispersion-progress-hud"
+            className="pointer-events-none absolute bottom-20 left-1/2 -translate-x-1/2 z-20 w-56 px-2.5 py-1.5 rounded border border-cyan-400/45 bg-[#020c18]/80 font-mono text-[9.5px] text-cyan-200 shadow-[0_0_14px_rgba(0,240,255,0.22)]"
+          >
+            <div className="flex items-center justify-between mb-1">
+              <span className="tracking-wider uppercase">
+                {spatialFeedback?.dispersionPhase === 'RECONSTRUCTING'
+                  ? 'RECONSTRUCTING'
+                  : 'RADIAL DISPERSION'}
+              </span>
+              <span className="text-white font-bold">
+                {spatialFeedback?.dispersionPhase === 'RECONSTRUCTING'
+                  ? `${spatialFeedback.reconstructionProgress}%`
+                  : `${Math.round(visualSettings.dispersionAmount * 100)}%`}
+              </span>
+            </div>
+            <div className="w-full h-1 bg-black/70 rounded-full overflow-hidden border border-cyan-500/30">
+              <div
+                className={`h-full transition-all duration-100 ${
+                  spatialFeedback?.dispersionPhase === 'RECONSTRUCTING'
+                    ? 'bg-gradient-to-r from-emerald-400 to-cyan-300'
+                    : 'bg-gradient-to-r from-cyan-400 to-white'
+                }`}
+                style={{
+                  width: `${
+                    spatialFeedback?.dispersionPhase === 'RECONSTRUCTING'
+                      ? spatialFeedback.reconstructionProgress
+                      : Math.round(visualSettings.dispersionAmount * 100)
+                  }%`
+                }}
+              />
+            </div>
+          </div>
+        )}
+
       {/* Hand Tracking Loss Stabilization Badge */}
       {isTrackingLost && (
-        <div className="pointer-events-none absolute top-32 left-1/2 -translate-x-1/2 z-30 px-3 py-1 rounded border border-amber-400/80 bg-amber-950/80 text-amber-200 font-mono text-[10px] tracking-wider shadow-[0_0_12px_rgba(255,170,0,0.35)]">
-          OPTICAL TRACKING LOST // STABILIZING HOLOGRAM
+        <div
+          data-testid="tracking-lost-badge"
+          className="pointer-events-none absolute top-24 left-1/2 -translate-x-1/2 z-30 px-3 py-1 rounded border border-amber-400/80 bg-amber-950/80 text-amber-200 font-mono text-[10px] tracking-wider shadow-[0_0_12px_rgba(255,170,0,0.35)]"
+        >
+          OPTICAL TRACKING LOST // HOLDING HOLOGRAM STATE
         </div>
       )}
 

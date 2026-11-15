@@ -66,9 +66,22 @@
 }
 
 .animate-fade-in {
-  animation: fadeInHud 0.25s ease-out forwards;
+  animation: fadeInHud 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
 .hud-scan-line {
   animation: hudScanSweep 6s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-in,
+  .hud-scan-line,
+  .animate-pulse,
+  .animate-spin {
+    animation: none !important;
+  }
+
+  * {
+    scroll-behavior: auto !important;
+  }
 }

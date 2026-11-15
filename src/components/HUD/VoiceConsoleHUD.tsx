@@ -1,7 +1,7 @@
 import React, { useRef, useEffect } from 'react';
 import { HolographicPanel } from '../Common/HolographicPanel';
 import { AssistantMessage } from '../../types/assistant';
-import { Volume2, Send, Terminal, Trash2 } from 'lucide-react';
+import { Volume2, Send, Terminal, Trash2, Mic, MicOff, X } from 'lucide-react';
 import { audioService } from '../../services/soundFx';
 
 interface VoiceConsoleHUDProps {
@@ -10,7 +10,10 @@ interface VoiceConsoleHUDProps {
   isListening: boolean;
   isSpeaking: boolean;
   isProcessing?: boolean;
+  voiceError?: string | null;
+  onToggleVoice?: () => void;
   onClearHistory?: () => void;
+  onClose?: () => void;
 }
 
 export const VoiceConsoleHUD: React.FC<VoiceConsoleHUDProps> = ({
@@ -19,7 +22,10 @@ export const VoiceConsoleHUD: React.FC<VoiceConsoleHUDProps> = ({
   isListening,
   isSpeaking,
   isProcessing = false,
-  onClearHistory
+  voiceError = null,
+  onToggleVoice,
+  onClearHistory,
+  onClose
 }) => {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [inputValue, setInputValue] = React.useState<string>('');
@@ -51,7 +57,7 @@ export const VoiceConsoleHUD: React.FC<VoiceConsoleHUDProps> = ({
   ];
 
   return (
-    <div className="w-84 max-w-sm flex flex-col space-y-2">
+    <div className="w-full flex flex-col space-y-2">
       <HolographicPanel
         title="J.A.R.V.I.S. VOCAL CONSOLE"
         subtitle={`SPEECH & SYNTHESIS STREAM · ${messages.length} ENTRIES`}
@@ -68,21 +74,52 @@ export const VoiceConsoleHUD: React.FC<VoiceConsoleHUDProps> = ({
                 <span>SPEAKING</span>
               </span>
             )}
-            {isListening && (
-              <span className="flex items-center space-x-1 text-emerald-400 font-bold">
-                <span>LISTENING</span>
-              </span>
+            {onToggleVoice && (
+              <button
+                type="button"
+                onClick={() => {
+                  audioService.playChirp(1250);
+                  onToggleVoice();
+                }}
+                aria-label={isListening ? 'Disable Voice Microphone' : 'Enable Voice Microphone'}
+                className={`flex items-center space-x-1 px-2 py-0.5 rounded border transition-colors ${
+                  isListening
+                    ? 'border-emerald-400/70 bg-emerald-950/50 text-emerald-300 font-bold'
+                    : voiceError
+                    ? 'border-amber-400/60 bg-amber-950/40 text-amber-300'
+                    : 'border-cyan-500/40 bg-cyan-950/40 text-cyan-300 hover:text-white'
+                }`}
+              >
+                {isListening ? <Mic className="w-3 h-3" /> : <MicOff className="w-3 h-3" />}
+                <span>{isListening ? 'MIC ON' : 'MIC OFF'}</span>
+              </button>
             )}
             {onClearHistory && messages.length > 1 && (
               <button
+                type="button"
                 onClick={() => {
                   audioService.playChirp(950);
                   onClearHistory();
                 }}
                 title="Clear Console History"
-                className="p-0.5 rounded border border-cyan-500/30 text-cyan-400/70 hover:text-white"
+                aria-label="Clear Console History"
+                className="p-1 rounded border border-cyan-500/30 text-cyan-400/70 hover:text-white"
               >
                 <Trash2 className="w-3 h-3" />
+              </button>
+            )}
+            {onClose && (
+              <button
+                type="button"
+                onClick={() => {
+                  audioService.playChirp(1000);
+                  onClose();
+                }}
+                title="Close Vocal Console"
+                aria-label="Close Vocal Console"
+                className="p-1 rounded border border-cyan-500/30 text-cyan-300 hover:text-white hover:border-cyan-400"
+              >
+                <X className="w-3.5 h-3.5" />
               </button>
             )}
           </div>
@@ -145,6 +182,7 @@ export const VoiceConsoleHUD: React.FC<VoiceConsoleHUDProps> = ({
           />
           <button
             type="submit"
+            aria-label="Send Command"
             className="px-2.5 py-1 bg-cyan-500/20 hover:bg-cyan-500/40 border border-cyan-400 rounded text-cyan-300"
           >
             <Send className="w-3.5 h-3.5" />

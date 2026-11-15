@@ -207,6 +207,8 @@ export class ReversibleParticleEngine {
   private currentDispersion: number = 0;
   private targetDispersion: number = 0;
   private state: ParticleFormationState = 'NORMAL';
+  private particleSpeed: number = 1.0;
+  private simTime: number = 0;
 
   constructor(seedPoints: ParticleSeedPoint[], colorThemeHex = 0x00f0ff, maxCount = 5000) {
     this.maxCount = Math.max(seedPoints.length, maxCount);
@@ -467,6 +469,7 @@ export class ReversibleParticleEngine {
     attraction?: number;
     repulsion?: number;
     swirlSpeed?: number;
+    particleSpeed?: number;
     voiceEnergy?: number;
   }) {
     if (params.intensity !== undefined) this.material.uniforms.uIntensity.value = params.intensity;
@@ -484,6 +487,9 @@ export class ReversibleParticleEngine {
       this.material.uniforms.uSwirlSpeed.value = params.swirlSpeed;
       this.filamentMaterial.uniforms.uSwirlSpeed.value = params.swirlSpeed;
     }
+    if (params.particleSpeed !== undefined) {
+      this.particleSpeed = Math.max(0.15, Math.min(3.0, params.particleSpeed));
+    }
     if (params.voiceEnergy !== undefined) {
       this.material.uniforms.uVoiceEnergy.value = params.voiceEnergy;
     }
@@ -499,6 +505,12 @@ export class ReversibleParticleEngine {
 
   public update(elapsedTime: number, delta: number = 0.016) {
     const clampedDt = Math.max(0.001, Math.min(0.1, delta));
+    if (this.simTime === 0 && elapsedTime > 0 && this.particleSpeed === 1.0) {
+      this.simTime = elapsedTime;
+    } else {
+      this.simTime += clampedDt * this.particleSpeed;
+    }
+
     const prev = this.currentDispersion;
     const smooth = 1 - Math.exp(-8.5 * clampedDt);
     this.currentDispersion += (this.targetDispersion - this.currentDispersion) * smooth;
@@ -523,11 +535,11 @@ export class ReversibleParticleEngine {
     }
 
     const attraction = this.state === 'RECONSTRUCTING' ? 0.55 : 0.0;
-    this.material.uniforms.uTime.value = elapsedTime;
+    this.material.uniforms.uTime.value = this.simTime;
     this.material.uniforms.uDispersion.value = this.currentDispersion;
     this.material.uniforms.uAttraction.value = attraction;
 
-    this.filamentMaterial.uniforms.uTime.value = elapsedTime;
+    this.filamentMaterial.uniforms.uTime.value = this.simTime;
     this.filamentMaterial.uniforms.uDispersion.value = this.currentDispersion;
     this.filamentMaterial.uniforms.uAttraction.value = attraction;
   }
