@@ -1,10 +1,6 @@
 import * as THREE from 'three';
-import { HologramModelId, HologramVisualSettings } from '../types/hologram';
-import { ArcReactorObject } from './objects/ArcReactor';
-import { QuantumTesseractObject } from './objects/QuantumTesseract';
-import { IronManArmorObject } from './objects/IronManArmor';
-import { HolographicGlobeObject } from './objects/HolographicGlobe';
-import { MolecularHelixObject } from './objects/MolecularHelix';
+import { HologramModelId, HologramVisualSettings, LayoutFormation, SpatialObjectState } from '../types/hologram';
+import { SpatialObjectManager, SpatialInstance } from './SpatialObjectManager';
 import { EnergyShockwaveEffect } from './effects/EnergyShockwave';
 import { ParticleFieldEffect } from './effects/ParticleField';
 import { RingGimbalsEffect } from './effects/RingGimbals';
@@ -16,41 +12,29 @@ export class HologramSceneManager {
   private camera: THREE.PerspectiveCamera;
   private animationFrameId: number | null = null;
   private clock: THREE.Clock;
+  private raycaster: THREE.Raycaster;
 
-  // Active models
-  private currentModelId: HologramModelId = 'arc_reactor';
+  // Multi-Object Spatial Manager
+  public spatialManager: SpatialObjectManager;
   private modelRoot: THREE.Group;
-  private arcReactor: ArcReactorObject;
-  private tesseract: QuantumTesseractObject;
-  private ironArmor: IronManArmorObject;
-  private holoGlobe: HolographicGlobeObject;
-  private molecularHelix: MolecularHelixObject;
 
   // Visual Effects
   private shockwave: EnergyShockwaveEffect;
   private particleField: ParticleFieldEffect;
   private ringGimbals: RingGimbalsEffect;
 
-  // Transforms & Interpolation
-  public targetPosition = new THREE.Vector3(0, 0, 0);
-  public currentPosition = new THREE.Vector3(0, 0, 0);
-  public targetRotation = new THREE.Euler(0, 0, 0);
-  public currentRotation = new THREE.Euler(0, 0, 0);
-  public targetScale: number = 1.0;
-  public currentScale: number = 1.0;
   public autoRotate: boolean = true;
   public rotationSpeed: number = 1.0;
 
-  // User manipulation pause
   private lastUserInteractionTime: number = 0;
   private activeHandCentroid?: { x: number; y: number; z: number };
-
   private settings: HologramVisualSettings;
 
   constructor(container: HTMLElement, initialSettings: HologramVisualSettings) {
     this.container = container;
     this.settings = initialSettings;
     this.clock = new THREE.Clock();
+    this.raycaster = new THREE.Raycaster();
 
     // 1. Scene & Renderer
     this.scene = new THREE.Scene();
@@ -72,7 +56,7 @@ export class HologramSceneManager {
       0.1,
       100
     );
-    this.camera.position.set(0, 0, 7.5);
+    this.camera.position.set(0, 0, 7.8);
 
     // 3. Lighting
     const ambient = new THREE.AmbientLight(0x003355, 1.4);
@@ -90,26 +74,15 @@ export class HologramSceneManager {
     pointLight.position.set(0, 0, 2);
     this.scene.add(pointLight);
 
-    // 4. Model Group
+    // 4. Model Root & Spatial Manager
     this.modelRoot = new THREE.Group();
     this.scene.add(this.modelRoot);
 
     const colorHex = this.getThemeHex(initialSettings.colorTheme);
+    this.spatialManager = new SpatialObjectManager(this.modelRoot, colorHex);
 
-    // Instantiate 3D Models
-    this.arcReactor = new ArcReactorObject(colorHex);
-    this.tesseract = new QuantumTesseractObject(colorHex);
-    this.ironArmor = new IronManArmorObject(colorHex);
-    this.holoGlobe = new HolographicGlobeObject(colorHex);
-    this.molecularHelix = new MolecularHelixObject(colorHex);
-
-    this.modelRoot.add(this.arcReactor.group);
-    this.modelRoot.add(this.tesseract.group);
-    this.modelRoot.add(this.ironArmor.group);
-    this.modelRoot.add(this.holoGlobe.group);
-    this.modelRoot.add(this.molecularHelix.group);
-
-    this.setModel(this.currentModelId);
+    // Create initial central Arc Reactor
+    this.spatialManager.createInstance('arc_reactor', new THREE.Vector3(0, 0, 0));
 
     // 5. Environmental & Cinematic Effects
     this.ringGimbals = new RingGimbalsEffect(colorHex);
@@ -121,10 +94,10 @@ export class HologramSceneManager {
     this.shockwave = new EnergyShockwaveEffect(colorHex);
     this.scene.add(this.shockwave.group);
 
-    // 6. Resize listener
+    // 6. Listeners
     window.addEventListener('resize', this.onWindowResize);
 
-    // Start loop
+    // Start render loop
     this.animate();
   }
 
@@ -138,20 +111,21 @@ export class HologramSceneManager {
     }
   }
 
+  // Model switching / creation
   public setModel(modelId: HologramModelId) {
-    this.currentModelId = modelId;
-    this.arcReactor.group.visible = modelId === 'arc_reactor';
-    this.tesseract.group.visible = modelId === 'quantum_tesseract';
-    this.ironArmor.group.visible = modelId === 'ironman_armor';
-    this.holoGlobe.group.visible = modelId === 'planetary_defense';
-    this.molecularHelix.group.visible = modelId === 'molecular_dna';
-
-    // Model entrance pop animation
-    this.currentScale = 0.35;
+    const selected = this.spatialManager.getSelected();
+    if (selected) {
+      const pos = selected.targetPosition.clone();
+      this.spatialManager.delete(selected.id);
+      this.spatialManager.createInstance(modelId, pos);
+    } else {
+      this.spatialManager.createInstance(modelId, new THREE.Vector3(0, 0, 0));
+    }
   }
 
   public getModelId(): HologramModelId {
-    return this.currentModelId;
+    const selected = this.spatialManager.getSelected();
+    return selected ? selected.modelId : 'arc_reactor';
   }
 
   public nextModel(): HologramModelId {
@@ -160,9 +134,12 @@ export class HologramSceneManager {
       'quantum_tesseract',
       'ironman_armor',
       'planetary_defense',
-      'molecular_dna'
+      'molecular_dna',
+      'carbon_buckyball',
+      'hologram_datachart'
     ];
-    const idx = list.indexOf(this.currentModelId);
+    const current = this.getModelId();
+    const idx = list.indexOf(current);
     const nextIdx = (idx + 1) % list.length;
     this.setModel(list[nextIdx]);
     return list[nextIdx];
@@ -174,33 +151,80 @@ export class HologramSceneManager {
       'quantum_tesseract',
       'ironman_armor',
       'planetary_defense',
-      'molecular_dna'
+      'molecular_dna',
+      'carbon_buckyball',
+      'hologram_datachart'
     ];
-    const idx = list.indexOf(this.currentModelId);
+    const current = this.getModelId();
+    const idx = list.indexOf(current);
     const prevIdx = (idx - 1 + list.length) % list.length;
     this.setModel(list[prevIdx]);
     return list[prevIdx];
+  }
+
+  public addSpatialObject(modelId: HologramModelId, position?: THREE.Vector3): SpatialInstance {
+    const defaultPos = position || new THREE.Vector3(
+      (Math.random() - 0.5) * 3,
+      (Math.random() - 0.5) * 2,
+      0
+    );
+    return this.spatialManager.createInstance(modelId, defaultPos);
+  }
+
+  public duplicateSelected(): SpatialInstance | null {
+    const selected = this.spatialManager.getSelected();
+    if (!selected) return null;
+    return this.spatialManager.duplicate(selected.id);
+  }
+
+  public deleteSelected(): boolean {
+    const selected = this.spatialManager.getSelected();
+    if (!selected) return false;
+    return this.spatialManager.delete(selected.id);
+  }
+
+  public applyFormation(formation: LayoutFormation) {
+    this.settings.spatialFormation = formation;
+    this.spatialManager.applyFormation(formation);
+  }
+
+  public getSpatialStates(): SpatialObjectState[] {
+    return this.spatialManager.getStates();
+  }
+
+  public selectObject(id: string | null) {
+    this.spatialManager.select(id);
+  }
+
+  // Raycasting for point / click selection in 3D
+  public raycastSelect(ndcX: number, ndcY: number): string | null {
+    this.raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), this.camera);
+    const instances = this.spatialManager.getAll();
+
+    for (const inst of instances) {
+      const intersects = this.raycaster.intersectObjects(inst.group.children, true);
+      if (intersects.length > 0) {
+        this.spatialManager.select(inst.id);
+        return inst.id;
+      }
+    }
+    return null;
   }
 
   public updateVisualSettings(settings: Partial<HologramVisualSettings>) {
     this.settings = { ...this.settings, ...settings };
     if (settings.colorTheme) {
       const hex = this.getThemeHex(settings.colorTheme);
-      this.arcReactor.setColorTheme(hex);
-      this.tesseract.setColorTheme(hex);
-      this.ironArmor.setColorTheme(hex);
-      this.holoGlobe.setColorTheme(hex);
-      this.molecularHelix.setColorTheme(hex);
+      this.spatialManager.setColorTheme(hex);
       this.ringGimbals.setColorTheme(hex);
       this.particleField.setColorTheme(hex);
       this.shockwave.setColorTheme(hex);
     }
     if (settings.explodedView !== undefined) {
-      this.arcReactor.setExplodedView(settings.explodedView);
-      this.tesseract.setExplodedView(settings.explodedView);
-      this.ironArmor.setExplodedView(settings.explodedView);
-      this.holoGlobe.setExplodedView(settings.explodedView);
-      this.molecularHelix.setExplodedView(settings.explodedView);
+      this.spatialManager.setExplodedView(settings.explodedView);
+    }
+    if (settings.spatialFormation !== undefined) {
+      this.spatialManager.applyFormation(settings.spatialFormation);
     }
   }
 
@@ -209,42 +233,61 @@ export class HologramSceneManager {
   }
 
   public triggerShockwave() {
-    this.shockwave.trigger(this.modelRoot.position.clone());
+    const selected = this.spatialManager.getSelected();
+    const origin = selected ? selected.group.position.clone() : new THREE.Vector3(0, 0, 0);
+    this.shockwave.trigger(origin);
   }
 
   public resetTransform() {
-    this.targetPosition.set(0, 0, 0);
-    // Normalize current rotation angles to [-PI, PI] to prevent infinite backward spin
-    this.currentRotation.x = (this.currentRotation.x % (Math.PI * 2));
-    this.currentRotation.y = (this.currentRotation.y % (Math.PI * 2));
-    this.currentRotation.z = (this.currentRotation.z % (Math.PI * 2));
-    this.targetRotation.set(0, 0, 0);
-    this.targetScale = 1.0;
+    const selected = this.spatialManager.getSelected();
+    if (selected) {
+      selected.targetPosition.set(0, 0, 0);
+      selected.currentRotation.x %= (Math.PI * 2);
+      selected.currentRotation.y %= (Math.PI * 2);
+      selected.currentRotation.z %= (Math.PI * 2);
+      selected.targetRotation.set(0, 0, 0);
+      selected.targetScale = 1.0;
+    }
   }
 
   public applyDeltaTranslation(dx: number, dy: number, dz: number) {
     this.lastUserInteractionTime = performance.now();
-    this.targetPosition.x += dx;
-    this.targetPosition.y += dy;
-    this.targetPosition.z += dz;
+    const selected = this.spatialManager.getSelected();
+    if (!selected) return;
 
-    // Viewport bounds clamping
-    this.targetPosition.x = Math.max(-3.5, Math.min(3.5, this.targetPosition.x));
-    this.targetPosition.y = Math.max(-2.5, Math.min(2.5, this.targetPosition.y));
-    this.targetPosition.z = Math.max(-2.0, Math.min(2.0, this.targetPosition.z));
+    // If part of a group, move the whole group together!
+    const targetInstances = selected.groupId
+      ? this.spatialManager.getAll().filter(i => i.groupId === selected.groupId)
+      : [selected];
+
+    targetInstances.forEach(inst => {
+      inst.targetPosition.x += dx;
+      inst.targetPosition.y += dy;
+      inst.targetPosition.z += dz;
+
+      inst.targetPosition.x = Math.max(-4.5, Math.min(4.5, inst.targetPosition.x));
+      inst.targetPosition.y = Math.max(-3.0, Math.min(3.0, inst.targetPosition.y));
+      inst.targetPosition.z = Math.max(-3.0, Math.min(3.0, inst.targetPosition.z));
+    });
   }
 
   public applyDeltaRotation(rx: number, ry: number, rz: number) {
     this.lastUserInteractionTime = performance.now();
-    this.targetRotation.x += rx;
-    this.targetRotation.y += ry;
-    this.targetRotation.z += rz;
+    const selected = this.spatialManager.getSelected();
+    if (!selected) return;
+
+    selected.targetRotation.x += rx;
+    selected.targetRotation.y += ry;
+    selected.targetRotation.z += rz;
   }
 
   public applyScaleMultiplier(multiplier: number) {
     this.lastUserInteractionTime = performance.now();
-    this.targetScale *= multiplier;
-    this.targetScale = Math.max(0.4, Math.min(2.8, this.targetScale));
+    const selected = this.spatialManager.getSelected();
+    if (!selected) return;
+
+    selected.targetScale *= multiplier;
+    selected.targetScale = Math.max(0.3, Math.min(3.2, selected.targetScale));
   }
 
   private onWindowResize = () => {
@@ -261,44 +304,19 @@ export class HologramSceneManager {
     const elapsedTime = this.clock.getElapsedTime();
     const now = performance.now();
 
-    // Smooth transform damping
-    const lerpFactor = 0.12;
-    this.currentPosition.lerp(this.targetPosition, lerpFactor);
-    this.modelRoot.position.copy(this.currentPosition);
-
-    this.currentScale += (this.targetScale - this.currentScale) * lerpFactor;
-    this.modelRoot.scale.set(this.currentScale, this.currentScale, this.currentScale);
-
-    // Idle floating levitation
-    const levitationY = Math.sin(elapsedTime * 1.5) * 0.08;
-    this.modelRoot.position.y += levitationY;
-
-    // Auto-rotation resumes only when user hasn't actively manipulated within 1.2 seconds
-    const isUserActive = (now - this.lastUserInteractionTime) < 1200;
-    if (this.autoRotate && !isUserActive) {
-      this.targetRotation.y += 0.008 * this.rotationSpeed;
-    }
-
-    this.currentRotation.x += (this.targetRotation.x - this.currentRotation.x) * lerpFactor;
-    this.currentRotation.y += (this.targetRotation.y - this.currentRotation.y) * lerpFactor;
-    this.currentRotation.z += (this.targetRotation.z - this.currentRotation.z) * lerpFactor;
-    this.modelRoot.rotation.copy(this.currentRotation);
-
-    // Update active 3D model
     const speed = this.settings.rotationSpeed;
-    if (this.currentModelId === 'arc_reactor') {
-      this.arcReactor.update(elapsedTime, speed);
-    } else if (this.currentModelId === 'quantum_tesseract') {
-      this.tesseract.update(elapsedTime, speed);
-    } else if (this.currentModelId === 'ironman_armor') {
-      this.ironArmor.update(elapsedTime, speed);
-    } else if (this.currentModelId === 'planetary_defense') {
-      this.holoGlobe.update(elapsedTime, speed);
-    } else if (this.currentModelId === 'molecular_dna') {
-      this.molecularHelix.update(elapsedTime, speed);
+    const isUserActive = (now - this.lastUserInteractionTime) < 1200;
+
+    // Auto-rotate selected object when user is idle
+    const selected = this.spatialManager.getSelected();
+    if (this.autoRotate && !isUserActive && selected) {
+      selected.targetRotation.y += 0.008 * speed;
     }
 
-    // Update Environmental Effects with active hand proximity
+    // Update all spatial instances
+    this.spatialManager.update(elapsedTime, speed);
+
+    // Update Environmental Effects
     this.ringGimbals.update(elapsedTime, speed);
     this.particleField.update(elapsedTime, this.activeHandCentroid);
     this.shockwave.update(delta);
@@ -314,6 +332,7 @@ export class HologramSceneManager {
       cancelAnimationFrame(this.animationFrameId);
     }
     window.removeEventListener('resize', this.onWindowResize);
+    this.spatialManager.clearAll();
     this.renderer.dispose();
     if (this.container.contains(this.renderer.domElement)) {
       this.container.removeChild(this.renderer.domElement);

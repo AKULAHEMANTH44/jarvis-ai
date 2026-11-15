@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { HolographicPanel } from '../Common/HolographicPanel';
 import { CircularGauge } from '../Common/CircularGauge';
 import { HologramModelId, HologramModelInfo, HologramVisualSettings } from '../../types/hologram';
-import { Layers, Cpu, Wrench, Palette, Sparkles, Clock, FileText, KeyRound } from 'lucide-react';
+import { Layers, Cpu, Wrench, Clock, FileText, KeyRound, Sparkles } from 'lucide-react';
 import { audioService } from '../../services/soundFx';
 
 interface RightDiagnosticsHUDProps {
@@ -10,6 +10,7 @@ interface RightDiagnosticsHUDProps {
   onSelectModel: (id: HologramModelId) => void;
   visualSettings: HologramVisualSettings;
   onUpdateVisualSettings: (settings: Partial<HologramVisualSettings>) => void;
+  onOpenAIConfig?: () => void;
 }
 
 const MODEL_CATALOG: HologramModelInfo[] = [
@@ -77,6 +78,32 @@ const MODEL_CATALOG: HologramModelInfo[] = [
       structuralIntegrity: '96%',
       temperature: '310 K'
     }
+  },
+  {
+    id: 'carbon_buckyball',
+    name: 'FULLERENE C60',
+    codename: 'CARBON NANOMATRIX',
+    category: 'MOLECULAR LATTICE',
+    description: 'Spherical 60-vertex carbon fullerene cage with high-tensile quantum bonding.',
+    specs: {
+      energyOutput: '220 MW',
+      containmentField: '100%',
+      structuralIntegrity: '99%',
+      temperature: '298 K'
+    }
+  },
+  {
+    id: 'hologram_datachart',
+    name: 'TELEMETRY SPECTRUM',
+    codename: '3D DATA EQUALIZER',
+    category: 'ACOUSTIC ANALYZER',
+    description: 'Volumetric real-time frequency distribution with orbital trajectory spline.',
+    specs: {
+      energyOutput: '110 MW',
+      containmentField: '99.5%',
+      structuralIntegrity: '95%',
+      temperature: '305 K'
+    }
   }
 ];
 
@@ -84,18 +111,14 @@ export const RightDiagnosticsHUD: React.FC<RightDiagnosticsHUDProps> = ({
   currentModelId,
   onSelectModel,
   visualSettings,
-  onUpdateVisualSettings
+  onUpdateVisualSettings,
+  onOpenAIConfig
 }) => {
-  const [activeTab, setActiveTab] = useState<'MODELS' | 'DIAGNOSTICS' | 'DESKTOP'>('MODELS');
-  const [notes, setNotes] = useState<string>('Jarvis: Maintain core output above 3 GJ/s during high-yield flight tests.');
-  const [timerSeconds, setTimerSeconds] = useState<number>(0);
-  const [timerActive, setTimerActive] = useState<boolean>(false);
-  const [aiKeyModalOpen, setAiKeyModalOpen] = useState<boolean>(false);
-  const [apiKeyInput, setApiKeyInput] = useState<string>('');
+  const [activeTab, setActiveTab] = useState<'MODELS' | 'DIAGNOSTICS' | 'SETTINGS'>('MODELS');
 
   const activeModel = MODEL_CATALOG.find((m) => m.id === currentModelId) || MODEL_CATALOG[0];
 
-  const handleTabChange = (tab: 'MODELS' | 'DIAGNOSTICS' | 'DESKTOP') => {
+  const handleTabChange = (tab: 'MODELS' | 'DIAGNOSTICS' | 'SETTINGS') => {
     audioService.playChirp(1400);
     setActiveTab(tab);
   };
@@ -122,7 +145,7 @@ export const RightDiagnosticsHUD: React.FC<RightDiagnosticsHUDProps> = ({
               : 'text-cyan-400/70 hover:text-cyan-300'
           }`}
         >
-          HOLOGRAMS
+          MODELS
         </button>
         <button
           onClick={() => handleTabChange('DIAGNOSTICS')}
@@ -135,14 +158,14 @@ export const RightDiagnosticsHUD: React.FC<RightDiagnosticsHUDProps> = ({
           TELEMETRY
         </button>
         <button
-          onClick={() => handleTabChange('DESKTOP')}
+          onClick={() => handleTabChange('SETTINGS')}
           className={`flex-1 py-1 rounded font-orbitron text-[10px] tracking-wider transition-all ${
-            activeTab === 'DESKTOP'
+            activeTab === 'SETTINGS'
               ? 'bg-cyan-500/30 text-white border border-cyan-400 font-bold'
               : 'text-cyan-400/70 hover:text-cyan-300'
           }`}
         >
-          ASSISTANT
+          CONFIG
         </button>
       </div>
 
@@ -151,10 +174,10 @@ export const RightDiagnosticsHUD: React.FC<RightDiagnosticsHUDProps> = ({
         <>
           <HolographicPanel
             title="HOLOGRAPHIC REPOSITORY"
-            subtitle="SELECT VIRTUAL PROJECTION"
+            subtitle={`${MODEL_CATALOG.length} QUANTUM BLUEPRINTS`}
             icon={<Layers className="w-4 h-4 text-cyan-400" />}
           >
-            <div className="space-y-1.5">
+            <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
               {MODEL_CATALOG.map((item) => (
                 <button
                   key={item.id}
@@ -309,74 +332,38 @@ export const RightDiagnosticsHUD: React.FC<RightDiagnosticsHUDProps> = ({
         </HolographicPanel>
       )}
 
-      {/* TAB 3: Desktop Assistant Tools (Mode 7) */}
-      {activeTab === 'DESKTOP' && (
+      {/* TAB 3: Configuration & AI Provider */}
+      {activeTab === 'SETTINGS' && (
         <HolographicPanel
-          title="DESKTOP ASSISTANT"
-          subtitle="PRODUCTIVITY & AGENT"
-          icon={<FileText className="w-4 h-4 text-cyan-400" />}
-          headerRight={
-            <button
-              onClick={() => {
-                audioService.playChirp(1200);
-                setAiKeyModalOpen(!aiKeyModalOpen);
-              }}
-              title="Configure External AI"
-              className="text-cyan-400 hover:text-white"
-            >
-              <KeyRound className="w-4 h-4" />
-            </button>
-          }
+          title="SYSTEM & AI CONFIG"
+          subtitle="NEURAL PROTOCOL CONTROL"
+          icon={<KeyRound className="w-4 h-4 text-cyan-400" />}
         >
-          <div className="space-y-3">
-            {/* Quick Memo / Notes */}
-            <div>
-              <span className="block font-mono text-[10px] text-cyan-400/70 mb-1">
-                STARK LAB NOTES
-              </span>
-              <textarea
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                rows={3}
-                className="w-full bg-black/60 border border-cyan-500/30 rounded p-1.5 font-mono text-[10px] text-cyan-200 focus:outline-none focus:border-cyan-400 resize-none"
-              />
+          <div className="space-y-3 font-mono text-xs">
+            <div className="p-2.5 rounded bg-cyan-950/40 border border-cyan-500/30 space-y-2">
+              <span className="font-bold text-white block">AI ASSISTANT PROVIDER</span>
+              <p className="text-[10px] text-cyan-400/80 leading-relaxed">
+                Connect external LLM provider or operate with local deterministic intent parser.
+              </p>
+              <button
+                onClick={() => {
+                  audioService.playChirp(1200);
+                  if (onOpenAIConfig) onOpenAIConfig();
+                }}
+                className="w-full py-1.5 px-3 rounded bg-cyan-500/30 hover:bg-cyan-500/50 text-white font-orbitron font-bold text-[10px] border border-cyan-400 flex items-center justify-center space-x-1.5 shadow-[0_0_12px_rgba(0,240,255,0.3)] transition-all"
+              >
+                <KeyRound className="w-3.5 h-3.5 text-cyan-300" />
+                <span>CONFIGURE AI PROVIDER</span>
+              </button>
             </div>
 
-            {/* Stopwatch / Countdown */}
-            <div className="p-2 rounded bg-cyan-950/30 border border-cyan-500/30 flex items-center justify-between">
-              <div className="flex items-center space-x-2">
-                <Clock className="w-4 h-4 text-cyan-400" />
-                <span className="font-mono text-sm font-bold text-white">
-                  {Math.floor(timerSeconds / 60)}:{(timerSeconds % 60).toString().padStart(2, '0')}
-                </span>
-              </div>
-              <div className="flex space-x-1.5">
-                <button
-                  onClick={() => {
-                    audioService.playChirp(1200);
-                    setTimerActive(!timerActive);
-                  }}
-                  className="px-2 py-0.5 rounded bg-cyan-500/20 hover:bg-cyan-500/40 text-cyan-300 font-mono text-[10px] border border-cyan-400"
-                >
-                  {timerActive ? 'PAUSE' : 'START'}
-                </button>
-                <button
-                  onClick={() => {
-                    audioService.playChirp(800);
-                    setTimerActive(false);
-                    setTimerSeconds(0);
-                  }}
-                  className="px-2 py-0.5 rounded bg-red-950/40 hover:bg-red-900/50 text-red-300 font-mono text-[10px] border border-red-500/40"
-                >
-                  RESET
-                </button>
-              </div>
-            </div>
-
-            {/* AI Provider Config Info */}
-            <div className="p-2 rounded bg-black/40 border border-cyan-500/20 text-[10px] font-mono text-cyan-400/80">
-              <span className="text-white font-bold block mb-0.5">LOCAL-FIRST PRIVACY SHIELD:</span>
-              Voice & gesture processing runs 100% on-device in browser. External LLM intelligence is fully optional and configurable.
+            <div className="p-2 rounded bg-black/40 border border-cyan-500/20 text-[10px] text-cyan-400/80 space-y-1">
+              <span className="text-white font-bold block">ACTIVE DIRECTIVE:</span>
+              <span>• Local Autonomous Speech Parser</span>
+              <br />
+              <span>• MediaPipe 3D Hand Tracking: ON</span>
+              <br />
+              <span>• Spatial Collision Physics: ACTIVE</span>
             </div>
           </div>
         </HolographicPanel>

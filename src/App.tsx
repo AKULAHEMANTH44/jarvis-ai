@@ -6,27 +6,44 @@ import { RightDiagnosticsHUD } from './components/HUD/RightDiagnosticsHUD';
 import { BottomControlHUD } from './components/HUD/BottomControlHUD';
 import { VoiceConsoleHUD } from './components/HUD/VoiceConsoleHUD';
 import { StandbyHUD } from './components/HUD/StandbyHUD';
+import { FloatingSpatialPanels } from './components/Workspace/FloatingSpatialPanels';
+import { PermissionConfirmationModal } from './components/Workspace/PermissionConfirmationModal';
+import { AIConfigModal } from './components/HUD/AIConfigModal';
 import { HologramSceneManager } from './three/HologramScene';
 import {
   HologramModelId,
   HologramVisualSettings,
-  InteractionMode
+  InteractionMode,
+  LayoutFormation,
+  SpatialObjectState
 } from './types/hologram';
 import {
   GestureCalibrationSettings,
   GestureDetectionResult,
   GestureType
 } from './types/gesture';
-import { AssistantMessage, VoiceCommand } from './types/assistant';
+import { AssistantMessage, VoiceCommand, DesktopPermissionRequest } from './types/assistant';
 import { handTrackingService } from './services/handTracking';
 import { gestureEngine, DEFAULT_CALIBRATION } from './services/gestureEngine';
 import { audioService } from './services/soundFx';
 import { speechService } from './services/speechService';
+import { desktopBridge } from './services/desktopBridge';
+import { automationEngine } from './services/automationEngine';
+import { contextualAI } from './services/contextualAI';
 
 export const App: React.FC = () => {
   // Modes & Models State
-  const [mode, setMode] = useState<InteractionMode>('GESTURE');
+  const [mode, setMode] = useState<InteractionMode>('WORKSPACE');
   const [currentModelId, setCurrentModelId] = useState<HologramModelId>('arc_reactor');
+  const [spatialObjects, setSpatialObjects] = useState<SpatialObjectState[]>([]);
+  const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
+
+  // Modals & Panels State
+  const [permissionRequest, setPermissionRequest] = useState<DesktopPermissionRequest | null>(null);
+  const [isAIConfigOpen, setIsAIConfigOpen] = useState<boolean>(false);
+  const [notes, setNotes] = useState<string>(
+    'STARK INDUSTRIES // MARK VII MEMORANDUM\n• Fusion harmonic stabilized at 142.8 GHz\n• Multi-object spatial collision matrix active\n• Local-first autonomous intelligence engaged'
+  );
 
   // Visual & Calibration Settings
   const [visualSettings, setVisualSettings] = useState<HologramVisualSettings>({
@@ -37,7 +54,9 @@ export const App: React.FC = () => {
     colorTheme: 'cyan',
     hologramColor: '#00f0ff',
     explodedView: false,
-    pulseEnabled: true
+    pulseEnabled: true,
+    showBoundingBoxes: true,
+    spatialFormation: 'FREE'
   });
 
   const [calibration, setCalibration] = useState<GestureCalibrationSettings>({
@@ -57,7 +76,7 @@ export const App: React.FC = () => {
     {
       id: 'init-1',
       sender: 'JARVIS',
-      text: 'Good evening. Holographic systems are online. Mark VII interface awaiting your gesture or voice command.',
+      text: 'Good evening, sir. Mark VII spatial workspace online. Multiple holographic entities, desktop bridge, and autonomous task engines are ready.',
       timestamp: new Date().toLocaleTimeString(),
       type: 'RESPONSE'
     }
@@ -66,6 +85,28 @@ export const App: React.FC = () => {
   // Three.js Scene Reference
   const sceneManagerRef = useRef<HologramSceneManager | null>(null);
   const lastGestureRef = useRef<GestureType>('NONE');
+
+  // Sync spatial objects from Three.js scene
+  const syncSpatialStates = useCallback(() => {
+    if (sceneManagerRef.current) {
+      const states = sceneManagerRef.current.getSpatialStates();
+      setSpatialObjects(states);
+      setSelectedObjectId(sceneManagerRef.current.spatialManager.getSelectedId());
+    }
+  }, []);
+
+  // Wire up desktop bridge confirmation modal
+  useEffect(() => {
+    desktopBridge.setPromptCallback((req) => {
+      setPermissionRequest(req);
+    });
+  }, []);
+
+  // Update states initially
+  useEffect(() => {
+    const timer = setTimeout(syncSpatialStates, 500);
+    return () => clearTimeout(timer);
+  }, [syncSpatialStates]);
 
   // Trigger Shockwave Action
   const handleTriggerShockwave = useCallback(() => {
@@ -103,12 +144,116 @@ export const App: React.FC = () => {
     ]);
   }, []);
 
+  // Multi-Object Operations
+  const handleAddSpatialObject = useCallback((modelId: HologramModelId) => {
+    if (sceneManagerRef.current) {
+      audioService.playActivationWhoosh();
+      const inst = sceneManagerRef.current.addSpatialObject(modelId);
+      setCurrentModelId(modelId);
+      syncSpatialStates();
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: Math.random().toString(36).substring(7),
+          sender: 'JARVIS',
+          text: `Spawned new ${inst.name} in spatial workspace.`,
+          timestamp: new Date().toLocaleTimeString(),
+          type: 'INFO'
+        }
+      ]);
+    }
+  }, [syncSpatialStates]);
+
+  const handleDuplicateObject = useCallback((id: string) => {
+    if (sceneManagerRef.current) {
+      audioService.playChirp(1500);
+      const dup = sceneManagerRef.current.spatialManager.duplicate(id);
+      syncSpatialStates();
+      if (dup) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: Math.random().toString(36).substring(7),
+            sender: 'JARVIS',
+            text: `Cloned ${dup.name}. Both instances ready for independent spatial manipulation.`,
+            timestamp: new Date().toLocaleTimeString(),
+            type: 'INFO'
+          }
+        ]);
+      }
+    }
+  }, [syncSpatialStates]);
+
+  const handleDeleteObject = useCallback(async (id: string) => {
+    const target = spatialObjects.find(o => o.id === id);
+    const targetName = target ? target.name : 'Selected Hologram';
+
+    // Consequential action confirmation gate
+    const approved = await desktopBridge.requestAuthorization(
+      'DELETE_OBJECT',
+      targetName,
+      `De-materialize spatial 3D instance from active scene.`
+    );
+
+    if (approved && sceneManagerRef.current) {
+      audioService.playChirp(800);
+      sceneManagerRef.current.spatialManager.delete(id);
+      syncSpatialStates();
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: Math.random().toString(36).substring(7),
+          sender: 'JARVIS',
+          text: `${targetName} de-materialized from workspace.`,
+          timestamp: new Date().toLocaleTimeString(),
+          type: 'INFO'
+        }
+      ]);
+    }
+  }, [spatialObjects, syncSpatialStates]);
+
+  const handleSelectObject = useCallback((id: string) => {
+    if (sceneManagerRef.current) {
+      sceneManagerRef.current.selectObject(id);
+      syncSpatialStates();
+    }
+  }, [syncSpatialStates]);
+
+  const handleApplyFormation = useCallback((formation: LayoutFormation) => {
+    if (sceneManagerRef.current) {
+      audioService.playActivationWhoosh();
+      sceneManagerRef.current.applyFormation(formation);
+      syncSpatialStates();
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: Math.random().toString(36).substring(7),
+          sender: 'JARVIS',
+          text: `Applied ${formation} spatial layout formation.`,
+          timestamp: new Date().toLocaleTimeString(),
+          type: 'INFO'
+        }
+      ]);
+    }
+  }, [syncSpatialStates]);
+
+  // Model switching
+  const handleSelectModel = useCallback((modelId: HologramModelId) => {
+    if (sceneManagerRef.current) {
+      audioService.playActivationWhoosh();
+      sceneManagerRef.current.setModel(modelId);
+      setCurrentModelId(modelId);
+      syncSpatialStates();
+    }
+  }, [syncSpatialStates]);
+
   // Next / Prev 3D Model
   const handleNextModel = useCallback(() => {
     if (sceneManagerRef.current) {
       const nextId = sceneManagerRef.current.nextModel();
       setCurrentModelId(nextId);
       audioService.playSwipeSound();
+      syncSpatialStates();
       setMessages((prev) => [
         ...prev,
         {
@@ -120,13 +265,14 @@ export const App: React.FC = () => {
         }
       ]);
     }
-  }, []);
+  }, [syncSpatialStates]);
 
   const handlePrevModel = useCallback(() => {
     if (sceneManagerRef.current) {
       const prevId = sceneManagerRef.current.prevModel();
       setCurrentModelId(prevId);
       audioService.playSwipeSound();
+      syncSpatialStates();
       setMessages((prev) => [
         ...prev,
         {
@@ -138,9 +284,9 @@ export const App: React.FC = () => {
         }
       ]);
     }
-  }, []);
+  }, [syncSpatialStates]);
 
-  // Register Voice Commands with SpeechService
+  // Register Contextual Voice Commands with SpeechService
   useEffect(() => {
     const commands: VoiceCommand[] = [
       {
@@ -151,17 +297,17 @@ export const App: React.FC = () => {
         feedbackText: 'Good evening, sir. All holographic systems are online and awaiting your command.'
       },
       {
-        patterns: ['initialize holographic interface', 'initialize hologram', 'open interface'],
-        description: 'Initialize main hologram',
+        patterns: ['initialize holographic interface', 'initialize hologram', 'open interface', 'workspace mode'],
+        description: 'Initialize main workspace',
         category: 'NAVIGATION',
         action: () => {
-          setMode('HOLOGRAM');
+          setMode('WORKSPACE');
           audioService.playActivationWhoosh();
         },
-        feedbackText: 'Initializing holographic interface. Mark VII core engaged.'
+        feedbackText: 'Initializing holographic workspace. Mark VII core engaged.'
       },
       {
-        patterns: ['rotate the object', 'rotate object', 'spin object'],
+        patterns: ['rotate the object', 'rotate object', 'spin object', 'rotate it'],
         description: 'Rotate object',
         category: 'MANIPULATION',
         action: () => {
@@ -201,6 +347,46 @@ export const App: React.FC = () => {
         feedbackText: 'Returning holographic object to origin.'
       },
       {
+        patterns: ['duplicate it', 'duplicate object', 'clone object', 'make a copy'],
+        description: 'Duplicate selected object',
+        category: 'SPATIAL',
+        action: () => {
+          if (selectedObjectId) handleDuplicateObject(selectedObjectId);
+        },
+        feedbackText: 'Duplicating selected holographic entity.'
+      },
+      {
+        patterns: ['delete it', 'delete object', 'remove object', 'dematerialize'],
+        description: 'Delete selected object',
+        category: 'SPATIAL',
+        action: () => {
+          if (selectedObjectId) handleDeleteObject(selectedObjectId);
+        },
+        feedbackText: 'Requesting confirmation to delete selected object.',
+        requiresConfirmation: true
+      },
+      {
+        patterns: ['orbit formation', 'orbit layout', 'orbit'],
+        description: 'Orbit layout',
+        category: 'SPATIAL',
+        action: () => handleApplyFormation('ORBIT'),
+        feedbackText: 'Applying orbital satellite formation to all active modules.'
+      },
+      {
+        patterns: ['grid formation', 'grid layout', 'matrix layout'],
+        description: 'Grid layout',
+        category: 'SPATIAL',
+        action: () => handleApplyFormation('GRID'),
+        feedbackText: 'Arranging all active modules in planar matrix grid.'
+      },
+      {
+        patterns: ['lineup formation', 'line formation', 'linear array'],
+        description: 'Line layout',
+        category: 'SPATIAL',
+        action: () => handleApplyFormation('LINE'),
+        feedbackText: 'Aligning holographic models in linear telemetry array.'
+      },
+      {
         patterns: ['trigger shockwave', 'cinematic pulse', 'repulsor blast', 'shockwave'],
         description: 'Discharge energy wave',
         category: 'CINEMATIC',
@@ -226,39 +412,62 @@ export const App: React.FC = () => {
         feedbackText: 'Reconstructing holographic components.'
       },
       {
-        patterns: ['switch to arc reactor', 'arc reactor'],
-        description: 'Select Arc Reactor',
-        category: 'NAVIGATION',
-        action: () => setCurrentModelId('arc_reactor'),
-        feedbackText: 'Displaying Arc Reactor Mark VII core.'
+        patterns: ['run diagnostic sweep', 'diagnostic protocol', 'system sweep'],
+        description: 'Autonomous diagnostic workflow',
+        category: 'AUTOMATION',
+        action: () => {
+          automationEngine.createTask(
+            'Autonomous Optical & Containment Sweep',
+            'Verify camera frames, landmark smoothing, and containment flux.',
+            [
+              { description: 'Testing optical sensor stream fidelity', action: () => audioService.playChirp(1200) },
+              { description: 'Synchronizing 21 3D hand landmarks', action: () => audioService.playChirp(1400) },
+              { description: 'Evaluating magnetic containment coherence', action: () => audioService.playActivationWhoosh() }
+            ]
+          );
+        },
+        feedbackText: 'Initiating autonomous sensor and containment diagnostic sweep.'
       },
       {
-        patterns: ['switch to tesseract', 'quantum cube', 'tesseract'],
-        description: 'Select Quantum Tesseract',
-        category: 'NAVIGATION',
-        action: () => setCurrentModelId('quantum_tesseract'),
-        feedbackText: 'Projecting Quantum Tesseract 4D hypercube.'
+        patterns: ['run overclock protocol', 'overclock pulse'],
+        description: 'Autonomous overclock workflow',
+        category: 'AUTOMATION',
+        action: () => {
+          automationEngine.createTask(
+            'Reactor Overclock & High-Yield Pulse Protocol',
+            'Overclock containment output and discharge radial shockwave wave.',
+            [
+              { description: 'Diverting secondary plasma channels to primary core', action: () => audioService.playChirp(1600) },
+              { description: 'Discharging radial energy shockwave wave', action: () => audioService.playShockwave() },
+              { description: 'Engaging exploded component telemetry view', action: () => audioService.playActivationWhoosh() }
+            ],
+            ['HIGH_ENERGY_DISCHARGE']
+          );
+        },
+        feedbackText: 'Starting high-yield overclock workflow. Security verification required.'
       },
       {
-        patterns: ['switch to mark suit', 'iron man armor', 'helmet', 'mark suit'],
-        description: 'Select Armor Blueprint',
-        category: 'NAVIGATION',
-        action: () => setCurrentModelId('ironman_armor'),
-        feedbackText: 'Loading Iron Man Mark VII chassis schematics.'
+        patterns: ['open ai settings', 'configure ai', 'ai settings'],
+        description: 'Open AI provider modal',
+        category: 'SYSTEM',
+        action: () => setIsAIConfigOpen(true),
+        feedbackText: 'Opening AI intelligence provider configuration panel.'
       },
       {
-        patterns: ['switch to planetary defense', 'defense grid', 'earth hologram'],
-        description: 'Select Planetary Globe',
-        category: 'NAVIGATION',
-        action: () => setCurrentModelId('planetary_defense'),
-        feedbackText: 'Acquiring orbital planetary defense telemetry.'
-      },
-      {
-        patterns: ['switch to dna', 'molecular helix', 'dna'],
-        description: 'Select Molecular Helix',
-        category: 'NAVIGATION',
-        action: () => setCurrentModelId('molecular_dna'),
-        feedbackText: 'Synthesizing nanotech molecular double helix.'
+        patterns: ['save notes', 'export notes', 'save file'],
+        description: 'Save notes to file',
+        category: 'SYSTEM',
+        action: async () => {
+          const approved = await desktopBridge.requestAuthorization(
+            'FILE_WRITE',
+            'stark_lab_notes.txt',
+            'Export mission memorandum notes to authorized local file system.'
+          );
+          if (approved) {
+            await desktopBridge.saveAuthorizedFile('stark_lab_notes.txt', notes);
+          }
+        },
+        feedbackText: 'Requesting permission to export mission memo to local storage.'
       },
       {
         patterns: ['enter standby mode', 'standby', 'sleep mode'],
@@ -271,7 +480,7 @@ export const App: React.FC = () => {
         patterns: ['wake up', 'wake', 'activate systems'],
         description: 'Wake from standby',
         category: 'SYSTEM',
-        action: () => setMode('GESTURE'),
+        action: () => setMode('WORKSPACE'),
         feedbackText: 'Systems restored to active status.'
       },
       {
@@ -294,7 +503,7 @@ export const App: React.FC = () => {
     speechService.setMessageCallback((msg) => {
       setMessages((prev) => [...prev, msg]);
     });
-  }, [handleResetTransform, handleTriggerShockwave]);
+  }, [handleApplyFormation, handleDuplicateObject, handleDeleteObject, handleResetTransform, handleTriggerShockwave, notes, selectedObjectId]);
 
   // Voice Assistant toggle
   const handleToggleVoice = useCallback(() => {
@@ -320,10 +529,44 @@ export const App: React.FC = () => {
     }
   }, [isVoiceActive]);
 
-  // Handle direct command string from console input
-  const handleSendConsoleCommand = useCallback((text: string) => {
+  // Handle direct command string from console input with Contextual AI
+  const handleSendConsoleCommand = useCallback(async (text: string) => {
+    contextualAI.addHistory('user', text);
+
+    const activeObj = spatialObjects.find(o => o.id === selectedObjectId);
+    const modelName = activeObj ? activeObj.name : 'Central Hologram';
+
+    const intentResult = contextualAI.parseLocalIntent(text, modelName);
+
+    // If external AI configured, try querying
+    if (contextualAI.getConfig().provider !== 'LOCAL') {
+      const extReply = await contextualAI.queryExternalAI(text);
+      if (extReply) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: Math.random().toString(36).substring(7),
+            sender: 'USER',
+            text,
+            timestamp: new Date().toLocaleTimeString(),
+            type: 'COMMAND'
+          },
+          {
+            id: Math.random().toString(36).substring(7),
+            sender: 'JARVIS',
+            text: extReply,
+            timestamp: new Date().toLocaleTimeString(),
+            type: 'RESPONSE'
+          }
+        ]);
+        speechService.speak(extReply);
+        return;
+      }
+    }
+
+    // Process via speech service / local intent
     speechService.handleTranscript(text);
-  }, []);
+  }, [selectedObjectId, spatialObjects]);
 
   // Camera & Tracking toggle
   const handleToggleCamera = useCallback(async () => {
@@ -354,7 +597,7 @@ export const App: React.FC = () => {
     }
   }, [isCameraActive]);
 
-  // GESTURE DISPATCH ENGINE: Translates gesture detection results into 3D interactions
+  // GESTURE DISPATCH ENGINE
   useEffect(() => {
     if (!gestureResult) return;
     const g = gestureResult.activeGesture;
@@ -373,7 +616,7 @@ export const App: React.FC = () => {
     // A. OPEN PALM
     if (g === 'OPEN_PALM') {
       if (mode === 'STANDBY') {
-        setMode('GESTURE');
+        setMode('WORKSPACE');
         audioService.playActivationWhoosh();
       }
     }
@@ -455,7 +698,11 @@ export const App: React.FC = () => {
         currentModelId={currentModelId}
         visualSettings={visualSettings}
         sceneManagerRef={sceneManagerRef}
-        onModelChange={setCurrentModelId}
+        onModelChange={handleSelectModel}
+        onSelectObject={(id) => {
+          setSelectedObjectId(id);
+          syncSpatialStates();
+        }}
       />
 
       {/* 2. Top Status Bar HUD */}
@@ -487,9 +734,27 @@ export const App: React.FC = () => {
             />
           </div>
 
-          {/* Center Space: Open view of 3D Hologram with floating Voice Console */}
-          <div className="flex-1 flex flex-col justify-end items-center pointer-events-none px-4 pb-2">
-            <div className="pointer-events-auto">
+          {/* Center Space: Open view of 3D Hologram, Floating Workspace Panels & Voice Console */}
+          <div className="flex-1 flex flex-col justify-between items-center pointer-events-none px-4 pb-2">
+            {/* Top Center: Floating Workspace Multi-Object Panels */}
+            {mode === 'WORKSPACE' && (
+              <div className="pointer-events-auto pt-1 animate-fade-in">
+                <FloatingSpatialPanels
+                  spatialObjects={spatialObjects}
+                  selectedObjectId={selectedObjectId}
+                  onSelectObject={handleSelectObject}
+                  onAddObject={handleAddSpatialObject}
+                  onDuplicateObject={handleDuplicateObject}
+                  onDeleteObject={handleDeleteObject}
+                  onApplyFormation={handleApplyFormation}
+                  notes={notes}
+                  onUpdateNotes={setNotes}
+                />
+              </div>
+            )}
+
+            {/* Bottom Center: Floating Voice Console */}
+            <div className="pointer-events-auto mt-auto">
               <VoiceConsoleHUD
                 messages={messages}
                 onSendCommand={handleSendConsoleCommand}
@@ -503,11 +768,12 @@ export const App: React.FC = () => {
           <div className="pointer-events-auto overflow-y-auto max-h-full pl-2">
             <RightDiagnosticsHUD
               currentModelId={currentModelId}
-              onSelectModel={setCurrentModelId}
+              onSelectModel={handleSelectModel}
               visualSettings={visualSettings}
               onUpdateVisualSettings={(settings) =>
                 setVisualSettings((v) => ({ ...v, ...settings }))
               }
+              onOpenAIConfig={() => setIsAIConfigOpen(true)}
             />
           </div>
         </div>
@@ -528,7 +794,30 @@ export const App: React.FC = () => {
       )}
 
       {/* 5. Minimalist Standby HUD Overlay */}
-      {mode === 'STANDBY' && <StandbyHUD onWake={() => setMode('GESTURE')} />}
+      {mode === 'STANDBY' && <StandbyHUD onWake={() => setMode('WORKSPACE')} />}
+
+      {/* 6. Security Confirmation Modal for Consequential Actions */}
+      <PermissionConfirmationModal
+        request={permissionRequest}
+        onConfirm={() => {
+          if (permissionRequest) {
+            desktopBridge.resolvePermission(permissionRequest.id, true);
+            setPermissionRequest(null);
+          }
+        }}
+        onReject={() => {
+          if (permissionRequest) {
+            desktopBridge.resolvePermission(permissionRequest.id, false);
+            setPermissionRequest(null);
+          }
+        }}
+      />
+
+      {/* 7. AI Provider Config Modal */}
+      <AIConfigModal
+        isOpen={isAIConfigOpen}
+        onClose={() => setIsAIConfigOpen(false)}
+      />
     </div>
   );
 };

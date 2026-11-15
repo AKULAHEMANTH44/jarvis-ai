@@ -3,7 +3,9 @@ export type HologramModelId =
   | 'quantum_tesseract'
   | 'ironman_armor'
   | 'planetary_defense'
-  | 'molecular_dna';
+  | 'molecular_dna'
+  | 'carbon_buckyball'
+  | 'hologram_datachart';
 
 export interface HologramModelInfo {
   id: HologramModelId;
@@ -19,11 +21,19 @@ export interface HologramModelInfo {
   };
 }
 
-export interface HologramTransform {
+export interface SpatialObjectState {
+  id: string;
+  modelId: HologramModelId;
+  name: string;
   position: { x: number; y: number; z: number };
   rotation: { x: number; y: number; z: number };
   scale: number;
+  isSelected: boolean;
+  groupId?: string;
+  isLocked: boolean;
 }
+
+export type LayoutFormation = 'FREE' | 'GRID' | 'ORBIT' | 'LINE' | 'SINGLE';
 
 export type InteractionMode =
   | 'GESTURE'       // Mode 1: Control using hands
@@ -32,7 +42,8 @@ export type InteractionMode =
   | 'HOLOGRAM'      // Mode 4: 3D manipulation focus
   | 'CINEMATIC'     // Mode 5: Advanced visual animations
   | 'STANDBY'       // Mode 6: Minimal futuristic interface
-  | 'DESKTOP';      // Mode 7: Desktop assistant productivity mode
+  | 'DESKTOP'       // Mode 7: Desktop assistant productivity mode
+  | 'WORKSPACE';    // Mode 8: Multi-object spatial workspace
 
 export interface HologramVisualSettings {
   wireframe: boolean;
@@ -43,4 +54,15 @@ export interface HologramVisualSettings {
   hologramColor: string;
   explodedView: boolean;
   pulseEnabled: boolean;
+  showBoundingBoxes: boolean;
+  spatialFormation: LayoutFormation;
+}
+
+export interface FloatingPanelState {
+  id: string;
+  title: string;
+  type: 'TELEMETRY' | 'TASKS' | 'NOTES' | 'TIMER' | 'AUTOMATION' | 'DATA_VIZ';
+  position: { x: number; y: number; z: number };
+  isMinimized: boolean;
+  isPinned: boolean;
 }

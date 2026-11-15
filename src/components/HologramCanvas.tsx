@@ -7,13 +7,15 @@ interface HologramCanvasProps {
   visualSettings: HologramVisualSettings;
   sceneManagerRef: React.MutableRefObject<HologramSceneManager | null>;
   onModelChange: (modelId: HologramModelId) => void;
+  onSelectObject?: (id: string) => void;
 }
 
 export const HologramCanvas: React.FC<HologramCanvasProps> = ({
   currentModelId,
   visualSettings,
   sceneManagerRef,
-  onModelChange
+  onModelChange,
+  onSelectObject
 }) => {
   const mountRef = useRef<HTMLDivElement | null>(null);
 
@@ -22,20 +24,12 @@ export const HologramCanvas: React.FC<HologramCanvasProps> = ({
 
     const manager = new HologramSceneManager(mountRef.current, visualSettings);
     sceneManagerRef.current = manager;
-    manager.setModel(currentModelId);
 
     return () => {
       manager.destroy();
       sceneManagerRef.current = null;
     };
   }, []);
-
-  // Sync model changes
-  useEffect(() => {
-    if (sceneManagerRef.current && sceneManagerRef.current.getModelId() !== currentModelId) {
-      sceneManagerRef.current.setModel(currentModelId);
-    }
-  }, [currentModelId]);
 
   // Sync visual settings changes
   useEffect(() => {
@@ -44,10 +38,22 @@ export const HologramCanvas: React.FC<HologramCanvasProps> = ({
     }
   }, [visualSettings]);
 
+  const handleClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!mountRef.current || !sceneManagerRef.current) return;
+    const rect = mountRef.current.getBoundingClientRect();
+    const ndcX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    const ndcY = -(((e.clientY - rect.top) / rect.height) * 2 - 1);
+    const selectedId = sceneManagerRef.current.raycastSelect(ndcX, ndcY);
+    if (selectedId && onSelectObject) {
+      onSelectObject(selectedId);
+    }
+  };
+
   return (
     <div
       ref={mountRef}
-      className="absolute inset-0 z-10 w-full h-full overflow-hidden flex items-center justify-center cursor-grab active:cursor-grabbing"
+      onClick={handleClick}
+      className="absolute inset-0 z-10 w-full h-full overflow-hidden flex items-center justify-center cursor-crosshair"
     />
   );
 };
