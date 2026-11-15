@@ -2,29 +2,69 @@ class AudioService {
   private ctx: AudioContext | null = null;
   private masterGain: GainNode | null = null;
   private analyser: AnalyserNode | null = null;
+  private micSource: MediaStreamAudioSourceNode | null = null;
+  private micStream: MediaStream | null = null;
   private ambientOsc: OscillatorNode | null = null;
   private ambientGain: GainNode | null = null;
   private isMuted: boolean = false;
 
   private initContext() {
+    if (typeof window === 'undefined') return;
     if (!this.ctx) {
-      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioCtx) return;
       this.ctx = new AudioCtx();
       this.masterGain = this.ctx.createGain();
-      this.masterGain.gain.setValueAtTime(0.35, this.ctx.currentTime);
+      this.masterGain.gain.setValueAtTime(this.isMuted ? 0 : 0.35, this.ctx.currentTime);
       this.analyser = this.ctx.createAnalyser();
       this.analyser.fftSize = 64;
       this.masterGain.connect(this.analyser);
       this.analyser.connect(this.ctx.destination);
     }
-    if (this.ctx.state === 'suspended') {
-      this.ctx.resume();
+    if (this.ctx && this.ctx.state === 'suspended') {
+      this.ctx.resume().catch(() => {});
     }
   }
 
   public getAnalyser(): AnalyserNode | null {
     this.initContext();
     return this.analyser;
+  }
+
+  // Connect live microphone stream to analyser ONLY (never to destination -> zero feedback)
+  public connectMicrophoneStream(stream: MediaStream) {
+    this.disconnectMicrophoneStream();
+    this.initContext();
+    if (!this.ctx || !this.analyser) return;
+
+    try {
+      this.micStream = stream;
+      this.micSource = this.ctx.createMediaStreamSource(stream);
+      this.micSource.connect(this.analyser);
+    } catch (e) {
+      console.warn('Unable to attach microphone stream to audio analyser:', e);
+    }
+  }
+
+  public disconnectMicrophoneStream() {
+    if (this.micSource) {
+      try {
+        this.micSource.disconnect();
+      } catch {
+        // ignore
+      }
+      this.micSource = null;
+    }
+    if (this.micStream) {
+      this.micStream.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch {
+          // ignore
+        }
+      });
+      this.micStream = null;
+    }
   }
 
   public toggleMute(): boolean {
@@ -96,7 +136,7 @@ class AudioService {
     if (!this.ctx || !this.masterGain) return;
 
     const t = this.ctx.currentTime;
-    
+
     // Deep sub-bass boom
     const subOsc = this.ctx.createOscillator();
     const subGain = this.ctx.createGain();
@@ -224,7 +264,7 @@ class AudioService {
     this.ambientGain = this.ctx.createGain();
 
     this.ambientOsc.type = 'sine';
-    this.ambientOsc.frequency.setValueAtTime(55, this.ctx.currentTime); // Low 55Hz electrical hum
+    this.ambientOsc.frequency.setValueAtTime(55, this.ctx.currentTime);
 
     this.ambientGain.gain.setValueAtTime(0.04, this.ctx.currentTime);
 

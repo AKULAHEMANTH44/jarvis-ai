@@ -10,6 +10,7 @@ function createMockLandmarks(options: {
   isPointing?: boolean;
   offsetZ?: number;
   offsetX?: number;
+  offsetY?: number;
   rollAngle?: number; // angle in radians from vertical
 }) {
   const {
@@ -19,14 +20,15 @@ function createMockLandmarks(options: {
     isPointing = false,
     offsetZ = 0,
     offsetX = 0,
+    offsetY = 0,
     rollAngle = 0
   } = options;
 
   // 21 landmarks
-  const landmarks = Array.from({ length: 21 }, () => ({ x: 0.5 + offsetX, y: 0.5, z: offsetZ }));
+  const landmarks = Array.from({ length: 21 }, () => ({ x: 0.5 + offsetX, y: 0.5 + offsetY, z: offsetZ }));
 
   // Wrist at (0.5, 0.8)
-  landmarks[0] = { x: 0.5 + offsetX, y: 0.8, z: offsetZ };
+  landmarks[0] = { x: 0.5 + offsetX, y: 0.8 + offsetY, z: offsetZ };
 
   // Middle MCP (9) positioned relative to wrist according to rollAngle
   const mcpDist = 0.35;
@@ -218,5 +220,118 @@ describe('GestureEngine Phase 2 Technical Validation', () => {
 
     const restored = engine.resetCalibrationToDefaults();
     expect(restored.pinchThreshold).toBe(DEFAULT_CALIBRATION.pinchThreshold);
+  });
+
+  it('rotates sphere continuously right/left/up/down and flips horizontally when mirrorX is enabled', () => {
+    engine.updateCalibration({ smoothingFactor: 1.0, mirrorX: false });
+    engine.processResults(createMockResult([createMockLandmarks({ offsetX: 0, offsetY: 0 })]), 100);
+
+    // Move right (+X) -> positive Y rotation
+    const rightRes = engine.processResults(createMockResult([createMockLandmarks({ offsetX: 0.025 })]), 133);
+    expect(rightRes.activeGesture).toBe('SPHERE_ROTATE');
+    expect(rightRes.sphericalRotationDelta!.y).toBeGreaterThan(0);
+
+    // Move left (-X) -> reverse direction
+    const leftRes = engine.processResults(createMockResult([createMockLandmarks({ offsetX: -0.015 })]), 166);
+    expect(leftRes.activeGesture).toBe('SPHERE_ROTATE');
+    expect(leftRes.sphericalRotationDelta!.y).toBeLessThan(0);
+
+    // Move up (-Y) -> negative X tilt
+    const upRes = engine.processResults(createMockResult([createMockLandmarks({ offsetX: -0.015, offsetY: -0.025 })]), 200);
+    expect(upRes.activeGesture).toBe('SPHERE_ROTATE');
+    expect(upRes.sphericalRotationDelta!.x).toBeLessThan(0);
+
+    // Move down (+Y) -> positive X tilt
+    const downRes = engine.processResults(createMockResult([createMockLandmarks({ offsetX: -0.015, offsetY: 0.015 })]), 233);
+    expect(downRes.activeGesture).toBe('SPHERE_ROTATE');
+    expect(downRes.sphericalRotationDelta!.x).toBeGreaterThan(0);
+
+    // Mirror webcam mode: raw +X movement rotates sphere left (-Y) so physical right rotates right
+    const mirrored = new GestureEngine();
+    mirrored.updateCalibration({ smoothingFactor: 1.0, mirrorX: true });
+    mirrored.processResults(createMockResult([createMockLandmarks({ offsetX: 0 })]), 100);
+    const mirRes = mirrored.processResults(createMockResult([createMockLandmarks({ offsetX: -0.025 })]), 133);
+    expect(mirRes.activeGesture).toBe('SPHERE_ROTATE');
+    expect(mirRes.sphericalRotationDelta!.y).toBeGreaterThan(0);
+  });
+
+  it('prevents drift inside dead zone and clamps extreme velocities via EMA smoothing', () => {
+    engine.updateCalibration({ smoothingFactor: 1.0, rotationDeadZone: 0.005, maxRotationSpeed: 0.15 });
+    engine.processResults(createMockResult([createMockLandmarks({ offsetX: 0, isOpenPalm: true })]), 100);
+
+    // Jitter smaller than dead zone -> zero rotation drift
+    const jitter = engine.processResults(createMockResult([createMockLandmarks({ offsetX: 0.002, isOpenPalm: true })]), 133);
+    expect(jitter.activeGesture).toBe('OPEN_PALM');
+    expect(jitter.sphericalRotationDelta).toBeUndefined();
+
+    // Large spike clamps safely below maxRotationSpeed
+    const spike = engine.processResults(createMockResult([createMockLandmarks({ offsetX: 0.35 })]), 166);
+    expect(Math.abs(spike.sphericalRotationDelta?.y || 0)).toBeLessThanOrEqual(0.15);
+  });
+
+  it('supports neutral anchor calibration and jump-free recovery after tracking loss', () => {
+    engine.updateCalibration({ smoothingFactor: 1.0 });
+    engine.processResults(createMockResult([createMockLandmarks({ offsetX: 0.1 })]), 100);
+    expect(engine.getNeutralAnchor()).not.toBeNull();
+
+    engine.recalibrateNeutral();
+    expect(engine.getNeutralAnchor()).toBeNull();
+
+    // Active frame then hand disappears -> trackingLost = true
+    engine.processResults(createMockResult([createMockLandmarks({ offsetX: 0.1 })]), 133);
+    const lost = engine.processResults(createMockResult([]), 166);
+    expect(lost.trackingLost).toBe(true);
+    expect(lost.activeGesture).toBe('NONE');
+
+    // Hand re-appears at different coordinates -> no sudden rotation jump on re-entry frame
+    const reacquired = engine.processResults(createMockResult([createMockLandmarks({ offsetX: -0.2 })]), 200);
+    expect(reacquired.trackingLost).toBe(false);
+    expect(reacquired.sphericalRotationDelta).toBeUndefined();
+  });
+
+  it('normalizes two-hand separation for continuous dispersion with hysteresis and two-hand priority', () => {
+    engine.updateCalibration({
+      smoothingFactor: 1.0,
+      dispersionSmoothing: 1.0,
+      twoHandMinDist: 0.15,
+      twoHandMaxDist: 0.65
+    });
+
+    // Hands close together -> dispersion near 0 (COMPLETE)
+    const close1 = createMockLandmarks({ isPinching: true, offsetX: -0.075 });
+    const close2 = createMockLandmarks({ offsetX: 0.075 });
+    const resClose = engine.processResults(createMockResult([close1, close2]), 100);
+    expect(resClose.activeGesture).toBe('TWO_HAND_ZOOM'); // priority over single-hand PINCH
+    expect(resClose.dispersionControl?.dispersion).toBeCloseTo(0, 2);
+    expect(resClose.dispersionControl?.phase).toBe('COMPLETE');
+
+    // Mid-range separation (~0.40 -> normalized 0.50); allow EMA to settle
+    const midStart1 = createMockLandmarks({ offsetX: -0.20 });
+    const midStart2 = createMockLandmarks({ offsetX: 0.20 });
+    engine.processResults(createMockResult([midStart1, midStart2]), 130);
+    engine.processResults(createMockResult([midStart1, midStart2]), 140);
+    const resMidStart = engine.processResults(createMockResult([midStart1, midStart2]), 150);
+    expect(resMidStart.dispersionControl?.dispersion).toBeCloseTo(0.5, 1);
+
+    // Minor hand tremor (~0.004 distance -> 0.508) stays inside hysteresis band without flickering dispersion
+    const tremor1 = createMockLandmarks({ offsetX: -0.202 });
+    const tremor2 = createMockLandmarks({ offsetX: 0.202 });
+    const resTremor = engine.processResults(createMockResult([tremor1, tremor2]), 165);
+    expect(resTremor.dispersionControl?.dispersion).toBe(resMidStart.dispersionControl?.dispersion);
+
+    // Spread hands wide -> dispersion increases smoothly toward 1.0 (DISPERSED)
+    const wide1 = createMockLandmarks({ offsetX: -0.35 });
+    const wide2 = createMockLandmarks({ offsetX: 0.35 });
+    const resWide = engine.processResults(createMockResult([wide1, wide2]), 180);
+    expect(resWide.dispersionControl?.dispersion).toBeGreaterThanOrEqual(0.95);
+    expect(resWide.dispersionControl?.phase).toBe('DISPERSED');
+
+    // Bring hands halfway back together -> RECONSTRUCTING
+    const mid1 = createMockLandmarks({ offsetX: -0.18 });
+    const mid2 = createMockLandmarks({ offsetX: 0.18 });
+    const resMid = engine.processResults(createMockResult([mid1, mid2]), 220);
+    expect(resMid.dispersionControl?.dispersion).toBeGreaterThan(0.2);
+    expect(resMid.dispersionControl?.dispersion).toBeLessThan(0.8);
+    expect(resMid.dispersionControl?.phase).toBe('RECONSTRUCTING');
   });
 });

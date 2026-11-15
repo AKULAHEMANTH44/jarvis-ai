@@ -1,7 +1,7 @@
 import React, { useRef, useEffect } from 'react';
 import { HolographicPanel } from '../Common/HolographicPanel';
 import { AssistantMessage } from '../../types/assistant';
-import { MessageSquareCode, Volume2, Send, Terminal } from 'lucide-react';
+import { Volume2, Send, Terminal, Trash2 } from 'lucide-react';
 import { audioService } from '../../services/soundFx';
 
 interface VoiceConsoleHUDProps {
@@ -9,13 +9,17 @@ interface VoiceConsoleHUDProps {
   onSendCommand: (cmd: string) => void;
   isListening: boolean;
   isSpeaking: boolean;
+  isProcessing?: boolean;
+  onClearHistory?: () => void;
 }
 
 export const VoiceConsoleHUD: React.FC<VoiceConsoleHUDProps> = ({
   messages,
   onSendCommand,
   isListening,
-  isSpeaking
+  isSpeaking,
+  isProcessing = false,
+  onClearHistory
 }) => {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [inputValue, setInputValue] = React.useState<string>('');
@@ -36,34 +40,50 @@ export const VoiceConsoleHUD: React.FC<VoiceConsoleHUDProps> = ({
 
   const quickPrompts = [
     'Hello JARVIS',
-    'Status report',
-    'Rotate the object',
-    'Expand it',
-    'Switch to tesseract',
-    'Exploded view',
-    'Trigger shockwave',
-    'Enter standby mode'
+    'Open holographic workspace',
+    'Show me the vehicle',
+    'Rotate it 360 degrees',
+    'Explode the model',
+    'Disintegrate',
+    'Reconstruct the object',
+    'Return to normal view',
+    'Activate diagnostics'
   ];
 
   return (
     <div className="w-84 max-w-sm flex flex-col space-y-2">
       <HolographicPanel
         title="J.A.R.V.I.S. VOCAL CONSOLE"
-        subtitle="SPEECH & SYNTHESIS STREAM"
+        subtitle={`SPEECH & SYNTHESIS STREAM · ${messages.length} ENTRIES`}
+        reactive={isListening || isSpeaking || isProcessing}
         icon={<Terminal className="w-4 h-4 text-cyan-400" />}
         headerRight={
           <div className="flex items-center space-x-1.5 font-mono text-[10px]">
+            {isProcessing && (
+              <span className="text-amber-300 font-bold">PROCESSING</span>
+            )}
             {isSpeaking && (
-              <span className="flex items-center space-x-1 text-cyan-300 animate-pulse">
+              <span className="flex items-center space-x-1 text-cyan-300">
                 <Volume2 className="w-3.5 h-3.5" />
                 <span>SPEAKING</span>
               </span>
             )}
             {isListening && (
-              <span className="flex items-center space-x-1 text-emerald-400">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
-                <span>ACTIVE</span>
+              <span className="flex items-center space-x-1 text-emerald-400 font-bold">
+                <span>LISTENING</span>
               </span>
+            )}
+            {onClearHistory && messages.length > 1 && (
+              <button
+                onClick={() => {
+                  audioService.playChirp(950);
+                  onClearHistory();
+                }}
+                title="Clear Console History"
+                className="p-0.5 rounded border border-cyan-500/30 text-cyan-400/70 hover:text-white"
+              >
+                <Trash2 className="w-3 h-3" />
+              </button>
             )}
           </div>
         }
@@ -98,7 +118,7 @@ export const VoiceConsoleHUD: React.FC<VoiceConsoleHUDProps> = ({
           <span className="text-[9px] font-mono text-cyan-400/60 block mb-1">
             QUICK VOICE PROTOCOLS:
           </span>
-          <div className="flex flex-wrap gap-1">
+          <div className="flex flex-wrap gap-1 max-h-16 overflow-y-auto pr-1">
             {quickPrompts.map((prompt) => (
               <button
                 key={prompt}

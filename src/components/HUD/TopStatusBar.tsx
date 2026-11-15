@@ -6,10 +6,16 @@ import { Volume2, VolumeX, Maximize2, ShieldCheck, Activity, Cpu } from 'lucide-
 interface TopStatusBarProps {
   mode: InteractionMode;
   fps: number;
+  coreState?: string;
   onModeChange: (m: InteractionMode) => void;
 }
 
-export const TopStatusBar: React.FC<TopStatusBarProps> = ({ mode, fps, onModeChange }) => {
+export const TopStatusBar: React.FC<TopStatusBarProps> = ({
+  mode,
+  fps,
+  coreState = 'IDLE',
+  onModeChange
+}) => {
   const [time, setTime] = useState<string>('');
   const [date, setDate] = useState<string>('');
   const [isMuted, setIsMuted] = useState<boolean>(false);
@@ -73,12 +79,22 @@ export const TopStatusBar: React.FC<TopStatusBarProps> = ({ mode, fps, onModeCha
         </div>
       </div>
 
-      {/* Center: Interaction Mode Selector Pill & Diagnostics Telemetry */}
+      {/* Center: Interaction Mode & Core Activity Telemetry */}
       <div className="hidden md:flex items-center space-x-4 bg-cyan-950/40 border border-cyan-500/30 px-3 py-1 rounded-full">
         <div className="flex items-center space-x-1.5 text-xs font-mono">
-          <Activity className="w-3.5 h-3.5 text-cyan-400 animate-pulse" />
-          <span className="text-cyan-400/80">SYS:</span>
-          <span className="text-emerald-400 font-bold">ONLINE</span>
+          <Activity className="w-3.5 h-3.5 text-cyan-400" />
+          <span className="text-cyan-400/80">CORE:</span>
+          <span
+            className={`font-bold ${
+              coreState === 'DISINTEGRATED' || coreState === 'OBJECT FROZEN'
+                ? 'text-amber-300'
+                : coreState === 'LISTENING' || coreState === 'SPEAKING' || coreState === 'RECONSTRUCTING'
+                ? 'text-emerald-400'
+                : 'text-cyan-200'
+            }`}
+          >
+            {coreState}
+          </span>
         </div>
         <div className="h-3 w-[1px] bg-cyan-500/30" />
         <div className="flex items-center space-x-1.5 text-xs font-mono">
@@ -90,13 +106,17 @@ export const TopStatusBar: React.FC<TopStatusBarProps> = ({ mode, fps, onModeCha
         <div className="flex items-center space-x-1.5 text-xs font-mono">
           <Cpu className="w-3.5 h-3.5 text-cyan-400" />
           <span className="text-cyan-400/80">FPS:</span>
-          <span className="text-cyan-200 font-bold">{fps || 60}</span>
+          <span className="text-cyan-200 font-bold tabular-nums">{fps || 60}</span>
         </div>
         <div className="h-3 w-[1px] bg-cyan-500/30" />
-        <div className="flex items-center space-x-1 font-orbitron text-xs">
+        <button
+          onClick={() => onModeChange(mode === 'WORKSPACE' ? 'CINEMATIC' : 'WORKSPACE')}
+          title="Cycle Workspace / Cinematic Focus"
+          className="flex items-center space-x-1 font-orbitron text-xs hover:opacity-80"
+        >
           <span className="text-cyan-400/80">MODE:</span>
           <span className="text-amber-300 font-bold tracking-wider">{mode}</span>
-        </div>
+        </button>
       </div>
 
       {/* Right: Real-time Clock, Uptime & Quick Toggles */}

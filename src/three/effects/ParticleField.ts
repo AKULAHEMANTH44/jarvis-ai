@@ -3,17 +3,18 @@ import * as THREE from 'three';
 export class ParticleFieldEffect {
   public points: THREE.Points;
   private count: number;
+  private maxCount: number = 5000;
   private positions: Float32Array;
   private originalPositions: Float32Array;
   private velocities: Float32Array;
 
   constructor(count = 1500, colorThemeHex = 0x00f0ff) {
-    this.count = count;
-    this.positions = new Float32Array(count * 3);
-    this.originalPositions = new Float32Array(count * 3);
-    this.velocities = new Float32Array(count * 3);
+    this.count = Math.max(200, Math.min(this.maxCount, count));
+    this.positions = new Float32Array(this.maxCount * 3);
+    this.originalPositions = new Float32Array(this.maxCount * 3);
+    this.velocities = new Float32Array(this.maxCount * 3);
 
-    for (let i = 0; i < count; i++) {
+    for (let i = 0; i < this.maxCount; i++) {
       const x = (Math.random() - 0.5) * 20;
       const y = (Math.random() - 0.5) * 14;
       const z = (Math.random() - 0.5) * 16;
@@ -33,6 +34,7 @@ export class ParticleFieldEffect {
 
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(this.positions, 3));
+    geo.setDrawRange(0, this.count);
 
     const mat = new THREE.PointsMaterial({
       color: colorThemeHex,
@@ -43,6 +45,17 @@ export class ParticleFieldEffect {
     });
 
     this.points = new THREE.Points(geo, mat);
+  }
+
+  public setParticleCount(newCount: number) {
+    this.count = Math.max(200, Math.min(this.maxCount, Math.round(newCount)));
+    this.points.geometry.setDrawRange(0, this.count);
+  }
+
+  public setGlowIntensity(intensity: number) {
+    const mat = this.points.material as THREE.PointsMaterial;
+    mat.opacity = Math.min(1.0, 0.45 * intensity);
+    mat.size = 0.05 + intensity * 0.015;
   }
 
   public setColorTheme(hex: number) {
@@ -62,7 +75,6 @@ export class ParticleFieldEffect {
 
       // Real-time hand proximity displacement (parting effect)
       if (handCentroid) {
-        // Map normalized hand coords [0..1] to Three.js world space
         const hx = (handCentroid.x - 0.5) * 12;
         const hy = -(handCentroid.y - 0.5) * 9;
         const hz = (handCentroid.z || 0) * 8;

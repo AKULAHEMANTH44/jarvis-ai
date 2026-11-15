@@ -11,14 +11,15 @@ import {
   Layers,
   Sparkles,
   Power,
-  Tv,
-  Monitor
+  Monitor,
+  Boxes
 } from 'lucide-react';
 
 interface BottomControlHUDProps {
   currentMode: InteractionMode;
   onSelectMode: (mode: InteractionMode) => void;
   isVoiceActive: boolean;
+  voiceError?: string | null;
   onToggleVoice: () => void;
   onTriggerShockwave: () => void;
   onResetTransform: () => void;
@@ -30,11 +31,10 @@ export const BottomControlHUD: React.FC<BottomControlHUDProps> = ({
   currentMode,
   onSelectMode,
   isVoiceActive,
+  voiceError,
   onToggleVoice,
   onTriggerShockwave,
-  onResetTransform,
-  isCameraActive,
-  onToggleCamera
+  onResetTransform
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
@@ -44,7 +44,6 @@ export const BottomControlHUD: React.FC<BottomControlHUDProps> = ({
     if (a) setAnalyser(a);
   }, []);
 
-  // Animate dynamic waveform bars when audio or voice is speaking
   useEffect(() => {
     let animId: number;
     const canvas = canvasRef.current;
@@ -65,7 +64,7 @@ export const BottomControlHUD: React.FC<BottomControlHUDProps> = ({
       for (let i = 0; i < dataArray.length && x < canvas.width; i += 2) {
         let barHeight = (dataArray[i] / 255) * canvas.height;
         if (!isVoiceActive && !speechService.isCurrentlySpeaking() && barHeight < 2) {
-          barHeight = 2; // Idle resting line
+          barHeight = 2;
         }
 
         ctx.fillStyle = isVoiceActive ? '#00f0ff' : 'rgba(0, 240, 255, 0.3)';
@@ -86,6 +85,7 @@ export const BottomControlHUD: React.FC<BottomControlHUDProps> = ({
   };
 
   const modes: { id: InteractionMode; label: string; icon: React.ReactNode }[] = [
+    { id: 'WORKSPACE', label: 'LAB SPACE', icon: <Boxes className="w-3.5 h-3.5" /> },
     { id: 'GESTURE', label: 'GESTURE', icon: <Hand className="w-3.5 h-3.5" /> },
     { id: 'VOICE', label: 'VOICE', icon: <Mic className="w-3.5 h-3.5" /> },
     { id: 'COMBINED', label: 'COMBINED', icon: <Zap className="w-3.5 h-3.5" /> },
@@ -103,7 +103,7 @@ export const BottomControlHUD: React.FC<BottomControlHUDProps> = ({
           <button
             key={m.id}
             onClick={() => handleModeClick(m.id)}
-            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded border text-[11px] font-orbitron tracking-wider transition-all whitespace-nowrap ${
+            className={`flex items-center space-x-1.5 px-2.5 py-1.5 rounded border text-[11px] font-orbitron tracking-wider transition-all whitespace-nowrap ${
               currentMode === m.id
                 ? 'border-cyan-400 bg-cyan-500/25 text-white font-bold shadow-[0_0_15px_rgba(0,240,255,0.4)]'
                 : 'border-cyan-500/20 bg-cyan-950/20 text-cyan-400/80 hover:bg-cyan-950/50 hover:text-cyan-300'
@@ -128,20 +128,22 @@ export const BottomControlHUD: React.FC<BottomControlHUDProps> = ({
             audioService.playChirp(isVoiceActive ? 800 : 1800);
             onToggleVoice();
           }}
+          title={voiceError || (isVoiceActive ? 'Stop Voice Sensor' : 'Enable Microphone & Voice Sensor')}
           className={`flex items-center space-x-1.5 px-3 py-1 rounded-full text-xs font-orbitron font-bold transition-all ${
             isVoiceActive
               ? 'bg-red-500 text-white shadow-[0_0_15px_#ff3344] animate-pulse'
+              : voiceError
+              ? 'bg-amber-950/60 hover:bg-amber-900/60 text-amber-300 border border-amber-400'
               : 'bg-cyan-500/20 hover:bg-cyan-500/40 text-cyan-300 border border-cyan-400'
           }`}
         >
           {isVoiceActive ? <Mic className="w-3.5 h-3.5" /> : <MicOff className="w-3.5 h-3.5" />}
-          <span>{isVoiceActive ? 'LISTENING' : 'VOICE OFF'}</span>
+          <span>{isVoiceActive ? 'LISTENING' : voiceError ? 'MIC RETRY' : 'VOICE OFF'}</span>
         </button>
       </div>
 
       {/* Right: Quick Action Triggers */}
       <div className="flex items-center space-x-2">
-        {/* Reset 3D Object Anchor */}
         <button
           onClick={() => {
             audioService.playChirp(1000);
@@ -154,7 +156,6 @@ export const BottomControlHUD: React.FC<BottomControlHUDProps> = ({
           <span className="hidden sm:inline">RESET</span>
         </button>
 
-        {/* Trigger Cinematic Shockwave */}
         <button
           onClick={() => {
             audioService.playShockwave();

@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { KeyRound, ShieldCheck, Cpu, X, Save } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { KeyRound, ShieldCheck, Cpu, X, Save, Trash2 } from 'lucide-react';
 import { HolographicPanel } from '../Common/HolographicPanel';
 import { AIProviderConfig } from '../../types/assistant';
 import { contextualAI } from '../../services/contextualAI';
@@ -14,6 +14,13 @@ export const AIConfigModal: React.FC<AIConfigModalProps> = ({ isOpen, onClose })
   const [config, setConfig] = useState<AIProviderConfig>(contextualAI.getConfig());
   const [savedSuccess, setSavedSuccess] = useState<boolean>(false);
 
+  useEffect(() => {
+    if (isOpen) {
+      setConfig(contextualAI.getConfig());
+      setSavedSuccess(false);
+    }
+  }, [isOpen]);
+
   if (!isOpen) return null;
 
   const handleSave = () => {
@@ -23,7 +30,13 @@ export const AIConfigModal: React.FC<AIConfigModalProps> = ({ isOpen, onClose })
     setTimeout(() => {
       setSavedSuccess(false);
       onClose();
-    }, 1200);
+    }, 1000);
+  };
+
+  const handlePurgeKey = () => {
+    audioService.playChirp(800);
+    contextualAI.clearApiKey();
+    setConfig((c) => ({ ...c, apiKey: '' }));
   };
 
   return (
@@ -72,7 +85,7 @@ export const AIConfigModal: React.FC<AIConfigModalProps> = ({ isOpen, onClose })
                   }`}
                 >
                   <span className="font-orbitron text-[11px]">OPENAI / CUSTOM API</span>
-                  <span className="text-[9px] text-cyan-400/70 font-normal">Bring Your Own Key • Cloud LLM</span>
+                  <span className="text-[9px] text-cyan-400/70 font-normal">Volatile RAM Key • HTTPS Only</span>
                 </button>
               </div>
             </div>
@@ -81,11 +94,24 @@ export const AIConfigModal: React.FC<AIConfigModalProps> = ({ isOpen, onClose })
             {config.provider !== 'LOCAL' && (
               <div className="space-y-3 p-3 bg-black/60 rounded border border-cyan-500/30">
                 <div>
-                  <label className="block text-[10px] text-cyan-400/80 mb-1">
-                    API KEY (STORED LOCALLY IN BROWSER ONLY):
-                  </label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-[10px] text-cyan-400/80">
+                      API KEY (VOLATILE SESSION MEMORY ONLY):
+                    </label>
+                    {config.apiKey && (
+                      <button
+                        type="button"
+                        onClick={handlePurgeKey}
+                        className="flex items-center space-x-1 text-[9px] text-red-400 hover:text-red-300"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                        <span>PURGE KEY</span>
+                      </button>
+                    )}
+                  </div>
                   <input
                     type="password"
+                    autoComplete="off"
                     value={config.apiKey || ''}
                     onChange={(e) => setConfig({ ...config, apiKey: e.target.value })}
                     placeholder="sk-..."
@@ -108,7 +134,7 @@ export const AIConfigModal: React.FC<AIConfigModalProps> = ({ isOpen, onClose })
 
                 <div>
                   <label className="block text-[10px] text-cyan-400/80 mb-1">
-                    CUSTOM ENDPOINT (OPTIONAL):
+                    CUSTOM ENDPOINT (HTTPS OR LOCALHOST ONLY):
                   </label>
                   <input
                     type="text"
@@ -125,7 +151,7 @@ export const AIConfigModal: React.FC<AIConfigModalProps> = ({ isOpen, onClose })
             <div className="p-2.5 bg-cyan-950/30 border border-cyan-500/20 rounded flex items-start space-x-2 text-[10px]">
               <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
               <p className="text-cyan-300/80 leading-relaxed">
-                <strong className="text-white">Security Shield:</strong> API keys are never bundled into client source files or sent to unauthorized endpoints. In Local mode, JARVIS uses a contextual state machine with zero external network requests.
+                <strong className="text-white">Security Shield:</strong> API keys are held exclusively in volatile RAM for the active session and are never persisted to disk, localStorage, or bundled into source files. In Local mode, JARVIS operates offline with zero external requests.
               </p>
             </div>
 
@@ -144,7 +170,7 @@ export const AIConfigModal: React.FC<AIConfigModalProps> = ({ isOpen, onClose })
                 className="px-4 py-1.5 rounded border border-cyan-400 bg-cyan-500/30 hover:bg-cyan-500/50 text-white font-orbitron font-bold flex items-center space-x-1.5 shadow-[0_0_15px_rgba(0,240,255,0.4)]"
               >
                 <Save className="w-3.5 h-3.5" />
-                <span>{savedSuccess ? 'CONFIG PERSISTED!' : 'APPLY CONFIGURATION'}</span>
+                <span>{savedSuccess ? 'CONFIG APPLIED!' : 'APPLY CONFIGURATION'}</span>
               </button>
             </div>
           </div>

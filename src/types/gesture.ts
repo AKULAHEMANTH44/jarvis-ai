@@ -13,7 +13,8 @@ export type GestureType =
   | 'PINCH'               // Gesture C: Grab holographic object / select element
   | 'MOVE_PINCHED'        // Gesture D: Move selected object in 3D space
   | 'ROTATE_WRIST'        // Gesture E: Rotate selected holographic object
-  | 'TWO_HAND_ZOOM'       // Gesture F: Expand or shrink holographic object / scale
+  | 'SPHERE_ROTATE'       // Gesture E2: Continuous hand-driven 3D spherical rotation
+  | 'TWO_HAND_ZOOM'       // Gesture F: Expand or shrink holographic object & dispersion
   | 'TWO_OPEN_PALMS'      // Gesture G: Activate large wide holographic interface
   | 'SWIPE_LEFT'          // Gesture H: Switch panels / model prev
   | 'SWIPE_RIGHT'         // Gesture H: Switch panels / model next
@@ -36,24 +37,42 @@ export interface DetectedHand {
   velocity: Landmark3D;
 }
 
+export interface DispersionControlTelemetry {
+  rawDistance: number;
+  smoothedDistance: number;
+  normalizedDistance: number;
+  dispersion: number; // 0..1 continuous hysteresis-filtered dispersion
+  phase: 'COMPLETE' | 'EXPANDING' | 'DISPERSED' | 'RECONSTRUCTING';
+}
+
 export interface GestureDetectionResult {
   activeGesture: GestureType;
   confidence: number;
   description: string;
   hands: DetectedHand[];
+  trackingLost?: boolean;
   twoHandDistance?: number;
   deltaScale?: number;
   deltaRotation?: { x: number; y: number; z: number };
+  sphericalRotationDelta?: { x: number; y: number; z: number };
   deltaTranslation?: { x: number; y: number; z: number };
+  dispersionControl?: DispersionControlTelemetry;
   timestamp: number;
 }
 
 export interface GestureCalibrationSettings {
-  pinchThreshold: number;      // Distance below which thumb+index is considered a pinch (default: 0.05)
-  openPalmThreshold: number;   // Distance average for all fingertips extended (default: 0.18)
-  fistThreshold: number;       // Distance average for all fingertips curled (default: 0.12)
-  smoothingFactor: number;     // Exponential smoothing alpha (0.1 - 0.9, default: 0.5)
-  pushSensitivity: number;     // Z-velocity threshold for push forward (default: -0.04)
-  pullSensitivity: number;     // Z-velocity threshold for pull back (default: 0.04)
-  swipeSensitivity: number;    // X-velocity threshold for quick swipe (default: 0.05)
+  pinchThreshold: number;      // Distance below which thumb+index is considered a pinch
+  openPalmThreshold: number;   // Distance average for all fingertips extended
+  fistThreshold: number;       // Distance average for all fingertips curled
+  smoothingFactor: number;     // Exponential smoothing alpha (0.1 - 0.9)
+  pushSensitivity: number;     // Z-velocity threshold for push forward
+  pullSensitivity: number;     // Z-velocity threshold for pull back
+  swipeSensitivity: number;    // X-velocity threshold for quick swipe
+  rotationSensitivity: number; // Spatial hand-movement to sphere rotation gain
+  rotationDeadZone: number;    // Normalized movement dead zone to prevent drift
+  maxRotationSpeed: number;    // Max angular step (rad/frame) clamp
+  mirrorX: boolean;            // Mirror X for selfie front-facing webcams
+  twoHandMinDist: number;      // Hand separation mapped to dispersion 0.0
+  twoHandMaxDist: number;      // Hand separation mapped to dispersion 1.0
+  dispersionSmoothing: number; // EMA factor for two-hand distance smoothing
 }

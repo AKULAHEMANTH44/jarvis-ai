@@ -1,4 +1,5 @@
 import { AssistantMessage, VoiceCommand } from '../types/assistant';
+import { audioService } from './soundFx';
 
 interface SpeechRecognitionEvent {
   resultIndex: number;
@@ -39,14 +40,23 @@ interface ISpeechRecognition extends EventTarget {
   onend: (() => void) | null;
 }
 
+export interface VoiceStartResult {
+  started: boolean;
+  micGranted: boolean;
+  recognitionSupported: boolean;
+  error?: string;
+}
+
 class SpeechService {
   private recognition: ISpeechRecognition | null = null;
   private isListening: boolean = false;
   private commands: VoiceCommand[] = [];
   private onMessageCallback: ((msg: AssistantMessage) => void) | null = null;
+  private onStatusChangeCallback: ((active: boolean, error?: string) => void) | null = null;
   private selectedVoice: SpeechSynthesisVoice | null = null;
   private isSpeaking: boolean = false;
   private restartTimeout: number | null = null;
+  private lastError: string | null = null;
 
   constructor() {
     this.initSpeechSynthesis();
@@ -56,7 +66,6 @@ class SpeechService {
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       const updateVoices = () => {
         const voices = window.speechSynthesis.getVoices();
-        // Look for British male / English voice (JARVIS style)
         this.selectedVoice =
           voices.find(v => v.lang.includes('en-GB') && (v.name.includes('Male') || v.name.includes('George') || v.name.includes('Oliver') || v.name.includes('Daniel'))) ||
           voices.find(v => v.lang.includes('en-GB')) ||
@@ -77,6 +86,20 @@ class SpeechService {
     this.onMessageCallback = cb;
   }
 
+  public setStatusChangeCallback(cb: (active: boolean, error?: string) => void) {
+    this.onStatusChangeCallback = cb;
+  }
+
+  public getLastError(): string | null {
+    return this.lastError;
+  }
+
+  public isSpeechRecognitionSupported(): boolean {
+    if (typeof window === 'undefined') return false;
+    const customWindow = window as unknown as IWindowWithSpeech;
+    return Boolean(customWindow.SpeechRecognition || customWindow.webkitSpeechRecognition);
+  }
+
   public speak(text: string, onEnd?: () => void) {
     if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
       if (onEnd) onEnd();
@@ -90,7 +113,7 @@ class SpeechService {
         utterance.voice = this.selectedVoice;
       }
       utterance.rate = 1.02;
-      utterance.pitch = 0.95; // Calm British AI timbre
+      utterance.pitch = 0.95;
       utterance.volume = 1.0;
 
       utterance.onstart = () => {
@@ -124,12 +147,111 @@ class SpeechService {
     return this.isSpeaking;
   }
 
+  private formatMicError(err: unknown): string {
+    if (err instanceof DOMException) {
+      switch (err.name) {
+        case 'NotAllowedError':
+        case 'PermissionDeniedError':
+          return 'Microphone permission denied. Allow microphone access in browser site settings.';
+        case 'NotFoundError':
+        case 'DevicesNotFoundError':
+          return 'No microphone hardware found. You can still type commands in the Vocal Console.';
+        case 'NotReadableError':
+        case 'TrackStartError':
+          return 'Microphone is busy in another application.';
+        case 'SecurityError':
+          return 'Microphone access requires HTTPS or localhost.';
+        default:
+          return `Microphone error (${err.name}): ${err.message}`;
+      }
+    }
+    return 'Unable to access microphone.';
+  }
+
+  // Requests real microphone permission via getUserMedia, connects live waveform analyser, and starts SpeechRecognition
+  public async startListeningWithPermission(): Promise<VoiceStartResult> {
+    this.lastError = null;
+
+    if (typeof window === 'undefined') {
+      return { started: false, micGranted: false, recognitionSupported: false, error: 'Browser window unavailable.' };
+    }
+
+    let micStream: MediaStream | null = null;
+    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+      try {
+        micStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          }
+        });
+        audioService.connectMicrophoneStream(micStream);
+      } catch (err) {
+        const msg = this.formatMicError(err);
+        this.lastError = msg;
+        this.isListening = false;
+        this.onStatusChangeCallback?.(false, msg);
+        return {
+          started: false,
+          micGranted: false,
+          recognitionSupported: this.isSpeechRecognitionSupported(),
+          error: msg
+        };
+      }
+    } else {
+      const msg = 'MediaDevices audio API unavailable. Ensure HTTPS or localhost.';
+      this.lastError = msg;
+      this.onStatusChangeCallback?.(false, msg);
+      return {
+        started: false,
+        micGranted: false,
+        recognitionSupported: this.isSpeechRecognitionSupported(),
+        error: msg
+      };
+    }
+
+    const recognitionSupported = this.isSpeechRecognitionSupported();
+    if (!recognitionSupported) {
+      // Keep mic stream disconnected if speech recognition isn't supported, or allow waveform + console
+      audioService.disconnectMicrophoneStream();
+      const msg = 'Browser Web Speech Recognition API not supported here (try Chrome/Edge). Use the Vocal Console text input below.';
+      this.lastError = msg;
+      this.isListening = false;
+      this.onStatusChangeCallback?.(false, msg);
+      return {
+        started: false,
+        micGranted: true,
+        recognitionSupported: false,
+        error: msg
+      };
+    }
+
+    const started = this.startListening();
+    if (!started) {
+      audioService.disconnectMicrophoneStream();
+      return {
+        started: false,
+        micGranted: true,
+        recognitionSupported: true,
+        error: this.lastError || 'Failed to initialize Speech Recognition.'
+      };
+    }
+
+    return {
+      started: true,
+      micGranted: true,
+      recognitionSupported: true
+    };
+  }
+
   public startListening(): boolean {
     const customWindow = window as unknown as IWindowWithSpeech;
     const SpeechRecognitionClass = customWindow.SpeechRecognition || customWindow.webkitSpeechRecognition;
 
     if (!SpeechRecognitionClass) {
-      console.warn('Speech Recognition API not supported in this browser environment.');
+      this.lastError = 'Speech Recognition API not supported in this browser environment.';
+      console.warn(this.lastError);
       return false;
     }
 
@@ -142,7 +264,6 @@ class SpeechService {
       this.recognition.lang = 'en-US';
 
       this.recognition.onresult = (event: SpeechRecognitionEvent) => {
-        // Prevent feedback loop while JARVIS is speaking
         if (this.isSpeaking) return;
 
         const lastResult = event.results[event.results.length - 1];
@@ -154,8 +275,14 @@ class SpeechService {
 
       this.recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
         console.warn('Speech recognition status/event:', event.error);
-        if (event.error === 'not-allowed') {
-          this.isListening = false;
+        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+          this.lastError = 'Microphone / speech recognition permission denied by browser.';
+          this.stopListening();
+          this.onStatusChangeCallback?.(false, this.lastError);
+        } else if (event.error === 'audio-capture') {
+          this.lastError = 'No audio capture device detected.';
+          this.stopListening();
+          this.onStatusChangeCallback?.(false, this.lastError);
         }
       };
 
@@ -176,10 +303,14 @@ class SpeechService {
 
       this.recognition.start();
       this.isListening = true;
+      this.lastError = null;
+      this.onStatusChangeCallback?.(true);
       return true;
     } catch (err) {
-      console.error('Failed to start speech recognition:', err);
+      console.warn('Speech recognition unavailable:', err);
+      this.lastError = 'Failed to start speech recognition engine.';
       this.isListening = false;
+      this.onStatusChangeCallback?.(false, this.lastError);
       return false;
     }
   }
@@ -198,6 +329,8 @@ class SpeechService {
       }
       this.recognition = null;
     }
+    audioService.disconnectMicrophoneStream();
+    this.onStatusChangeCallback?.(false);
   }
 
   public isListeningActive(): boolean {
@@ -208,7 +341,6 @@ class SpeechService {
     if (!rawTranscript) return;
     const clean = rawTranscript.toLowerCase().replace(/[.,!?;:]/g, '');
 
-    // Post user utterance to message stream
     if (this.onMessageCallback) {
       this.onMessageCallback({
         id: Math.random().toString(36).substring(7),
@@ -219,32 +351,37 @@ class SpeechService {
       });
     }
 
-    // Match against registered commands
-    let matched = false;
+    let bestCmd: VoiceCommand | null = null;
+    let bestPatternLen = 0;
+
     for (const cmd of this.commands) {
       for (const pattern of cmd.patterns) {
-        if (clean.includes(pattern.toLowerCase())) {
-          matched = true;
-          cmd.action(clean);
-          
-          const responseText = cmd.feedbackText;
-          if (this.onMessageCallback) {
-            this.onMessageCallback({
-              id: Math.random().toString(36).substring(7),
-              sender: 'JARVIS',
-              text: responseText,
-              timestamp: new Date().toLocaleTimeString(),
-              type: 'RESPONSE'
-            });
-          }
-          this.speak(responseText);
-          return;
+        const lowerPat = pattern.toLowerCase();
+        if (clean.includes(lowerPat) && lowerPat.length > bestPatternLen) {
+          bestCmd = cmd;
+          bestPatternLen = lowerPat.length;
         }
       }
     }
 
-    // Default conversational fallback
-    if (!matched) {
+    if (bestCmd) {
+      bestCmd.action(clean);
+
+      const responseText = bestCmd.feedbackText;
+      if (this.onMessageCallback) {
+        this.onMessageCallback({
+          id: Math.random().toString(36).substring(7),
+          sender: 'JARVIS',
+          text: responseText,
+          timestamp: new Date().toLocaleTimeString(),
+          type: 'RESPONSE'
+        });
+      }
+      this.speak(responseText);
+      return;
+    }
+
+    {
       let fallback = "I heard you, sir, but that command is not recognized in current security protocols.";
       if (clean.includes('hello') || clean.includes('hey jarvis') || clean.includes('jarvis')) {
         fallback = "Good day, sir. Systems are at your disposal.";

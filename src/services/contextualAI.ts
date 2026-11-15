@@ -1,4 +1,4 @@
-import { AIProviderConfig, AssistantMessage } from '../types/assistant';
+import { AIProviderConfig } from '../types/assistant';
 
 const AI_CONFIG_KEY = 'jarvis_ai_provider_config';
 
@@ -8,8 +8,27 @@ export const DEFAULT_AI_CONFIG: AIProviderConfig = {
   temperature: 0.7
 };
 
+function isValidExternalEndpoint(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === 'https:') return true;
+    // Allow loopback HTTP only for local inference engines (e.g. Ollama / LM Studio)
+    if (
+      parsed.protocol === 'http:' &&
+      (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1')
+    ) {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 export class ContextualAIService {
   private config: AIProviderConfig;
+  // Volatile in-memory API key only — never persisted to localStorage or disk
+  private volatileApiKey: string = '';
   private conversationHistory: { role: 'user' | 'assistant' | 'system'; content: string }[] = [];
 
   constructor() {
@@ -21,7 +40,7 @@ export class ContextualAIService {
     this.conversationHistory = [
       {
         role: 'system',
-        content: `You are J.A.R.V.I.S. (Just A Rather Very Intelligent System), the high-tech AI assistant to Tony Stark. You speak with a refined, concise British cadence. You assist with 3D holographic manipulation, workspace automation, system diagnostics, and scientific visualization.`
+        content: `You are J.A.R.V.I.S. (Just A Rather Very Intelligent System), the high-tech AI assistant to Tony Stark. You speak with a refined, concise British cadence. You assist with 3D holographic reconstruction, manipulation, workspace automation, system diagnostics, and scientific visualization.`
       }
     ];
   }
@@ -31,33 +50,77 @@ export class ContextualAIService {
       try {
         const saved = window.localStorage.getItem(AI_CONFIG_KEY);
         if (saved) {
-          return { ...DEFAULT_AI_CONFIG, ...JSON.parse(saved) };
+          const parsed = JSON.parse(saved) as Partial<AIProviderConfig>;
+          // Scrub any legacy persisted key from localStorage immediately
+          if ('apiKey' in parsed && parsed.apiKey) {
+            delete parsed.apiKey;
+            window.localStorage.setItem(AI_CONFIG_KEY, JSON.stringify(parsed));
+          }
+          return {
+            ...DEFAULT_AI_CONFIG,
+            provider: parsed.provider || DEFAULT_AI_CONFIG.provider,
+            modelName: parsed.modelName || DEFAULT_AI_CONFIG.modelName,
+            customEndpoint: parsed.customEndpoint,
+            temperature: typeof parsed.temperature === 'number' ? parsed.temperature : DEFAULT_AI_CONFIG.temperature
+          };
         }
-      } catch (e) {
-        console.warn('Failed to load AI provider config:', e);
+      } catch {
+        console.warn('Failed to load AI provider config from local storage.');
       }
     }
     return { ...DEFAULT_AI_CONFIG };
   }
 
   public saveConfig(newConfig: Partial<AIProviderConfig>) {
-    this.config = { ...this.config, ...newConfig };
+    if (newConfig.apiKey !== undefined) {
+      this.volatileApiKey = newConfig.apiKey.trim();
+    }
+
+    const sanitizedEndpoint = newConfig.customEndpoint !== undefined
+      ? newConfig.customEndpoint.trim()
+      : this.config.customEndpoint;
+
+    this.config = {
+      ...this.config,
+      provider: newConfig.provider ?? this.config.provider,
+      modelName: newConfig.modelName ?? this.config.modelName,
+      customEndpoint: sanitizedEndpoint || undefined,
+      temperature: newConfig.temperature ?? this.config.temperature
+    };
+
     if (typeof window !== 'undefined' && window.localStorage) {
       try {
-        window.localStorage.setItem(AI_CONFIG_KEY, JSON.stringify(this.config));
-      } catch (e) {
-        console.warn('Failed to save AI config:', e);
+        // Persist only non-secret configuration fields
+        const safePersist = {
+          provider: this.config.provider,
+          modelName: this.config.modelName,
+          customEndpoint: this.config.customEndpoint,
+          temperature: this.config.temperature
+        };
+        window.localStorage.setItem(AI_CONFIG_KEY, JSON.stringify(safePersist));
+      } catch {
+        console.warn('Failed to save non-secret AI config.');
       }
     }
   }
 
+  public clearApiKey() {
+    this.volatileApiKey = '';
+  }
+
+  public hasApiKey(): boolean {
+    return this.volatileApiKey.length > 0;
+  }
+
   public getConfig(): AIProviderConfig {
-    return { ...this.config };
+    return {
+      ...this.config,
+      apiKey: this.volatileApiKey ? this.volatileApiKey : undefined
+    };
   }
 
   public addHistory(role: 'user' | 'assistant', content: string) {
     this.conversationHistory.push({ role, content });
-    // Keep last 15 interactions
     if (this.conversationHistory.length > 20) {
       this.conversationHistory = [
         this.conversationHistory[0],
@@ -89,7 +152,16 @@ export class ContextualAIService {
       };
     }
 
-    // 2. Spatial Duplication
+    // 2. Reconstruction & Scan Intents
+    if (text.includes('reconstruct') || text.includes('laser scan') || text.includes('rescan')) {
+      return {
+        intent: 'HOLOGRAM_RECONSTRUCT',
+        action: 'RECONSTRUCT_SCAN',
+        reply: `Running volumetric laser reconstruction pass on ${activeModelName}.`
+      };
+    }
+
+    // 3. Spatial Duplication
     if (text.includes('duplicate') || text.includes('clone') || text.includes('make a copy')) {
       return {
         intent: 'OBJECT_DUPLICATION',
@@ -98,7 +170,7 @@ export class ContextualAIService {
       };
     }
 
-    // 3. Spatial Deletion
+    // 4. Spatial Deletion
     if (text.includes('delete') || text.includes('remove') || text.includes('destroy') || text.includes('dismiss')) {
       return {
         intent: 'OBJECT_DELETION',
@@ -108,7 +180,7 @@ export class ContextualAIService {
       };
     }
 
-    // 4. Spatial Formations
+    // 5. Spatial Formations
     if (text.includes('orbit formation') || text.includes('orbit')) {
       return {
         intent: 'LAYOUT_FORMATION',
@@ -131,7 +203,7 @@ export class ContextualAIService {
       };
     }
 
-    // 5. Desktop File / Notes Actions
+    // 6. Desktop File / Notes Actions
     if (text.includes('save note') || text.includes('export note') || text.includes('save file')) {
       return {
         intent: 'DESKTOP_FILE_SAVE',
@@ -147,11 +219,11 @@ export class ContextualAIService {
       };
     }
 
-    // 6. Conversational contextual responses
+    // 7. Conversational contextual responses
     if (text.includes('who are you') || text.includes('what are you')) {
       return {
         intent: 'IDENTITY_QUERY',
-        reply: 'I am JARVIS: Just A Rather Very Intelligent System. Currently operating Stark Industries Mark VII autonomous holographic environment.'
+        reply: 'I am JARVIS: Just A Rather Very Intelligent System. Currently operating Stark Industries Mark VII autonomous holographic laboratory.'
       };
     }
     if (text.includes('how are you') || text.includes('status')) {
@@ -173,20 +245,23 @@ export class ContextualAIService {
     };
   }
 
-  // Connects to external LLM API if key is supplied by user
+  // Connects to external LLM API if key is supplied by user in volatile memory
   public async queryExternalAI(prompt: string): Promise<string> {
-    if (this.config.provider === 'LOCAL' || !this.config.apiKey) {
+    if (this.config.provider === 'LOCAL' || !this.volatileApiKey) {
       return '';
     }
 
     try {
       if (this.config.provider === 'OPENAI') {
         const endpoint = this.config.customEndpoint || 'https://api.openai.com/v1/chat/completions';
+        if (!isValidExternalEndpoint(endpoint)) {
+          return 'Blocked external request: endpoint must use HTTPS (or localhost for local inference).';
+        }
         const res = await fetch(endpoint, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${this.config.apiKey}`
+            'Authorization': `Bearer ${this.volatileApiKey}`
           },
           body: JSON.stringify({
             model: this.config.modelName || 'gpt-4o-mini',
@@ -197,12 +272,14 @@ export class ContextualAIService {
             temperature: this.config.temperature
           })
         });
+        if (!res.ok) {
+          return `External provider returned HTTP ${res.status}. Verify key and model configuration.`;
+        }
         const data = await res.json();
-        return data.choices[0]?.message?.content || 'No response received from external provider.';
+        return data.choices?.[0]?.message?.content || 'No response received from external provider.';
       }
       return '';
-    } catch (e: unknown) {
-      console.warn('External AI query failed:', e);
+    } catch {
       return 'External provider communication encountered a network or authentication error. Reverting to local protocol.';
     }
   }

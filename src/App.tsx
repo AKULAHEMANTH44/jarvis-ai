@@ -6,15 +6,19 @@ import { RightDiagnosticsHUD } from './components/HUD/RightDiagnosticsHUD';
 import { BottomControlHUD } from './components/HUD/BottomControlHUD';
 import { VoiceConsoleHUD } from './components/HUD/VoiceConsoleHUD';
 import { StandbyHUD } from './components/HUD/StandbyHUD';
+import { BootSequenceOverlay } from './components/HUD/BootSequenceOverlay';
 import { FloatingSpatialPanels } from './components/Workspace/FloatingSpatialPanels';
 import { PermissionConfirmationModal } from './components/Workspace/PermissionConfirmationModal';
 import { AIConfigModal } from './components/HUD/AIConfigModal';
 import { HologramSceneManager } from './three/HologramScene';
 import {
+  ComponentLabel2D,
   HologramModelId,
   HologramVisualSettings,
   InteractionMode,
+  LaserTargetInfo,
   LayoutFormation,
+  ReconstructionPresetId,
   SpatialObjectState
 } from './types/hologram';
 import {
@@ -33,50 +37,85 @@ import { contextualAI } from './services/contextualAI';
 
 export const App: React.FC = () => {
   // Modes & Models State
+  const [showBootOverlay, setShowBootOverlay] = useState<boolean>(true);
   const [mode, setMode] = useState<InteractionMode>('WORKSPACE');
-  const [currentModelId, setCurrentModelId] = useState<HologramModelId>('arc_reactor');
+  const [currentModelId, setCurrentModelId] = useState<HologramModelId>('vision_sphere');
   const [spatialObjects, setSpatialObjects] = useState<SpatialObjectState[]>([]);
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
+  const [laserTarget, setLaserTarget] = useState<LaserTargetInfo | null>(null);
+  const [componentLabels, setComponentLabels] = useState<ComponentLabel2D[]>([]);
+  const [activeGestureFeedback, setActiveGestureFeedback] = useState<string | null>(null);
+  const [isProcessingCommand, setIsProcessingCommand] = useState<boolean>(false);
+  const [requestedWorkspaceTab, setRequestedWorkspaceTab] = useState<{
+    tab: 'OBJECTS' | 'LAB' | 'AUTOMATION' | 'NOTES' | 'TIMER';
+    nonce: number;
+  } | null>(null);
+  const [requestedDiagnosticsTab, setRequestedDiagnosticsTab] = useState<{
+    tab: 'MODELS' | 'DIAGNOSTICS' | 'SETTINGS';
+    nonce: number;
+  } | null>(null);
 
   // Modals & Panels State
   const [permissionRequest, setPermissionRequest] = useState<DesktopPermissionRequest | null>(null);
   const [isAIConfigOpen, setIsAIConfigOpen] = useState<boolean>(false);
   const [notes, setNotes] = useState<string>(
-    'STARK INDUSTRIES // MARK VII MEMORANDUM\n• Fusion harmonic stabilized at 142.8 GHz\n• Multi-object spatial collision matrix active\n• Local-first autonomous intelligence engaged'
+    'STARK INDUSTRIES // MARK VII MEMORANDUM\n• VISION 1.2 spatial sphere core calibrated\n• Fusion harmonic stabilized at 142.8 GHz\n• Multi-object spatial collision matrix active\n• Local-first autonomous intelligence engaged'
   );
 
   // Visual & Calibration Settings
   const [visualSettings, setVisualSettings] = useState<HologramVisualSettings>({
     wireframe: true,
+    renderMode: 'HYBRID',
     glowIntensity: 1.5,
     rotationSpeed: 1.0,
-    particleCount: 1500,
+    particleCount: 2500,
     colorTheme: 'cyan',
     hologramColor: '#00f0ff',
     explodedView: false,
+    explosionAmount: 0,
+    dispersionAmount: 0,
+    particleIntensity: 1.2,
+    orbitalSpeed: 1.0,
+    coreBrightness: 1.3,
+    scanSpeed: 1.0,
+    reducedEffects: false,
+    showComponentLabels: true,
     pulseEnabled: true,
     showBoundingBoxes: true,
-    spatialFormation: 'FREE'
+    spatialFormation: 'FREE',
+    sliceEnabled: false,
+    sliceAxis: 'y',
+    sliceOffset: 0
   });
 
-  const [calibration, setCalibration] = useState<GestureCalibrationSettings>({
-    ...DEFAULT_CALIBRATION
+  const [calibration, setCalibration] = useState<GestureCalibrationSettings>(() => {
+    const hasSaved =
+      typeof window !== 'undefined' &&
+      window.localStorage &&
+      Boolean(window.localStorage.getItem('jarvis_gesture_calibration'));
+    if (!hasSaved) {
+      gestureEngine.updateCalibration({ mirrorX: true });
+      return { ...gestureEngine.getCalibration(), mirrorX: true };
+    }
+    return gestureEngine.getCalibration();
   });
 
   // Camera & Tracking State
   const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
   const [gestureResult, setGestureResult] = useState<GestureDetectionResult | null>(null);
   const [fps, setFps] = useState<number>(60);
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
   // Voice Assistant State
   const [isVoiceActive, setIsVoiceActive] = useState<boolean>(false);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
   const [isSpeaking, setIsSpeaking] = useState<boolean>(false);
   const [messages, setMessages] = useState<AssistantMessage[]>([
     {
       id: 'init-1',
       sender: 'JARVIS',
-      text: 'Good evening, sir. Mark VII spatial workspace online. Multiple holographic entities, desktop bridge, and autonomous task engines are ready.',
+      text: 'Good evening, sir. Mark VII spatial workspace and Reconstruction Lab online. Optical tracking, voice synthesis, and autonomous engines await your command.',
       timestamp: new Date().toLocaleTimeString(),
       type: 'RESPONSE'
     }
@@ -85,6 +124,22 @@ export const App: React.FC = () => {
   // Three.js Scene Reference
   const sceneManagerRef = useRef<HologramSceneManager | null>(null);
   const lastGestureRef = useRef<GestureType>('NONE');
+
+  const appendMessage = useCallback(
+    (sender: AssistantMessage['sender'], text: string, type: AssistantMessage['type'] = 'INFO') => {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: Math.random().toString(36).substring(7),
+          sender,
+          text,
+          timestamp: new Date().toLocaleTimeString(),
+          type
+        }
+      ]);
+    },
+    []
+  );
 
   // Sync spatial objects from Three.js scene
   const syncSpatialStates = useCallback(() => {
@@ -95,11 +150,19 @@ export const App: React.FC = () => {
     }
   }, []);
 
-  // Wire up desktop bridge confirmation modal
+  // Wire up desktop bridge confirmation modal & speech status watcher
   useEffect(() => {
     desktopBridge.setPromptCallback((req) => {
       setPermissionRequest(req);
     });
+    speechService.setStatusChangeCallback((active, err) => {
+      setIsVoiceActive(active);
+      setVoiceError(err || null);
+    });
+    return () => {
+      handTrackingService.stop();
+      speechService.stopListening();
+    };
   }, []);
 
   // Update states initially
@@ -114,35 +177,18 @@ export const App: React.FC = () => {
     if (sceneManagerRef.current) {
       sceneManagerRef.current.triggerShockwave();
     }
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: Math.random().toString(36).substring(7),
-        sender: 'JARVIS',
-        text: 'Radial holographic energy shockwave discharged.',
-        timestamp: new Date().toLocaleTimeString(),
-        type: 'ALERT'
-      }
-    ]);
-  }, []);
+    appendMessage('JARVIS', 'Radial holographic energy shockwave discharged.', 'ALERT');
+  }, [appendMessage]);
 
   // Reset 3D Object Transform
   const handleResetTransform = useCallback(() => {
     audioService.playChirp(1100);
     if (sceneManagerRef.current) {
       sceneManagerRef.current.resetTransform();
+      syncSpatialStates();
     }
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: Math.random().toString(36).substring(7),
-        sender: 'JARVIS',
-        text: 'Holographic anchor position re-centered.',
-        timestamp: new Date().toLocaleTimeString(),
-        type: 'INFO'
-      }
-    ]);
-  }, []);
+    appendMessage('JARVIS', 'Holographic anchor position re-centered.', 'INFO');
+  }, [appendMessage, syncSpatialStates]);
 
   // Multi-Object Operations
   const handleAddSpatialObject = useCallback((modelId: HologramModelId) => {
@@ -151,18 +197,9 @@ export const App: React.FC = () => {
       const inst = sceneManagerRef.current.addSpatialObject(modelId);
       setCurrentModelId(modelId);
       syncSpatialStates();
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Math.random().toString(36).substring(7),
-          sender: 'JARVIS',
-          text: `Spawned new ${inst.name} in spatial workspace.`,
-          timestamp: new Date().toLocaleTimeString(),
-          type: 'INFO'
-        }
-      ]);
+      appendMessage('JARVIS', `Spawned new ${inst.name} in spatial workspace.`, 'INFO');
     }
-  }, [syncSpatialStates]);
+  }, [appendMessage, syncSpatialStates]);
 
   const handleDuplicateObject = useCallback((id: string) => {
     if (sceneManagerRef.current) {
@@ -170,25 +207,15 @@ export const App: React.FC = () => {
       const dup = sceneManagerRef.current.spatialManager.duplicate(id);
       syncSpatialStates();
       if (dup) {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: Math.random().toString(36).substring(7),
-            sender: 'JARVIS',
-            text: `Cloned ${dup.name}. Both instances ready for independent spatial manipulation.`,
-            timestamp: new Date().toLocaleTimeString(),
-            type: 'INFO'
-          }
-        ]);
+        appendMessage('JARVIS', `Cloned ${dup.name}. Both instances ready for independent spatial manipulation.`, 'INFO');
       }
     }
-  }, [syncSpatialStates]);
+  }, [appendMessage, syncSpatialStates]);
 
   const handleDeleteObject = useCallback(async (id: string) => {
     const target = spatialObjects.find(o => o.id === id);
     const targetName = target ? target.name : 'Selected Hologram';
 
-    // Consequential action confirmation gate
     const approved = await desktopBridge.requestAuthorization(
       'DELETE_OBJECT',
       targetName,
@@ -199,22 +226,55 @@ export const App: React.FC = () => {
       audioService.playChirp(800);
       sceneManagerRef.current.spatialManager.delete(id);
       syncSpatialStates();
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Math.random().toString(36).substring(7),
-          sender: 'JARVIS',
-          text: `${targetName} de-materialized from workspace.`,
-          timestamp: new Date().toLocaleTimeString(),
-          type: 'INFO'
-        }
-      ]);
+      appendMessage('JARVIS', `${targetName} de-materialized from workspace.`, 'INFO');
     }
-  }, [spatialObjects, syncSpatialStates]);
+  }, [appendMessage, spatialObjects, syncSpatialStates]);
 
   const handleSelectObject = useCallback((id: string) => {
     if (sceneManagerRef.current) {
       sceneManagerRef.current.selectObject(id);
+      syncSpatialStates();
+    }
+  }, [syncSpatialStates]);
+
+  const handleToggleLockObject = useCallback((id: string) => {
+    if (sceneManagerRef.current) {
+      const locked = sceneManagerRef.current.toggleObjectLock(id);
+      syncSpatialStates();
+      appendMessage('JARVIS', locked ? 'Object spatial transform locked.' : 'Object spatial transform unlocked.', 'INFO');
+    }
+  }, [appendMessage, syncSpatialStates]);
+
+  const handleTransformObject = useCallback(
+    (
+      id: string,
+      transform: {
+        position?: Partial<{ x: number; y: number; z: number }>;
+        scale?: number;
+      }
+    ) => {
+      if (sceneManagerRef.current) {
+        sceneManagerRef.current.setObjectTransform(id, transform);
+        syncSpatialStates();
+      }
+    },
+    [syncSpatialStates]
+  );
+
+  const handleGroupAll = useCallback(() => {
+    if (sceneManagerRef.current) {
+      const ids = sceneManagerRef.current.spatialManager.getAll().map((i) => i.id);
+      if (ids.length > 1) {
+        sceneManagerRef.current.spatialManager.groupObjects(ids);
+        syncSpatialStates();
+        appendMessage('JARVIS', `Linked ${ids.length} spatial entities into a synchronized transform group.`, 'INFO');
+      }
+    }
+  }, [appendMessage, syncSpatialStates]);
+
+  const handleUngroupObject = useCallback((id: string) => {
+    if (sceneManagerRef.current) {
+      sceneManagerRef.current.spatialManager.ungroupObject(id);
       syncSpatialStates();
     }
   }, [syncSpatialStates]);
@@ -224,18 +284,120 @@ export const App: React.FC = () => {
       audioService.playActivationWhoosh();
       sceneManagerRef.current.applyFormation(formation);
       syncSpatialStates();
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Math.random().toString(36).substring(7),
-          sender: 'JARVIS',
-          text: `Applied ${formation} spatial layout formation.`,
-          timestamp: new Date().toLocaleTimeString(),
-          type: 'INFO'
-        }
-      ]);
+      appendMessage('JARVIS', `Applied ${formation} spatial layout formation.`, 'INFO');
     }
-  }, [syncSpatialStates]);
+  }, [appendMessage, syncSpatialStates]);
+
+  // Reconstruction Lab Operations
+  const handleSynthesizePreset = useCallback((presetId: ReconstructionPresetId) => {
+    if (sceneManagerRef.current) {
+      audioService.playActivationWhoosh();
+      const inst = sceneManagerRef.current.synthesizePreset(presetId);
+      setCurrentModelId('reconstructed_object');
+      syncSpatialStates();
+      appendMessage(
+        'JARVIS',
+        `Reconstructed ${inst.name} (${inst.vertexCount} vertices, ${inst.faceCount} faces).`,
+        'RESPONSE'
+      );
+    }
+  }, [appendMessage, syncSpatialStates]);
+
+  const handleImportMeshFile = useCallback(async (file: File) => {
+    if (!sceneManagerRef.current) return;
+    try {
+      const inst = await sceneManagerRef.current.importMeshFromFile(file);
+      audioService.playActivationWhoosh();
+      setCurrentModelId('reconstructed_object');
+      syncSpatialStates();
+      appendMessage(
+        'JARVIS',
+        `Imported and reconstructed ${inst.name} (${inst.vertexCount} vertices, ${inst.faceCount} faces).`,
+        'RESPONSE'
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unable to parse 3D mesh file.';
+      appendMessage('JARVIS', msg, 'ALERT');
+    }
+  }, [appendMessage, syncSpatialStates]);
+
+  const handleCaptureWebcamScan = useCallback(() => {
+    if (!isCameraActive || !videoRef.current || !sceneManagerRef.current) {
+      appendMessage(
+        'JARVIS',
+        'Optical sensor is offline. Enable the camera in the left HUD first to capture a 3D depth-relief scan.',
+        'ALERT'
+      );
+      return;
+    }
+    const inst = sceneManagerRef.current.reconstructFromVideo(videoRef.current);
+    if (inst) {
+      audioService.playActivationWhoosh();
+      setCurrentModelId('reconstructed_object');
+      syncSpatialStates();
+      appendMessage(
+        'JARVIS',
+        `Captured optical frame and reconstructed 3D depth-relief hologram (${inst.vertexCount} vertices).`,
+        'RESPONSE'
+      );
+    } else {
+      appendMessage('JARVIS', 'Camera video stream is still warming up. Retry in a moment.', 'ALERT');
+    }
+  }, [appendMessage, isCameraActive, syncSpatialStates]);
+
+  const handleTriggerRescan = useCallback(() => {
+    if (sceneManagerRef.current) {
+      audioService.playActivationWhoosh();
+      sceneManagerRef.current.triggerReconstructionScan(selectedObjectId || undefined);
+      appendMessage('JARVIS', 'Executing volumetric laser reconstruction pass.', 'INFO');
+    }
+  }, [appendMessage, selectedObjectId]);
+
+  const handleRotate360 = useCallback(() => {
+    if (sceneManagerRef.current) {
+      audioService.playChirp(1450);
+      sceneManagerRef.current.rotate360(selectedObjectId || undefined);
+      syncSpatialStates();
+    }
+  }, [selectedObjectId, syncSpatialStates]);
+
+  const handleDisintegrate = useCallback(() => {
+    if (sceneManagerRef.current) {
+      audioService.playShockwave();
+      sceneManagerRef.current.disintegrateObject(selectedObjectId || undefined);
+      setVisualSettings((v) => ({ ...v, dispersionAmount: 1.0 }));
+      syncSpatialStates();
+      appendMessage('JARVIS', 'Particle disintegration initiated. Original spatial state preserved.', 'ALERT');
+    }
+  }, [appendMessage, selectedObjectId, syncSpatialStates]);
+
+  const handleReconstruct = useCallback(() => {
+    if (sceneManagerRef.current) {
+      audioService.playActivationWhoosh();
+      sceneManagerRef.current.reconstructObject(selectedObjectId || undefined);
+      setVisualSettings((v) => ({ ...v, explodedView: false, explosionAmount: 0, dispersionAmount: 0 }));
+      syncSpatialStates();
+      appendMessage('JARVIS', 'Reassembling holographic structure to original state.', 'RESPONSE');
+    }
+  }, [appendMessage, selectedObjectId, syncSpatialStates]);
+
+  const handleReconstructImages = useCallback(async (files: File[]) => {
+    if (!sceneManagerRef.current) return;
+    try {
+      const inst = await sceneManagerRef.current.reconstructFromImages(files);
+      audioService.playActivationWhoosh();
+      setCurrentModelId('reconstructed_object');
+      syncSpatialStates();
+      appendMessage(
+        'JARVIS',
+        `Synthesized ${inst.name} via ${inst.reconstructionMethodLabel || 'illustrative visual reconstruction'}.`,
+        'RESPONSE'
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unable to process image files.';
+      appendMessage('JARVIS', msg, 'ALERT');
+    }
+  }, [appendMessage, syncSpatialStates]);
 
   // Model switching
   const handleSelectModel = useCallback((modelId: HologramModelId) => {
@@ -254,18 +416,9 @@ export const App: React.FC = () => {
       setCurrentModelId(nextId);
       audioService.playSwipeSound();
       syncSpatialStates();
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Math.random().toString(36).substring(7),
-          sender: 'JARVIS',
-          text: `Switched holographic module to ${nextId.toUpperCase().replace('_', ' ')}.`,
-          timestamp: new Date().toLocaleTimeString(),
-          type: 'INFO'
-        }
-      ]);
+      appendMessage('JARVIS', `Switched holographic module to ${nextId.toUpperCase().replace('_', ' ')}.`, 'INFO');
     }
-  }, [syncSpatialStates]);
+  }, [appendMessage, syncSpatialStates]);
 
   const handlePrevModel = useCallback(() => {
     if (sceneManagerRef.current) {
@@ -273,18 +426,9 @@ export const App: React.FC = () => {
       setCurrentModelId(prevId);
       audioService.playSwipeSound();
       syncSpatialStates();
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Math.random().toString(36).substring(7),
-          sender: 'JARVIS',
-          text: `Switched holographic module to ${prevId.toUpperCase().replace('_', ' ')}.`,
-          timestamp: new Date().toLocaleTimeString(),
-          type: 'INFO'
-        }
-      ]);
+      appendMessage('JARVIS', `Switched holographic module to ${prevId.toUpperCase().replace('_', ' ')}.`, 'INFO');
     }
-  }, [syncSpatialStates]);
+  }, [appendMessage, syncSpatialStates]);
 
   // Register Contextual Voice Commands with SpeechService
   useEffect(() => {
@@ -297,25 +441,360 @@ export const App: React.FC = () => {
         feedbackText: 'Good evening, sir. All holographic systems are online and awaiting your command.'
       },
       {
-        patterns: ['initialize holographic interface', 'initialize hologram', 'open interface', 'workspace mode'],
+        patterns: [
+          'jarvis activate vision',
+          'activate vision',
+          'activate vision interface',
+          'load vision sphere',
+          'vision core'
+        ],
+        description: 'Activate VISION 1.2 Holographic Core',
+        category: 'NAVIGATION',
+        action: () => {
+          setMode('WORKSPACE');
+          handleSelectModel('vision_sphere');
+        },
+        feedbackText: 'VISION 1.2 spatial intelligence sphere online.'
+      },
+      {
+        patterns: [
+          'open holographic workspace',
+          'initialize holographic interface',
+          'initialize hologram',
+          'open interface',
+          'workspace mode'
+        ],
         description: 'Initialize main workspace',
         category: 'NAVIGATION',
         action: () => {
           setMode('WORKSPACE');
           audioService.playActivationWhoosh();
         },
-        feedbackText: 'Initializing holographic workspace. Mark VII core engaged.'
+        feedbackText: 'Opening holographic workspace. Mark VII core engaged.'
       },
       {
-        patterns: ['rotate the object', 'rotate object', 'spin object', 'rotate it'],
-        description: 'Rotate object',
+        patterns: ['show me the vehicle', 'show vehicle', 'show car', 'load car', 'sports car'],
+        description: 'Load Hypercar vehicle blueprint',
+        category: 'NAVIGATION',
+        action: () => handleSelectModel('sports_car'),
+        feedbackText: 'Projecting aero hypercar holographic chassis.'
+      },
+      {
+        patterns: ['show bike', 'show motorcycle', 'load bike'],
+        description: 'Load Superbike hologram',
+        category: 'NAVIGATION',
+        action: () => handleSelectModel('cyber_motorcycle'),
+        feedbackText: 'Projecting autonomous superbike blueprint.'
+      },
+      {
+        patterns: ['show phone', 'show smartphone', 'load smartphone'],
+        description: 'Load Smartphone hologram',
+        category: 'NAVIGATION',
+        action: () => handleSelectModel('holo_smartphone'),
+        feedbackText: 'Projecting holographic smartphone hardware stack.'
+      },
+      {
+        patterns: ['show computer', 'show workstation', 'load computer'],
+        description: 'Load Quantum Workstation',
+        category: 'NAVIGATION',
+        action: () => handleSelectModel('quantum_workstation'),
+        feedbackText: 'Projecting quantum compute workstation tower.'
+      },
+      {
+        patterns: ['show engine', 'show jet engine', 'show turbine', 'load engine'],
+        description: 'Load Jet Turbine Engine',
+        category: 'NAVIGATION',
+        action: () => handleSelectModel('jet_turbine_engine'),
+        feedbackText: 'Projecting turbofan jet propulsion engine.'
+      },
+      {
+        patterns: ['show building', 'show skyscraper', 'load building'],
+        description: 'Load Stark Spire Architecture',
+        category: 'NAVIGATION',
+        action: () => handleSelectModel('stark_skyscraper'),
+        feedbackText: 'Projecting architectural spire blueprint.'
+      },
+      {
+        patterns: ['show machine', 'show robot arm', 'show robot'],
+        description: 'Load Industrial Robot Arm',
+        category: 'NAVIGATION',
+        action: () => handleSelectModel('industrial_robot_arm'),
+        feedbackText: 'Projecting 6-DOF industrial robotic manipulator.'
+      },
+      {
+        patterns: ['show gearbox', 'show mechanical component', 'load gearbox'],
+        description: 'Load Planetary Gearbox',
+        category: 'NAVIGATION',
+        action: () => handleSelectModel('planetary_gearbox'),
+        feedbackText: 'Projecting planetary mechanical reduction gearbox.'
+      },
+      {
+        patterns: ['show atom', 'show scientific object', 'load atom'],
+        description: 'Load Atom Orbital Model',
+        category: 'NAVIGATION',
+        action: () => handleSelectModel('atom_orbital_model'),
+        feedbackText: 'Projecting quantum atomic orbital lattice.'
+      },
+      {
+        patterns: ['switch to arc reactor', 'load arc reactor'],
+        description: 'Load Arc Reactor MK-VII',
+        category: 'NAVIGATION',
+        action: () => handleSelectModel('arc_reactor'),
+        feedbackText: 'Projecting Arc Reactor Mark VII clean energy core.'
+      },
+      {
+        patterns: ['switch to tesseract', 'load tesseract', 'quantum tesseract'],
+        description: 'Load Quantum Tesseract',
+        category: 'NAVIGATION',
+        action: () => handleSelectModel('quantum_tesseract'),
+        feedbackText: 'Projecting Quantum Tesseract 4D hypercube.'
+      },
+      {
+        patterns: ['switch to mark suit', 'switch to iron man', 'load mark seven', 'armor blueprint'],
+        description: 'Load Iron Man Mark VII schematic',
+        category: 'NAVIGATION',
+        action: () => handleSelectModel('ironman_armor'),
+        feedbackText: 'Loading Iron Man Mark VII tactical armor schematics.'
+      },
+      {
+        patterns: ['switch to planetary defense', 'switch to defense grid', 'load globe'],
+        description: 'Load Stark Defense Grid',
+        category: 'NAVIGATION',
+        action: () => handleSelectModel('planetary_defense'),
+        feedbackText: 'Projecting Stark Planetary Defense orbital grid.'
+      },
+      {
+        patterns: ['switch to dna', 'switch to helix', 'molecular dna'],
+        description: 'Load Nanotech DNA Helix',
+        category: 'NAVIGATION',
+        action: () => handleSelectModel('molecular_dna'),
+        feedbackText: 'Synthesizing nanotech molecular double helix.'
+      },
+      {
+        patterns: ['switch to buckyball', 'switch to fullerene'],
+        description: 'Load Fullerene C60',
+        category: 'NAVIGATION',
+        action: () => handleSelectModel('carbon_buckyball'),
+        feedbackText: 'Projecting Fullerene C60 carbon lattice.'
+      },
+      {
+        patterns: ['switch to telemetry chart', 'switch to data chart'],
+        description: 'Load Telemetry Spectrum',
+        category: 'NAVIGATION',
+        action: () => handleSelectModel('hologram_datachart'),
+        feedbackText: 'Projecting 3D volumetric telemetry spectrum.'
+      },
+      {
+        patterns: ['rotate it 360 degrees', 'rotate 360 degrees', 'rotate 360', '360 rotation'],
+        description: 'Full 360-degree rotation',
+        category: 'MANIPULATION',
+        action: () => handleRotate360(),
+        feedbackText: 'Executing full 360-degree holographic inspection rotation.'
+      },
+      {
+        patterns: ['rotate the interface', 'rotate interface', 'rotate the object', 'rotate object', 'spin object', 'rotate it'],
+        description: 'Rotate holographic interface or object',
         category: 'MANIPULATION',
         action: () => {
           if (sceneManagerRef.current) {
-            sceneManagerRef.current.applyDeltaRotation(0, 1.2, 0);
+            sceneManagerRef.current.applySphericalRotation(0, 0.9, 0);
           }
         },
-        feedbackText: 'Rotating the selected object 360 degrees.'
+        feedbackText: 'Rotating the holographic interface.'
+      },
+      {
+        patterns: ['turn right', 'rotate right'],
+        description: 'Rotate sphere right',
+        category: 'MANIPULATION',
+        action: () => {
+          if (sceneManagerRef.current) {
+            sceneManagerRef.current.applySphericalRotation(0, 0.75, 0);
+          }
+        },
+        feedbackText: 'Rotating holographic sphere right.'
+      },
+      {
+        patterns: ['turn left', 'rotate left'],
+        description: 'Rotate sphere left',
+        category: 'MANIPULATION',
+        action: () => {
+          if (sceneManagerRef.current) {
+            sceneManagerRef.current.applySphericalRotation(0, -0.75, 0);
+          }
+        },
+        feedbackText: 'Rotating holographic sphere left.'
+      },
+      {
+        patterns: ['explode the model', 'show internal components', 'exploded view', 'disassemble', 'breakdown view'],
+        description: 'Explode model into labeled layers',
+        category: 'MANIPULATION',
+        action: () => {
+          setVisualSettings((v) => ({
+            ...v,
+            explodedView: true,
+            explosionAmount: 1.0,
+            showComponentLabels: true
+          }));
+        },
+        feedbackText: 'Expanding assembly layers and surfacing component callouts.'
+      },
+      {
+        patterns: ['increase dispersion', 'more dispersion'],
+        description: 'Increase particle dispersion level',
+        category: 'CINEMATIC',
+        action: () => {
+          setVisualSettings((v) => {
+            const next = Math.min(1.0, v.dispersionAmount + 0.35);
+            sceneManagerRef.current?.setDispersion(next, next >= 0.85 ? 'DISPERSED' : 'EXPANDING');
+            return { ...v, dispersionAmount: next };
+          });
+          syncSpatialStates();
+        },
+        feedbackText: 'Increasing holographic particle dispersion.'
+      },
+      {
+        patterns: ['disperse the sphere', 'disperse sphere', 'disperse the interface', 'disperse interface', 'disintegrate', 'particle disintegration'],
+        description: 'Disperse sphere or object into particles',
+        category: 'CINEMATIC',
+        action: () => {
+          setVisualSettings((v) => ({ ...v, dispersionAmount: 1.0 }));
+          sceneManagerRef.current?.setDispersion(1.0, 'DISPERSED');
+          handleDisintegrate();
+        },
+        feedbackText: 'Dispersing holographic structure into controlled energy particles.'
+      },
+      {
+        patterns: ['reconstruct the interface', 'reconstruct interface', 'reconstruct the object', 'reconstruct object', 'assembled view', 'assemble', 'reconstruct'],
+        description: 'Reconstruct dispersed particles back into original structure',
+        category: 'MANIPULATION',
+        action: () => handleReconstruct(),
+        feedbackText: 'Reconstructing particles back into exact original geometry.'
+      },
+      {
+        patterns: ['return to normal view', 'return to normal', 'normal view'],
+        description: 'Return to normal assembled view',
+        category: 'NAVIGATION',
+        action: () => {
+          setMode('WORKSPACE');
+          handleReconstruct();
+          handleResetTransform();
+        },
+        feedbackText: 'Restoring normal assembled workspace view.'
+      },
+      {
+        patterns: ['open the object laboratory', 'open object laboratory', 'open laboratory', 'object laboratory'],
+        description: 'Open Reconstruction & Manipulation Lab panel',
+        category: 'NAVIGATION',
+        action: () => {
+          setMode('WORKSPACE');
+          setRequestedWorkspaceTab({ tab: 'LAB', nonce: Date.now() });
+          audioService.playActivationWhoosh();
+        },
+        feedbackText: 'Opening the holographic Object Reconstruction Laboratory.'
+      },
+      {
+        patterns: ['show diagnostics', 'open diagnostics'],
+        description: 'Show reactor diagnostics & telemetry panel',
+        category: 'NAVIGATION',
+        action: () => {
+          setMode('WORKSPACE');
+          setRequestedDiagnosticsTab({ tab: 'DIAGNOSTICS', nonce: Date.now() });
+          audioService.playChirp(1400);
+        },
+        feedbackText: 'Displaying live holographic diagnostics telemetry.'
+      },
+      {
+        patterns: ['activate diagnostics', 'run diagnostic sweep', 'diagnostic protocol', 'system sweep'],
+        description: 'Activate diagnostics and run system sweep',
+        category: 'AUTOMATION',
+        action: () => {
+          setMode('WORKSPACE');
+          setRequestedDiagnosticsTab({ tab: 'DIAGNOSTICS', nonce: Date.now() });
+          automationEngine.createTask(
+            'Autonomous Optical & Containment Sweep',
+            'Verify camera frames, landmark smoothing, and containment flux.',
+            [
+              { description: 'Testing optical sensor stream fidelity', action: () => audioService.playChirp(1200) },
+              { description: 'Synchronizing 21 3D hand landmarks', action: () => audioService.playChirp(1400) },
+              { description: 'Evaluating magnetic containment coherence', action: () => audioService.playActivationWhoosh() }
+            ]
+          );
+        },
+        feedbackText: 'Activating diagnostics and initiating sensor containment sweep.'
+      },
+      {
+        patterns: ['laser scan', 'rescan', 'run holographic scan'],
+        description: 'Trigger holographic laser reconstruction scan',
+        category: 'MANIPULATION',
+        action: () => handleTriggerRescan(),
+        feedbackText: 'Executing volumetric laser reconstruction pass.'
+      },
+      {
+        patterns: ['wireframe mode', 'wireframe'],
+        description: 'Switch to wireframe topology',
+        category: 'MANIPULATION',
+        action: () => setVisualSettings((v) => ({ ...v, renderMode: 'WIREFRAME', wireframe: true })),
+        feedbackText: 'Switching hologram topology to wireframe mesh.'
+      },
+      {
+        patterns: ['point cloud mode', 'point cloud'],
+        description: 'Switch to point cloud topology',
+        category: 'MANIPULATION',
+        action: () => setVisualSettings((v) => ({ ...v, renderMode: 'POINT_CLOUD', wireframe: true })),
+        feedbackText: 'Rendering volumetric point-cloud vertex lattice.'
+      },
+      {
+        patterns: ['solid hologram', 'solid mode'],
+        description: 'Switch to solid hologram surface',
+        category: 'MANIPULATION',
+        action: () => setVisualSettings((v) => ({ ...v, renderMode: 'SOLID_HOLO', wireframe: false })),
+        feedbackText: 'Engaging translucent solid hologram surface.'
+      },
+      {
+        patterns: ['hybrid mode', 'hybrid view'],
+        description: 'Switch to hybrid hologram mode',
+        category: 'MANIPULATION',
+        action: () => setVisualSettings((v) => ({ ...v, renderMode: 'HYBRID', wireframe: true })),
+        feedbackText: 'Engaging hybrid multi-layer holographic rendering.'
+      },
+      {
+        patterns: ['slice view', 'cross section', 'enable slice'],
+        description: 'Enable cross-section tomography slice plane',
+        category: 'MANIPULATION',
+        action: () => setVisualSettings((v) => ({ ...v, sliceEnabled: true })),
+        feedbackText: 'Activating tomography cross-section slicing plane.'
+      },
+      {
+        patterns: ['disable slice', 'turn off slice', 'full mesh'],
+        description: 'Disable cross-section slice',
+        category: 'MANIPULATION',
+        action: () => setVisualSettings((v) => ({ ...v, sliceEnabled: false })),
+        feedbackText: 'Disengaging tomography slicing plane.'
+      },
+      {
+        patterns: ['lock object', 'freeze object'],
+        description: 'Lock selected object transform',
+        category: 'SPATIAL',
+        action: () => {
+          if (selectedObjectId && sceneManagerRef.current) {
+            sceneManagerRef.current.spatialManager.setLocked(selectedObjectId, true);
+            syncSpatialStates();
+          }
+        },
+        feedbackText: 'Spatial transform locked for active hologram.'
+      },
+      {
+        patterns: ['unlock object', 'unfreeze object'],
+        description: 'Unlock selected object transform',
+        category: 'SPATIAL',
+        action: () => {
+          if (selectedObjectId && sceneManagerRef.current) {
+            sceneManagerRef.current.spatialManager.setLocked(selectedObjectId, false);
+            sceneManagerRef.current.spatialManager.setFrozen(selectedObjectId, false);
+            syncSpatialStates();
+          }
+        },
+        feedbackText: 'Spatial transform unlocked.'
       },
       {
         patterns: ['expand it', 'expand', 'zoom in', 'enlarge'],
@@ -324,6 +803,7 @@ export const App: React.FC = () => {
         action: () => {
           if (sceneManagerRef.current) {
             sceneManagerRef.current.applyScaleMultiplier(1.35);
+            syncSpatialStates();
           }
         },
         feedbackText: 'Expanding the holographic structure.'
@@ -335,16 +815,20 @@ export const App: React.FC = () => {
         action: () => {
           if (sceneManagerRef.current) {
             sceneManagerRef.current.applyScaleMultiplier(0.75);
+            syncSpatialStates();
           }
         },
         feedbackText: 'Contracting holographic dimensions.'
       },
       {
-        patterns: ['reset object', 'reset', 'center object', 'recenter'],
-        description: 'Reset hologram position',
+        patterns: ['reset hologram', 'reset object', 'reset', 'center object', 'recenter'],
+        description: 'Reset hologram position and dispersion',
         category: 'MANIPULATION',
-        action: () => handleResetTransform(),
-        feedbackText: 'Returning holographic object to origin.'
+        action: () => {
+          handleReconstruct();
+          handleResetTransform();
+        },
+        feedbackText: 'Resetting holographic sphere and returning anchor to origin.'
       },
       {
         patterns: ['duplicate it', 'duplicate object', 'clone object', 'make a copy'],
@@ -392,41 +876,6 @@ export const App: React.FC = () => {
         category: 'CINEMATIC',
         action: () => handleTriggerShockwave(),
         feedbackText: 'Discharging radial energy pulse.'
-      },
-      {
-        patterns: ['exploded view', 'disassemble', 'breakdown view'],
-        description: 'Toggle exploded view',
-        category: 'MANIPULATION',
-        action: () => {
-          setVisualSettings((v) => ({ ...v, explodedView: true }));
-        },
-        feedbackText: 'Engaging exploded blueprint disassembly view.'
-      },
-      {
-        patterns: ['assembled view', 'assemble', 'reconstruct'],
-        description: 'Assemble object',
-        category: 'MANIPULATION',
-        action: () => {
-          setVisualSettings((v) => ({ ...v, explodedView: false }));
-        },
-        feedbackText: 'Reconstructing holographic components.'
-      },
-      {
-        patterns: ['run diagnostic sweep', 'diagnostic protocol', 'system sweep'],
-        description: 'Autonomous diagnostic workflow',
-        category: 'AUTOMATION',
-        action: () => {
-          automationEngine.createTask(
-            'Autonomous Optical & Containment Sweep',
-            'Verify camera frames, landmark smoothing, and containment flux.',
-            [
-              { description: 'Testing optical sensor stream fidelity', action: () => audioService.playChirp(1200) },
-              { description: 'Synchronizing 21 3D hand landmarks', action: () => audioService.playChirp(1400) },
-              { description: 'Evaluating magnetic containment coherence', action: () => audioService.playActivationWhoosh() }
-            ]
-          );
-        },
-        feedbackText: 'Initiating autonomous sensor and containment diagnostic sweep.'
       },
       {
         patterns: ['run overclock protocol', 'overclock pulse'],
@@ -503,82 +952,81 @@ export const App: React.FC = () => {
     speechService.setMessageCallback((msg) => {
       setMessages((prev) => [...prev, msg]);
     });
-  }, [handleApplyFormation, handleDuplicateObject, handleDeleteObject, handleResetTransform, handleTriggerShockwave, notes, selectedObjectId]);
+  }, [
+    handleApplyFormation,
+    handleDeleteObject,
+    handleDisintegrate,
+    handleDuplicateObject,
+    handleReconstruct,
+    handleResetTransform,
+    handleRotate360,
+    handleSelectModel,
+    handleTriggerRescan,
+    handleTriggerShockwave,
+    notes,
+    selectedObjectId,
+    syncSpatialStates
+  ]);
 
-  // Voice Assistant toggle
-  const handleToggleVoice = useCallback(() => {
+  // Voice Assistant toggle with explicit microphone permission flow
+  const handleToggleVoice = useCallback(async () => {
     if (isVoiceActive) {
       speechService.stopListening();
       setIsVoiceActive(false);
+      setVoiceError(null);
+      appendMessage('JARVIS', 'Audio sensor deactivated. Hardware microphone tracks closed.', 'INFO');
     } else {
-      const started = speechService.startListening();
-      setIsVoiceActive(started);
-      if (started) {
+      setVoiceError(null);
+      const res = await speechService.startListeningWithPermission();
+      setIsVoiceActive(res.started);
+      if (res.started) {
         audioService.playActivationWhoosh();
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: Math.random().toString(36).substring(7),
-            sender: 'JARVIS',
-            text: 'Audio sensor online. Speak your command, sir.',
-            timestamp: new Date().toLocaleTimeString(),
-            type: 'INFO'
-          }
-        ]);
+        appendMessage('JARVIS', 'Audio sensor online. Speak your command, sir.', 'INFO');
+      } else if (res.error) {
+        setVoiceError(res.error);
+        appendMessage('JARVIS', res.error, 'ALERT');
       }
     }
-  }, [isVoiceActive]);
+  }, [appendMessage, isVoiceActive]);
 
   // Handle direct command string from console input with Contextual AI
   const handleSendConsoleCommand = useCallback(async (text: string) => {
     contextualAI.addHistory('user', text);
 
-    const activeObj = spatialObjects.find(o => o.id === selectedObjectId);
-    const modelName = activeObj ? activeObj.name : 'Central Hologram';
-
-    const intentResult = contextualAI.parseLocalIntent(text, modelName);
-
-    // If external AI configured, try querying
-    if (contextualAI.getConfig().provider !== 'LOCAL') {
-      const extReply = await contextualAI.queryExternalAI(text);
-      if (extReply) {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: Math.random().toString(36).substring(7),
-            sender: 'USER',
-            text,
-            timestamp: new Date().toLocaleTimeString(),
-            type: 'COMMAND'
-          },
-          {
-            id: Math.random().toString(36).substring(7),
-            sender: 'JARVIS',
-            text: extReply,
-            timestamp: new Date().toLocaleTimeString(),
-            type: 'RESPONSE'
-          }
-        ]);
-        speechService.speak(extReply);
-        return;
+    if (contextualAI.getConfig().provider !== 'LOCAL' && contextualAI.hasApiKey()) {
+      setIsProcessingCommand(true);
+      try {
+        const extReply = await contextualAI.queryExternalAI(text);
+        if (extReply) {
+          appendMessage('USER', text, 'COMMAND');
+          appendMessage('JARVIS', extReply, 'RESPONSE');
+          speechService.speak(extReply);
+          return;
+        }
+      } finally {
+        setIsProcessingCommand(false);
       }
     }
 
-    // Process via speech service / local intent
     speechService.handleTranscript(text);
-  }, [selectedObjectId, spatialObjects]);
+  }, [appendMessage]);
 
-  // Camera & Tracking toggle
+  // Camera & Tracking toggle with clear permission feedback
   const handleToggleCamera = useCallback(async () => {
     if (isCameraActive) {
       handTrackingService.stop();
       setIsCameraActive(false);
+      setCameraError(null);
       setGestureResult(null);
+      setLaserTarget(null);
       if (sceneManagerRef.current) {
         sceneManagerRef.current.setHandCentroid(undefined);
+        sceneManagerRef.current.updateLaserPointer(0, 0, false);
       }
+      appendMessage('JARVIS', 'Optical sensor deactivated. Camera hardware disconnected.', 'INFO');
     } else {
       if (!videoRef.current) return;
+      setCameraError(null);
       const started = await handTrackingService.startCamera(
         videoRef.current,
         (result, currentFps) => {
@@ -593,9 +1041,14 @@ export const App: React.FC = () => {
       setIsCameraActive(started);
       if (started) {
         audioService.playActivationWhoosh();
+        appendMessage('JARVIS', 'Optical sensor online. MediaPipe 21-landmark hand tracking active.', 'INFO');
+      } else {
+        const errMsg = handTrackingService.getLastError() || 'Unable to activate optical camera sensor.';
+        setCameraError(errMsg);
+        appendMessage('JARVIS', errMsg, 'ALERT');
       }
     }
-  }, [isCameraActive]);
+  }, [appendMessage, isCameraActive]);
 
   // GESTURE DISPATCH ENGINE
   useEffect(() => {
@@ -603,38 +1056,69 @@ export const App: React.FC = () => {
     const g = gestureResult.activeGesture;
     const scene = sceneManagerRef.current;
 
-    // Detect pinch release
     if (lastGestureRef.current === 'PINCH' && g !== 'PINCH' && g !== 'MOVE_PINCHED') {
       audioService.playPinchRelease();
     }
 
+    // Update or clear 3D Laser Targeting Reticle
+    if (g !== 'TWO_FINGER_POINT' && scene) {
+      scene.updateLaserPointer(0, 0, false);
+      if (laserTarget) setLaserTarget(null);
+    }
+
+    if (gestureResult.trackingLost) {
+      setActiveGestureFeedback('OPTICAL TRACKING LOST // STABILIZING');
+    }
+
     if (g === 'NONE') {
       lastGestureRef.current = 'NONE';
+      if (!gestureResult.trackingLost && activeGestureFeedback) setActiveGestureFeedback(null);
       return;
     }
 
-    // A. OPEN PALM
+    // Apply continuous two-hand particle dispersion when present
+    if (gestureResult.dispersionControl && scene) {
+      const disp = gestureResult.dispersionControl;
+      scene.setDispersion(disp.dispersion, disp.phase);
+      setVisualSettings((v) =>
+        Math.abs(v.dispersionAmount - disp.dispersion) >= 0.015
+          ? { ...v, dispersionAmount: disp.dispersion }
+          : v
+      );
+    }
+
+    // A. OPEN PALM (Activate interaction / unfreeze)
     if (g === 'OPEN_PALM') {
+      setActiveGestureFeedback('GESTURE // OPEN PALM · INTERACTION ACTIVE');
+      if (scene && selectedObjectId) {
+        scene.spatialManager.setFrozen(selectedObjectId, false);
+      }
       if (mode === 'STANDBY') {
         setMode('WORKSPACE');
         audioService.playActivationWhoosh();
       }
     }
-    // B. CLOSED FIST
+    // B. CLOSED FIST (Hold / Freeze active object)
     else if (g === 'CLOSED_FIST') {
-      if (lastGestureRef.current !== 'CLOSED_FIST' && mode !== 'STANDBY') {
-        audioService.playChirp(800);
-        setMode('STANDBY');
+      setActiveGestureFeedback('GESTURE // CLOSED FIST · OBJECT FROZEN');
+      if (lastGestureRef.current !== 'CLOSED_FIST') {
+        audioService.playChirp(820);
+        if (scene && selectedObjectId) {
+          scene.spatialManager.setFrozen(selectedObjectId, true);
+          syncSpatialStates();
+        }
       }
     }
     // C. PINCH
     else if (g === 'PINCH') {
+      setActiveGestureFeedback('GESTURE // PINCH · TARGET GRABBED');
       if (lastGestureRef.current !== 'PINCH' && lastGestureRef.current !== 'MOVE_PINCHED') {
         audioService.playPinchGrab();
       }
     }
     // D. MOVE PINCHED HAND
     else if (g === 'MOVE_PINCHED' && gestureResult.deltaTranslation && scene) {
+      setActiveGestureFeedback('GESTURE // TRANSLATE OBJECT');
       scene.applyDeltaTranslation(
         gestureResult.deltaTranslation.x,
         gestureResult.deltaTranslation.y,
@@ -643,18 +1127,41 @@ export const App: React.FC = () => {
     }
     // E. ROTATE WRIST
     else if (g === 'ROTATE_WRIST' && gestureResult.deltaRotation && scene) {
+      setActiveGestureFeedback('GESTURE // WRIST ROTATION');
       scene.applyDeltaRotation(
         gestureResult.deltaRotation.x,
         gestureResult.deltaRotation.y,
         gestureResult.deltaRotation.z
       );
     }
-    // F. TWO-HAND MOVEMENT (ZOOM / SCALE)
-    else if (g === 'TWO_HAND_ZOOM' && gestureResult.deltaScale && scene) {
-      scene.applyScaleMultiplier(gestureResult.deltaScale);
+    // E2. CONTINUOUS HAND SPHERE ROTATION
+    else if (g === 'SPHERE_ROTATE' && gestureResult.sphericalRotationDelta && scene) {
+      const { x, y, z } = gestureResult.sphericalRotationDelta;
+      setActiveGestureFeedback('GESTURE // SPHERICAL ROTATION');
+      scene.applySphericalRotation(x, y, z);
+    }
+    // F. TWO-HAND MOVEMENT (ZOOM / DISPERSION)
+    else if (g === 'TWO_HAND_ZOOM' && scene) {
+      if (gestureResult.dispersionControl) {
+        setActiveGestureFeedback(
+          `GESTURE // DISPERSION ${Math.round(gestureResult.dispersionControl.dispersion * 100)}% (${gestureResult.dispersionControl.phase})`
+        );
+      } else {
+        setActiveGestureFeedback('GESTURE // TWO-HAND SCALE');
+      }
+      if (gestureResult.deltaScale && Math.abs(gestureResult.deltaScale - 1.0) > 0.002) {
+        scene.applyScaleMultiplier(gestureResult.deltaScale);
+      }
     }
     // G. TWO OPEN PALMS
     else if (g === 'TWO_OPEN_PALMS') {
+      if (gestureResult.dispersionControl) {
+        setActiveGestureFeedback(
+          `GESTURE // WIDE INTERFACE · DISPERSION ${Math.round(gestureResult.dispersionControl.dispersion * 100)}%`
+        );
+      } else {
+        setActiveGestureFeedback('GESTURE // CINEMATIC MODE');
+      }
       if (lastGestureRef.current !== 'TWO_OPEN_PALMS') {
         audioService.playActivationWhoosh();
         setMode('CINEMATIC');
@@ -662,28 +1169,60 @@ export const App: React.FC = () => {
     }
     // H. QUICK SWIPES
     else if (g === 'SWIPE_RIGHT' && lastGestureRef.current !== 'SWIPE_RIGHT') {
+      setActiveGestureFeedback('GESTURE // SWIPE NEXT MODULE');
       handleNextModel();
     } else if (g === 'SWIPE_LEFT' && lastGestureRef.current !== 'SWIPE_LEFT') {
+      setActiveGestureFeedback('GESTURE // SWIPE PREV MODULE');
       handlePrevModel();
+    }
+    // I. TWO-FINGER POINT (Precision 3D Laser Targeting Reticle)
+    else if (g === 'TWO_FINGER_POINT' && scene && gestureResult.hands[0]) {
+      setActiveGestureFeedback('GESTURE // PRECISION LASER RETICLE');
+      const indexTip = gestureResult.hands[0].landmarks[8];
+      if (indexTip) {
+        const ndcX = (1 - indexTip.x) * 2 - 1;
+        const ndcY = -(indexTip.y * 2 - 1);
+        const hit = scene.updateLaserPointer(ndcX, ndcY, true);
+        setLaserTarget(hit);
+      }
     }
     // J. DOUBLE PINCH (Toggle Exploded View)
     else if (g === 'DOUBLE_PINCH' && lastGestureRef.current !== 'DOUBLE_PINCH') {
+      setActiveGestureFeedback('GESTURE // EXPLODED ASSEMBLY TOGGLE');
       audioService.playChirp(1500);
-      setVisualSettings((v) => ({ ...v, explodedView: !v.explodedView }));
+      setVisualSettings((v) => {
+        const next = !v.explodedView;
+        return { ...v, explodedView: next, explosionAmount: next ? 1.0 : 0.0 };
+      });
     }
-    // K. HAND PUSH FORWARD (Cinematic Energy Shockwave)
+    // K. HAND PUSH FORWARD (Virtual Energy Displacement Shockwave)
     else if (g === 'PUSH_FORWARD' && lastGestureRef.current !== 'PUSH_FORWARD') {
+      setActiveGestureFeedback('GESTURE // PUSH ENERGY DISPLACEMENT');
       handleTriggerShockwave();
     }
-    // L. HAND PULL BACK (Reset Object to Origin)
+    // L. HAND PULL BACK (Reconstruct / Retrieve Object)
     else if (g === 'PULL_BACK' && lastGestureRef.current !== 'PULL_BACK') {
+      setActiveGestureFeedback('GESTURE // PULL RECONSTRUCT & RETRIEVE');
+      handleReconstruct();
       handleResetTransform();
     }
 
     lastGestureRef.current = g;
-  }, [gestureResult, handleNextModel, handlePrevModel, handleResetTransform, handleTriggerShockwave, mode]);
+  }, [
+    activeGestureFeedback,
+    gestureResult,
+    handleNextModel,
+    handlePrevModel,
+    handleReconstruct,
+    handleResetTransform,
+    handleTriggerShockwave,
+    laserTarget,
+    mode,
+    selectedObjectId,
+    syncSpatialStates
+  ]);
 
-  // Audio Speech state watcher
+  // Audio Speech state watcher & Reactive Core Synchronization
   useEffect(() => {
     const timer = setInterval(() => {
       setIsSpeaking(speechService.isCurrentlySpeaking());
@@ -691,8 +1230,69 @@ export const App: React.FC = () => {
     return () => clearInterval(timer);
   }, []);
 
+  useEffect(() => {
+    if (sceneManagerRef.current) {
+      sceneManagerRef.current.setCoreActivity({
+        isListening: isVoiceActive,
+        isSpeaking
+      });
+    }
+  }, [isVoiceActive, isSpeaking]);
+
+  // Project 2D component callout labels smoothly when Exploded View or VISION 1.2 CORE is active
+  useEffect(() => {
+    const shouldShowLabels =
+      visualSettings.showComponentLabels &&
+      (visualSettings.explosionAmount > 0.15 ||
+        (currentModelId === 'vision_sphere' &&
+          !visualSettings.reducedEffects &&
+          visualSettings.dispersionAmount < 0.85));
+
+    if (!shouldShowLabels) {
+      if (componentLabels.length > 0) setComponentLabels([]);
+      return;
+    }
+
+    const interval = setInterval(() => {
+      if (sceneManagerRef.current) {
+        setComponentLabels(sceneManagerRef.current.getProjectedComponentLabels());
+      }
+    }, 80);
+
+    return () => clearInterval(interval);
+  }, [
+    visualSettings.showComponentLabels,
+    visualSettings.explosionAmount,
+    visualSettings.reducedEffects,
+    visualSettings.dispersionAmount,
+    currentModelId,
+    componentLabels.length
+  ]);
+
+  const selectedSpatialObj = spatialObjects.find((o) => o.id === selectedObjectId) || spatialObjects[0] || null;
+  const isTrackingLost = Boolean(isCameraActive && gestureResult?.trackingLost);
+
+  const coreActivityLabel = isTrackingLost
+    ? 'TRACKING LOST'
+    : selectedSpatialObj?.dispersionPhase && selectedSpatialObj.dispersionPhase !== 'COMPLETE'
+    ? `DISPERSION: ${selectedSpatialObj.dispersionPhase}`
+    : selectedSpatialObj?.isDisintegrated
+    ? 'DISINTEGRATED'
+    : selectedSpatialObj?.isFrozen
+    ? 'OBJECT FROZEN'
+    : isSpeaking
+    ? 'SPEAKING'
+    : isVoiceActive
+    ? 'LISTENING'
+    : 'ACTIVE';
+
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-[#02070e] font-mono text-cyan-400 select-none">
+      {/* 0. Skippable Initialization Boot Sequence */}
+      {showBootOverlay && (
+        <BootSequenceOverlay onComplete={() => setShowBootOverlay(false)} />
+      )}
+
       {/* 1. Central 3D Holographic Canvas */}
       <HologramCanvas
         currentModelId={currentModelId}
@@ -703,12 +1303,18 @@ export const App: React.FC = () => {
           setSelectedObjectId(id);
           syncSpatialStates();
         }}
+        onTransformChange={syncSpatialStates}
+        laserTarget={laserTarget}
+        componentLabels={componentLabels}
+        activeGestureFeedback={activeGestureFeedback}
+        isTrackingLost={isTrackingLost}
       />
 
       {/* 2. Top Status Bar HUD */}
       <TopStatusBar
         mode={mode}
         fps={fps}
+        coreState={coreActivityLabel}
         onModeChange={setMode}
       />
 
@@ -719,6 +1325,7 @@ export const App: React.FC = () => {
           <div className="pointer-events-auto overflow-y-auto max-h-full pr-2">
             <LeftVisionHUD
               isCameraActive={isCameraActive}
+              cameraError={cameraError}
               onToggleCamera={handleToggleCamera}
               gestureResult={gestureResult}
               calibration={calibration}
@@ -728,27 +1335,50 @@ export const App: React.FC = () => {
               }}
               onResetCalibration={() => {
                 const defaults = gestureEngine.resetCalibrationToDefaults();
-                setCalibration(defaults);
+                gestureEngine.updateCalibration({ mirrorX: true });
+                setCalibration({ ...defaults, mirrorX: true });
+              }}
+              onRecalibrateNeutral={() => {
+                gestureEngine.recalibrateNeutral();
+                appendMessage('JARVIS', 'Neutral optical hand anchor recalibrated.', 'INFO');
               }}
               videoRef={videoRef}
             />
           </div>
 
-          {/* Center Space: Open view of 3D Hologram, Floating Workspace Panels & Voice Console */}
+          {/* Center Space: Open view of 3D Hologram, Floating Workspace / Lab Panels & Voice Console */}
           <div className="flex-1 flex flex-col justify-between items-center pointer-events-none px-4 pb-2">
-            {/* Top Center: Floating Workspace Multi-Object Panels */}
-            {mode === 'WORKSPACE' && (
+            {(mode === 'WORKSPACE' || mode === 'HOLOGRAM' || mode === 'DESKTOP') && (
               <div className="pointer-events-auto pt-1 animate-fade-in">
                 <FloatingSpatialPanels
                   spatialObjects={spatialObjects}
                   selectedObjectId={selectedObjectId}
+                  visualSettings={visualSettings}
+                  isCameraActive={isCameraActive}
+                  onUpdateVisualSettings={(settings) =>
+                    setVisualSettings((v) => ({ ...v, ...settings }))
+                  }
                   onSelectObject={handleSelectObject}
                   onAddObject={handleAddSpatialObject}
                   onDuplicateObject={handleDuplicateObject}
                   onDeleteObject={handleDeleteObject}
+                  onToggleLockObject={handleToggleLockObject}
+                  onTransformObject={handleTransformObject}
+                  onResetSelectedTransform={handleResetTransform}
+                  onGroupAll={handleGroupAll}
+                  onUngroupObject={handleUngroupObject}
                   onApplyFormation={handleApplyFormation}
+                  onSynthesizePreset={handleSynthesizePreset}
+                  onImportMeshFile={handleImportMeshFile}
+                  onReconstructImages={handleReconstructImages}
+                  onCaptureWebcamScan={handleCaptureWebcamScan}
+                  onTriggerRescan={handleTriggerRescan}
+                  onRotate360={handleRotate360}
+                  onDisintegrate={handleDisintegrate}
+                  onReconstruct={handleReconstruct}
                   notes={notes}
                   onUpdateNotes={setNotes}
+                  requestedTab={requestedWorkspaceTab}
                 />
               </div>
             )}
@@ -760,6 +1390,8 @@ export const App: React.FC = () => {
                 onSendCommand={handleSendConsoleCommand}
                 isListening={isVoiceActive}
                 isSpeaking={isSpeaking}
+                isProcessing={isProcessingCommand}
+                onClearHistory={() => setMessages((prev) => prev.slice(0, 1))}
               />
             </div>
           </div>
@@ -768,12 +1400,14 @@ export const App: React.FC = () => {
           <div className="pointer-events-auto overflow-y-auto max-h-full pl-2">
             <RightDiagnosticsHUD
               currentModelId={currentModelId}
+              selectedObject={selectedSpatialObj}
               onSelectModel={handleSelectModel}
               visualSettings={visualSettings}
               onUpdateVisualSettings={(settings) =>
                 setVisualSettings((v) => ({ ...v, ...settings }))
               }
               onOpenAIConfig={() => setIsAIConfigOpen(true)}
+              requestedTab={requestedDiagnosticsTab}
             />
           </div>
         </div>
@@ -785,6 +1419,7 @@ export const App: React.FC = () => {
           currentMode={mode}
           onSelectMode={setMode}
           isVoiceActive={isVoiceActive}
+          voiceError={voiceError}
           onToggleVoice={handleToggleVoice}
           onTriggerShockwave={handleTriggerShockwave}
           onResetTransform={handleResetTransform}
