@@ -11,6 +11,7 @@ import { FloatingSpatialPanels } from './components/Workspace/FloatingSpatialPan
 import { PermissionConfirmationModal } from './components/Workspace/PermissionConfirmationModal';
 import { AIConfigModal } from './components/HUD/AIConfigModal';
 import { IntelligenceHUD, IntelligenceTabId } from './components/HUD/IntelligenceHUD';
+import { CommandCenterDashboard } from './components/CommandCenter/CommandCenterDashboard';
 import { HologramSceneManager } from './three/HologramScene';
 import {
   CameraControlMode,
@@ -2243,61 +2244,88 @@ export const App: React.FC = () => {
         />
       )}
 
-      {/* 1. Central Full-Viewport 3D Holographic Canvas */}
-      <HologramCanvas
-        currentModelId={currentModelId}
-        visualSettings={visualSettings}
-        sceneManagerRef={sceneManagerRef}
-        onModelChange={handleSelectModel}
-        onSelectObject={(id) => {
-          setSelectedObjectId(id);
-          syncSpatialStates();
-          syncVisualDisplayToSelected();
-        }}
-        onSelectComponent={handleSelectComponent}
-        onHighlightComponent={handleHighlightComponent}
-        onTransformStart={() => {
-          setIsCanvasInteracting(true);
-          pendingCanvasBeforeRef.current = captureUndoState();
-        }}
-        onTransformChange={() => {
-          const before = pendingCanvasBeforeRef.current;
-          syncSpatialStates();
-          if (before) {
-            recordHistoryTransition(before, 'Interactive Viewport Transform', 'canvas-transform');
-            pendingCanvasBeforeRef.current = captureUndoState();
-          }
-        }}
-        onDropModelFiles={handleImportMeshFiles}
-        onDropImageFiles={handleReconstructImages}
-        onImportError={(msg) => {
-          setLabError(msg);
-          appendMessage('JARVIS', msg, 'ALERT');
-        }}
-        cameraControlMode={cameraControlMode}
-        laserTarget={laserTarget}
-        componentLabels={componentLabels}
-        activeGestureFeedback={activeGestureFeedback}
-        spatialFeedback={spatialFeedback}
-        isTrackingLost={isTrackingLost}
-        startAtInitZero={!autostart}
-        hideProjectedLabels={hudState.isFocusMode || mode === 'STANDBY'}
-      />
-
-      {/* 2. Slim 3-Zone Top Navigation Bar (or Minimal Focus Header) */}
+      {/* CommandCenter Dashboard Interface */}
       {mode !== 'STANDBY' && (
-        <TopStatusBar
+        <CommandCenterDashboard
+          currentModelId={currentModelId}
+          visualSettings={visualSettings}
+          sceneManagerRef={sceneManagerRef}
+          onModelChange={handleSelectModel}
+          onSelectObject={(id) => {
+            setSelectedObjectId(id);
+            syncSpatialStates();
+            syncVisualDisplayToSelected();
+          }}
+          onSelectComponent={handleSelectComponent}
+          onHighlightComponent={handleHighlightComponent}
+          onTransformStart={() => {
+            setIsCanvasInteracting(true);
+            pendingCanvasBeforeRef.current = captureUndoState();
+          }}
+          onTransformChange={() => {
+            const before = pendingCanvasBeforeRef.current;
+            syncSpatialStates();
+            if (before) {
+              recordHistoryTransition(before, 'Interactive Viewport Transform', 'canvas-transform');
+              pendingCanvasBeforeRef.current = captureUndoState();
+            }
+          }}
+          onImportMeshFiles={handleImportMeshFiles}
+          onReconstructImages={handleReconstructImages}
+          onImportError={(msg) => {
+            setLabError(msg);
+            appendMessage('JARVIS', msg, 'ALERT');
+          }}
+          cameraControlMode={cameraControlMode}
+          laserTarget={laserTarget}
+          componentLabels={componentLabels}
+          activeGestureFeedback={activeGestureFeedback}
+          spatialFeedback={spatialFeedback}
+          isTrackingLost={isTrackingLost}
+          autostart={autostart}
           fps={fps}
-          coreState={coreActivityLabel}
           isCameraActive={isCameraActive}
           isVoiceActive={isVoiceActive}
-          activeDrawer={hudState.activeDrawer}
+          onToggleVoice={handleToggleVoice}
+          intelligenceState={intelligenceState}
+          onSendCommand={handleSendConsoleCommand}
+          onApprovePermission={(permId) => void intelligenceEngine.resolvePendingPermission('APPROVE_ONCE', permId)}
+          onDenyPermission={(permId) => void intelligenceEngine.resolvePendingPermission('DENY', permId)}
+          onOpenAIConfig={() => setIsAIConfigOpen(true)}
+          onOpenObjectLab={() => {
+            setMode('WORKSPACE');
+            setHudState((prev) => openDrawerState(prev, 'LAB'));
+            setRequestedWorkspaceTab({ tab: 'LAB', nonce: nextNonce() });
+          }}
+          onOpenTasks={() => {
+            setMode('WORKSPACE');
+            setHudState((prev) => openDrawerState(prev, 'TASKS'));
+            setTaskSubTab('AUTOMATION');
+            setRequestedTaskTab({ tab: 'AUTOMATION', nonce: nextNonce() });
+          }}
+          onOpenVoiceConsole={() => {
+            setMode('WORKSPACE');
+            setHudState((prev) => openDrawerState(prev, 'VOICE'));
+          }}
+          onOpenBrain={() => {
+            setMode('WORKSPACE');
+            setRequestedBrainTab({ tab: 'CHAT', nonce: nextNonce() });
+            setHudState((prev) => openDrawerState(prev, 'BRAIN'));
+          }}
+          onOpenPermissions={() => {
+            setMode('WORKSPACE');
+            setRequestedBrainTab({ tab: 'PERMISSIONS', nonce: nextNonce() });
+            setHudState((prev) => openDrawerState(prev, 'BRAIN'));
+          }}
+          onOpenMemory={() => {
+            setMode('WORKSPACE');
+            setRequestedBrainTab({ tab: 'MEMORY', nonce: nextNonce() });
+            setHudState((prev) => openDrawerState(prev, 'BRAIN'));
+          }}
+          onTriggerRescan={handleTriggerRescan}
+          memoryCount={memoryManager.getMemories().length}
           isFocusMode={hudState.isFocusMode}
-          intelligenceStatus={intelligenceState.status}
-          activeSuggestionCount={intelligenceState.activeSuggestions.length}
-          onSelectVisionHome={handleSelectVisionHome}
-          onSelectDrawer={handleSelectDrawer}
-          onToggleFocusMode={handleToggleFocusMode}
+          onToggleFocus={handleToggleFocusMode}
         />
       )}
 
@@ -2679,21 +2707,7 @@ export const App: React.FC = () => {
         <video ref={videoRef} className="hidden" playsInline muted />
       )}
 
-      {/* 4. Compact Floating Bottom Control Strip */}
-      {mode !== 'STANDBY' && (
-        <BottomControlHUD
-          activeDrawer={hudState.activeDrawer}
-          isFocusMode={hudState.isFocusMode}
-          isCameraActive={isCameraActive}
-          isVoiceActive={isVoiceActive}
-          intelligenceStatus={intelligenceState.status}
-          activeSuggestionCount={intelligenceState.activeSuggestions.length}
-          onSelectVisionHome={handleSelectVisionHome}
-          onSelectDrawer={handleSelectDrawer}
-          onResetTransform={handleResetEnvironment}
-          onToggleFocusMode={handleToggleFocusMode}
-        />
-      )}
+
 
       {/* 5. Minimalist Translucent Standby HUD Overlay (sphere remains visible behind) */}
       {mode === 'STANDBY' && <StandbyHUD onWake={() => setMode('WORKSPACE')} />}
