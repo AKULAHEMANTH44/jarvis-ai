@@ -3,104 +3,62 @@ import { HolographicPanel } from '../Common/HolographicPanel';
 import { GestureCalibrationSettings, GestureDetectionResult } from '../../types/gesture';
 import { Camera, Eye, Sliders, Hand, ShieldAlert, Sparkles, ChevronDown, ChevronUp } from 'lucide-react';
 import { audioService } from '../../services/soundFx';
+import { CameraPermissionStatus, handTrackingService } from '../../services/handTracking';
+import { renderHandSkeletonOverlay } from '../../utils/handSkeletonRenderer';
 
 interface LeftVisionHUDProps {
   isCameraActive: boolean;
   cameraError?: string | null;
+  cameraPermissionStatus?: CameraPermissionStatus;
   onToggleCamera: () => void;
   gestureResult: GestureDetectionResult | null;
   calibration: GestureCalibrationSettings;
   onUpdateCalibration: (cal: Partial<GestureCalibrationSettings>) => void;
   onResetCalibration?: () => void;
   onRecalibrateNeutral?: () => void;
-  videoRef: React.RefObject<HTMLVideoElement>;
+  videoRef?: React.RefObject<HTMLVideoElement | null>;
 }
-
-const HAND_CONNECTIONS = [
-  [0, 1], [1, 2], [2, 3], [3, 4],
-  [0, 5], [5, 6], [6, 7], [7, 8],
-  [9, 10], [10, 11], [11, 12],
-  [13, 14], [14, 15], [15, 16],
-  [0, 17], [17, 18], [18, 19], [19, 20],
-  [5, 9], [9, 13], [13, 17]
-];
 
 export const LeftVisionHUD: React.FC<LeftVisionHUDProps> = ({
   isCameraActive,
   cameraError,
+  cameraPermissionStatus,
   onToggleCamera,
   gestureResult,
   calibration,
   onUpdateCalibration,
   onResetCalibration,
-  onRecalibrateNeutral,
-  videoRef
+  onRecalibrateNeutral
 }) => {
+  const drawerVideoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [showCalibration, setShowCalibration] = useState<boolean>(false);
   const [showGuide, setShowGuide] = useState<boolean>(false);
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    if (!isCameraActive || !gestureResult || !gestureResult.hands || gestureResult.hands.length === 0) {
-      return;
-    }
-
-    const w = canvas.width;
-    const h = canvas.height;
-
-    gestureResult.hands.forEach((hand) => {
-      const isRight = hand.handedness === 'Right';
-      const color = isRight ? '#00f0ff' : '#00ffaa';
-      const glow = isRight ? 'rgba(0, 240, 255, 0.8)' : 'rgba(0, 255, 170, 0.8)';
-
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = color;
-      ctx.shadowColor = glow;
-      ctx.shadowBlur = 8;
-
-      HAND_CONNECTIONS.forEach(([startIdx, endIdx]) => {
-        const p1 = hand.landmarks[startIdx];
-        const p2 = hand.landmarks[endIdx];
-        if (p1 && p2) {
-          ctx.beginPath();
-          ctx.moveTo((1 - p1.x) * w, p1.y * h);
-          ctx.lineTo((1 - p2.x) * w, p2.y * h);
-          ctx.stroke();
-        }
-      });
-
-      hand.landmarks.forEach((p, idx) => {
-        const isFingertip = [4, 8, 12, 16, 20].includes(idx);
-        ctx.beginPath();
-        ctx.arc((1 - p.x) * w, p.y * h, isFingertip ? 4.5 : 2.5, 0, 2 * Math.PI);
-        ctx.fillStyle = isFingertip ? '#ffffff' : color;
-        ctx.shadowColor = glow;
-        ctx.shadowBlur = isFingertip ? 12 : 5;
-        ctx.fill();
-      });
-
-      if (hand.isPinching) {
-        const pThumb = hand.landmarks[4];
-        const pIndex = hand.landmarks[8];
-        const midX = (1 - (pThumb.x + pIndex.x) / 2) * w;
-        const midY = ((pThumb.y + pIndex.y) / 2) * h;
-        ctx.beginPath();
-        ctx.arc(midX, midY, 14, 0, 2 * Math.PI);
-        ctx.strokeStyle = '#ffffff';
-        ctx.lineWidth = 2;
-        ctx.shadowColor = '#00f0ff';
-        ctx.shadowBlur = 15;
-        ctx.stroke();
+    const el = drawerVideoRef.current;
+    if (!el) return;
+    const stream = handTrackingService.getStream();
+    if (isCameraActive && stream) {
+      if (el.srcObject !== stream) {
+        el.srcObject = stream;
       }
-    });
-  }, [gestureResult, isCameraActive]);
+      el.muted = true;
+      el.playsInline = true;
+      void el.play?.().catch(() => {});
+    } else {
+      el.srcObject = null;
+    }
+  }, [isCameraActive]);
+
+  useEffect(() => {
+    renderHandSkeletonOverlay(
+      canvasRef.current,
+      gestureResult,
+      isCameraActive,
+      calibration.mirrorX
+    );
+  }, [gestureResult, isCameraActive, calibration.mirrorX]);
 
   const activeHand = gestureResult?.hands[0];
 
@@ -109,7 +67,11 @@ export const LeftVisionHUD: React.FC<LeftVisionHUDProps> = ({
       {/* 1. Camera & Skeleton Vision Viewport */}
       <HolographicPanel
         title="OPTICAL SENSOR // CV-MK7"
-        subtitle="MEDIAPIPE 3D HAND LANDMARKER"
+        subtitle={
+          cameraPermissionStatus
+            ? `MEDIAPIPE HAND LANDMARKER (${cameraPermissionStatus.toUpperCase()})`
+            : 'MEDIAPIPE 3D HAND LANDMARKER'
+        }
         icon={<Eye className="w-4 h-4 text-cyan-400" />}
         headerRight={
           <button
@@ -129,8 +91,10 @@ export const LeftVisionHUD: React.FC<LeftVisionHUDProps> = ({
       >
         <div className="relative w-full h-44 bg-black/80 rounded border border-cyan-500/30 overflow-hidden flex items-center justify-center">
           <video
-            ref={videoRef}
-            className={`absolute inset-0 w-full h-full object-cover transform -scale-x-100 opacity-35 filter brightness-110 contrast-125 ${
+            ref={drawerVideoRef}
+            className={`absolute inset-0 w-full h-full object-cover ${
+              calibration.mirrorX ? 'transform -scale-x-100' : ''
+            } opacity-75 filter brightness-110 contrast-110 ${
               isCameraActive ? 'block' : 'hidden'
             }`}
             playsInline

@@ -10,6 +10,7 @@ import { QuickCommandsPanel } from './QuickCommandsPanel';
 import { SystemMonitorPanel } from './SystemMonitorPanel';
 import { MemoryInsightsPanel } from './MemoryInsightsPanel';
 import { LLMStatusPanel } from './LLMStatusPanel';
+import { OpticalGesturePanel } from './OpticalGesturePanel';
 import { VoiceCommandDock } from './VoiceCommandDock';
 import { HologramSceneManager } from '../../three/HologramScene';
 import {
@@ -19,6 +20,8 @@ import {
   HologramVisualSettings,
   LaserTargetInfo
 } from '../../types/hologram';
+import { GestureDetectionResult } from '../../types/gesture';
+import { CameraPermissionStatus } from '../../services/handTracking';
 import { IntelligenceStateSnapshot } from '../../services/intelligenceEngine';
 
 interface CommandCenterDashboardProps {
@@ -43,6 +46,13 @@ interface CommandCenterDashboardProps {
   autostart: boolean;
   fps: number;
   isCameraActive: boolean;
+  cameraError: string | null;
+  cameraPermissionStatus: CameraPermissionStatus;
+  gestureResult: GestureDetectionResult | null;
+  mirrorX: boolean;
+  videoRef: React.RefObject<HTMLVideoElement | null>;
+  onToggleCamera: () => void;
+  onOpenGestureDrawer: () => void;
   isVoiceActive: boolean;
   onToggleVoice: () => void;
   intelligenceState: IntelligenceStateSnapshot;
@@ -84,6 +94,13 @@ export const CommandCenterDashboard: React.FC<CommandCenterDashboardProps> = ({
   autostart,
   fps,
   isCameraActive,
+  cameraError,
+  cameraPermissionStatus,
+  gestureResult,
+  mirrorX,
+  videoRef,
+  onToggleCamera,
+  onOpenGestureDrawer,
   isVoiceActive,
   onToggleVoice,
   intelligenceState,
@@ -107,7 +124,8 @@ export const CommandCenterDashboard: React.FC<CommandCenterDashboardProps> = ({
 
   const handleNavSelect = (nav: CommandCenterNavId) => {
     setActiveNav(nav);
-    if (nav === 'AI_CORE') onOpenBrain();
+    if (nav === 'OPTICAL') onOpenGestureDrawer();
+    else if (nav === 'AI_CORE') onOpenBrain();
     else if (nav === 'AGENTS' || nav === 'TASKS' || nav === 'WORKFLOWS') onOpenTasks();
     else if (nav === 'MEMORY') onOpenMemory();
     else if (nav === 'CONVERSATIONS' || nav === 'KNOWLEDGE') onOpenBrain();
@@ -134,6 +152,8 @@ export const CommandCenterDashboard: React.FC<CommandCenterDashboardProps> = ({
         <CommandSidebar
           activeNav={activeNav}
           onSelectNav={handleNavSelect}
+          isCameraActive={isCameraActive}
+          onToggleCamera={onToggleCamera}
           isVoiceActive={isVoiceActive}
           isFocusMode={isFocusMode}
           onToggleVoice={onToggleVoice}
@@ -143,9 +163,9 @@ export const CommandCenterDashboard: React.FC<CommandCenterDashboardProps> = ({
 
         {/* Structured Dashboard Grid Viewport */}
         <div className="flex-1 overflow-y-auto p-3.5 bg-[#02060c] space-y-3.5 no-scrollbar">
-          {/* Top Row: AI Core Overview (~20%), Holographic Core Panel (~55%), Live Intelligence Feed (~25%) */}
+          {/* Top Row: AI Core + Optical/Gesture (~25%), Holographic Core Panel (~50%), Live Intelligence Feed (~25%) */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 items-start">
-            <div className="lg:col-span-3">
+            <div className="lg:col-span-3 space-y-3.5">
               <AICoreOverview
                 intelligenceStatus={intelligenceState.status}
                 memoryCount={memoryCount}
@@ -155,6 +175,17 @@ export const CommandCenterDashboard: React.FC<CommandCenterDashboardProps> = ({
                 hasApiKey={true}
                 onOpenAIConfig={onOpenAIConfig}
                 onOpenMemory={onOpenMemory}
+                onToggleCamera={onToggleCamera}
+              />
+              <OpticalGesturePanel
+                isCameraActive={isCameraActive}
+                cameraError={cameraError}
+                cameraPermissionStatus={cameraPermissionStatus}
+                gestureResult={gestureResult}
+                mirrorX={mirrorX}
+                videoRef={videoRef}
+                onToggleCamera={onToggleCamera}
+                onOpenGestureDrawer={onOpenGestureDrawer}
               />
             </div>
             <div className="lg:col-span-6">

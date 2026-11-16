@@ -36,7 +36,7 @@ import {
   DesktopPermissionRequest,
   WorkspaceContextSnapshot
 } from './types/assistant';
-import { handTrackingService } from './services/handTracking';
+import { CameraPermissionStatus, handTrackingService } from './services/handTracking';
 import { gestureEngine } from './services/gestureEngine';
 import { spatialInteractionController } from './services/spatialInteractionController';
 import { audioService } from './services/soundFx';
@@ -217,6 +217,7 @@ export const App: React.FC = () => {
   // Camera & Tracking State
   const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
+  const [cameraPermissionStatus, setCameraPermissionStatus] = useState<CameraPermissionStatus>('unknown');
   const [gestureResult, setGestureResult] = useState<GestureDetectionResult | null>(null);
   const [fps, setFps] = useState<number>(60);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -373,7 +374,7 @@ export const App: React.FC = () => {
     return true;
   }, [appendMessage, refreshHistoryStatus, syncSpatialStates]);
 
-  // Wire up desktop bridge confirmation modal, speech status watcher & Phase 5 service lifecycle
+  // Wire up desktop bridge confirmation modal, speech status watcher, camera status & Phase 5 service lifecycle
   useEffect(() => {
     desktopBridge.setPromptCallback((req) => {
       setPermissionRequest(req);
@@ -382,6 +383,30 @@ export const App: React.FC = () => {
       setIsVoiceActive(active);
       setVoiceError(err || null);
     });
+    handTrackingService.setPermissionChangeCallback((status) => {
+      setCameraPermissionStatus(status);
+    });
+    handTrackingService.setInterruptionCallback((reason) => {
+      gestureEngine.recalibrateNeutral();
+      spatialInteractionController.reset();
+      lastGestureRef.current = 'NONE';
+      lastDispatchedGestureRef.current = null;
+      setIsCameraActive(false);
+      setCameraError(reason);
+      setGestureResult(null);
+      setActiveGestureFeedback(null);
+      setSpatialFeedback(null);
+      setLaserTarget(null);
+      if (sceneManagerRef.current) {
+        sceneManagerRef.current.clearRotationInertia();
+        sceneManagerRef.current.setInteractionFeedback({ isTrackingLost: false });
+        sceneManagerRef.current.setHandCentroid(undefined);
+        sceneManagerRef.current.updateLaserPointer(0, 0, false);
+      }
+      appendMessage('JARVIS', reason, 'ALERT');
+    });
+    void handTrackingService.getCameraPermissionState();
+
     fileAccessService.setHostCallbacks({
       onImport3DModels: async (files) => {
         if (importMeshFilesRef.current) {
@@ -392,13 +417,15 @@ export const App: React.FC = () => {
       }
     });
     return () => {
+      handTrackingService.setPermissionChangeCallback(null);
+      handTrackingService.setInterruptionCallback(null);
       handTrackingService.stop();
       speechService.stopListening();
       fileAccessService.setHostCallbacks({});
       fileAccessService.disposeAllPreviewUrls();
       musicService.stop();
     };
-  }, []);
+  }, [appendMessage]);
 
   // Update states initially
   useEffect(() => {
@@ -1593,6 +1620,13 @@ export const App: React.FC = () => {
     speechService.handleTranscript(text, 'CONSOLE');
   }, []);
 
+  // Keep active camera stream bound across WORKSPACE <-> STANDBY transitions
+  useEffect(() => {
+    if (isCameraActive && videoRef.current) {
+      void handTrackingService.attachVideoElement(videoRef.current);
+    }
+  }, [isCameraActive, mode]);
+
   // Camera & Tracking toggle with clear permission feedback
   const handleToggleCamera = useCallback(async () => {
     if (isCameraActive) {
@@ -1615,7 +1649,12 @@ export const App: React.FC = () => {
       }
       appendMessage('JARVIS', 'Optical sensor deactivated. Camera hardware disconnected.', 'INFO');
     } else {
-      if (!videoRef.current) return;
+      if (!videoRef.current) {
+        const msg = 'Optical video viewport is not ready yet. Please retry in workspace mode.';
+        setCameraError(msg);
+        appendMessage('JARVIS', msg, 'ALERT');
+        return;
+      }
       setCameraError(null);
       handTrackingService.setConfidenceThreshold(calibration.confidenceThreshold);
       const started = await handTrackingService.startCamera(
@@ -2288,6 +2327,16 @@ export const App: React.FC = () => {
           autostart={autostart}
           fps={fps}
           isCameraActive={isCameraActive}
+          cameraError={cameraError}
+          cameraPermissionStatus={cameraPermissionStatus}
+          gestureResult={gestureResult}
+          mirrorX={calibration.mirrorX}
+          videoRef={videoRef}
+          onToggleCamera={() => void handleToggleCamera()}
+          onOpenGestureDrawer={() => {
+            setMode('WORKSPACE');
+            setHudState((prev) => toggleDrawerState(prev, 'GESTURE'));
+          }}
           isVoiceActive={isVoiceActive}
           onToggleVoice={handleToggleVoice}
           intelligenceState={intelligenceState}
@@ -2362,6 +2411,7 @@ export const App: React.FC = () => {
                 <LeftVisionHUD
                   isCameraActive={isCameraActive}
                   cameraError={cameraError}
+                  cameraPermissionStatus={cameraPermissionStatus}
                   onToggleCamera={handleToggleCamera}
                   gestureResult={gestureResult}
                   calibration={calibration}
@@ -2705,9 +2755,9 @@ export const App: React.FC = () => {
         </div>
       )}
 
-      {/* Hidden video element preserved when Optical drawer is collapsed so camera tracking keeps running */}
-      {!showLeftDrawer && (
-        <video ref={videoRef} className="hidden" playsInline muted />
+      {/* Primary video element lives visibly inside OpticalGesturePanel; keep fallback only when in STANDBY */}
+      {mode === 'STANDBY' && (
+        <video ref={videoRef} className="sr-only pointer-events-none" playsInline muted />
       )}
 
 

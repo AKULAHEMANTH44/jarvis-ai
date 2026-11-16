@@ -11,6 +11,7 @@ interface AICoreOverviewProps {
   hasApiKey: boolean;
   onOpenAIConfig: () => void;
   onOpenMemory: () => void;
+  onToggleCamera?: () => void;
 }
 
 export const AICoreOverview: React.FC<AICoreOverviewProps> = ({
@@ -21,7 +22,8 @@ export const AICoreOverview: React.FC<AICoreOverviewProps> = ({
   provider,
   hasApiKey,
   onOpenAIConfig,
-  onOpenMemory
+  onOpenMemory,
+  onToggleCamera
 }) => {
   return (
     <div className="bg-[#020814]/90 border border-cyan-500/30 rounded-xl p-3.5 flex flex-col space-y-3 shadow-[0_0_20px_rgba(0,240,255,0.1)]">
@@ -55,12 +57,17 @@ export const AICoreOverview: React.FC<AICoreOverviewProps> = ({
           </span>
         </div>
 
-        <div className="p-2 rounded bg-black/40 border border-cyan-500/20">
+        <button
+          type="button"
+          onClick={onToggleCamera}
+          title={isCameraActive ? 'Disable Optical Sensor' : 'Enable Optical Sensor'}
+          className="p-2 rounded bg-black/40 border border-cyan-500/20 text-left hover:border-cyan-400/50 transition-colors"
+        >
           <span className="text-cyan-400/60 block text-[9px] font-orbitron">OPTICAL TRACKING</span>
           <span className={isCameraActive ? 'text-emerald-400 font-semibold' : 'text-cyan-300'}>
             {isCameraActive ? 'ACTIVE' : 'OFFLINE'}
           </span>
-        </div>
+        </button>
       </div>
 
       <div className="flex items-center justify-between pt-1 border-t border-cyan-500/20 text-[10px] font-mono">

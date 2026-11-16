@@ -63,7 +63,7 @@ export const HolographicCorePanel: React.FC<HolographicCorePanelProps> = ({
   return (
     <div
       className={`relative bg-[#020814]/95 border border-cyan-500/40 rounded-xl overflow-hidden flex flex-col shadow-[0_0_28px_rgba(0,240,255,0.18)] ${
-        isFocusMode ? 'fixed inset-4 z-50' : 'h-[360px] lg:h-[400px]'
+        isFocusMode ? 'fixed inset-4 z-50' : 'h-[360px] lg:h-[460px]'
       }`}
     >
       {/* Panel Header */}
