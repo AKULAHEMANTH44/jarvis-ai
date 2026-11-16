@@ -1705,8 +1705,17 @@ export class IntelligenceEngine {
       }
 
       // 8. External AI Provider Reasoning
-      if (cfg.provider !== 'LOCAL' && contextualAI.hasApiKey()) {
-        this.setStatus('ANALYZING', `Querying ${cfg.provider} (${cfg.modelName}) with session context...`);
+      const isServerBacked =
+        cfg.provider === 'BACKEND' ||
+        ((cfg.provider === 'GEMINI' || cfg.provider === 'GROQ') && !contextualAI.hasApiKey());
+      const shouldQueryExternal =
+        cfg.provider !== 'LOCAL' && (contextualAI.hasApiKey() || isServerBacked);
+
+      if (shouldQueryExternal) {
+        const providerLabel = isServerBacked
+          ? `Backend (${cfg.backendMode || 'AUTO'})`
+          : `${cfg.provider} (${cfg.modelName})`;
+        this.setStatus('ANALYZING', `Querying ${providerLabel} with session context...`);
         const systemPrompt = this.buildSystemPrompt(params.snapshot, rawInput, groundedToolSummary);
         const messages = conversationManager.buildModelMessages(systemPrompt, 12);
 
@@ -1746,7 +1755,7 @@ export class IntelligenceEngine {
             reply: extRes.text,
             status: 'RESPONDING',
             classification,
-            providerUsed: cfg.provider,
+            providerUsed: extRes.provider || cfg.provider,
             isExternalModel: true,
             toolRecords,
             memoryCandidate,

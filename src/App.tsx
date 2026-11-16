@@ -1940,9 +1940,12 @@ export const App: React.FC = () => {
       isCameraActive,
       isVoiceActive,
       hasLabError: Boolean(labError),
-      labError,
       provider: cfg.provider,
-      hasProviderKey: contextualAI.hasApiKey(),
+      hasProviderKey:
+        contextualAI.hasApiKey() ||
+        cfg.provider === 'BACKEND' ||
+        cfg.provider === 'GEMINI' ||
+        cfg.provider === 'GROQ',
       modelName: cfg.modelName,
       notesPreview: notes.slice(0, 240),
       isInteracting: isCanvasInteracting

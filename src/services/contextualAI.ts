@@ -1,11 +1,12 @@
-import { AIProviderConfig } from '../types/assistant';
+import { AIProviderConfig, BackendLLMStatusResponse, LLMMode } from '../types/assistant';
 
 const AI_CONFIG_KEY = 'jarvis_ai_provider_config';
 
 export const DEFAULT_AI_CONFIG: AIProviderConfig = {
-  provider: 'LOCAL',
-  modelName: 'JARVIS Local Core MK-7',
-  temperature: 0.7
+  provider: 'BACKEND',
+  modelName: 'JARVIS Dual-Neural Core',
+  temperature: 0.7,
+  backendMode: 'AUTO'
 };
 
 function isValidExternalEndpoint(url: string): boolean {
@@ -30,6 +31,7 @@ export class ContextualAIService {
   // Volatile in-memory API key only — never persisted to localStorage or disk
   private volatileApiKey: string = '';
   private conversationHistory: { role: 'user' | 'assistant' | 'system'; content: string }[] = [];
+  private cachedBackendStatus: BackendLLMStatusResponse | null = null;
 
   constructor() {
     this.config = this.loadConfig();
@@ -61,7 +63,8 @@ export class ContextualAIService {
             provider: parsed.provider || DEFAULT_AI_CONFIG.provider,
             modelName: parsed.modelName || DEFAULT_AI_CONFIG.modelName,
             customEndpoint: parsed.customEndpoint,
-            temperature: typeof parsed.temperature === 'number' ? parsed.temperature : DEFAULT_AI_CONFIG.temperature
+            temperature: typeof parsed.temperature === 'number' ? parsed.temperature : DEFAULT_AI_CONFIG.temperature,
+            backendMode: parsed.backendMode || DEFAULT_AI_CONFIG.backendMode
           };
         }
       } catch {
@@ -85,7 +88,8 @@ export class ContextualAIService {
       provider: newConfig.provider ?? this.config.provider,
       modelName: newConfig.modelName ?? this.config.modelName,
       customEndpoint: sanitizedEndpoint || undefined,
-      temperature: newConfig.temperature ?? this.config.temperature
+      temperature: newConfig.temperature ?? this.config.temperature,
+      backendMode: newConfig.backendMode ?? this.config.backendMode
     };
 
     if (typeof window !== 'undefined' && window.localStorage) {
@@ -95,13 +99,45 @@ export class ContextualAIService {
           provider: this.config.provider,
           modelName: this.config.modelName,
           customEndpoint: this.config.customEndpoint,
-          temperature: this.config.temperature
+          temperature: this.config.temperature,
+          backendMode: this.config.backendMode
         };
         window.localStorage.setItem(AI_CONFIG_KEY, JSON.stringify(safePersist));
       } catch {
         console.warn('Failed to save non-secret AI config.');
       }
     }
+  }
+
+  public async getBackendStatus(mode?: LLMMode): Promise<BackendLLMStatusResponse | null> {
+    try {
+      const url = mode ? `/api/llm/status?mode=${encodeURIComponent(mode)}` : '/api/llm/status';
+      const res = await fetch(url);
+      if (!res.ok) return null;
+      const data: BackendLLMStatusResponse = await res.json();
+      this.cachedBackendStatus = data;
+      return data;
+    } catch {
+      return null;
+    }
+  }
+
+  public async setBackendMode(mode: LLMMode): Promise<boolean> {
+    this.saveConfig({ backendMode: mode });
+    try {
+      const res = await fetch('/api/llm/mode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode })
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  public getCachedBackendStatus(): BackendLLMStatusResponse | null {
+    return this.cachedBackendStatus;
   }
 
   public clearApiKey() {
@@ -261,23 +297,25 @@ export class ContextualAIService {
     messages: { role: 'system' | 'user' | 'assistant'; content: string }[];
     signal?: AbortSignal;
     timeoutMs?: number;
+    mode?: LLMMode;
   }): Promise<{
     ok: boolean;
     text: string;
     error?: string;
     aborted?: boolean;
     provider: AIProviderConfig['provider'];
+    fallbackTriggered?: boolean;
+    model?: string;
   }> {
     const provider = this.config.provider;
-    if (provider === 'LOCAL' || !this.volatileApiKey) {
+
+    // 1. Explicit LOCAL mode
+    if (provider === 'LOCAL') {
       return {
         ok: false,
         text: '',
-        error:
-          provider === 'LOCAL'
-            ? 'Provider is set to LOCAL mode.'
-            : `No session API key supplied for ${provider}.`,
-        provider
+        error: 'Provider is set to LOCAL mode.',
+        provider: 'LOCAL'
       };
     }
 
@@ -285,7 +323,7 @@ export class ContextualAIService {
       return { ok: false, text: '', error: 'Request cancelled.', aborted: true, provider };
     }
 
-    const timeoutMs = options.timeoutMs ?? 15000;
+    const timeoutMs = options.timeoutMs ?? 25000;
     const timeoutController = new AbortController();
     let timedOut = false;
     const timer = setTimeout(() => {
@@ -295,6 +333,88 @@ export class ContextualAIService {
 
     const onExternalAbort = () => timeoutController.abort();
     options.signal?.addEventListener('abort', onExternalAbort, { once: true });
+
+    // 2. BACKEND mode or server-backed provider (when no volatile client key is entered)
+    const isServerBacked =
+      provider === 'BACKEND' ||
+      ((provider === 'GEMINI' || provider === 'GROQ') && !this.volatileApiKey);
+
+    if (isServerBacked) {
+      try {
+        const mode: LLMMode =
+          options.mode ||
+          this.config.backendMode ||
+          (provider === 'GROQ' ? 'GROQ_ONLY' : provider === 'GEMINI' ? 'GEMINI_ONLY' : 'AUTO');
+
+        const res = await fetch('/api/llm/chat', {
+          method: 'POST',
+          signal: timeoutController.signal,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            messages: options.messages,
+            mode,
+            temperature: this.config.temperature,
+            model: this.config.modelName && !this.config.modelName.includes('Core')
+              ? this.config.modelName
+              : undefined
+          })
+        });
+
+        const data = await res.json().catch(() => null);
+
+        if (!res.ok || !data?.ok) {
+          return {
+            ok: false,
+            text: '',
+            error: data?.error || `Server backend returned HTTP ${res.status}`,
+            provider: (data?.provider as AIProviderConfig['provider']) || 'BACKEND',
+            fallbackTriggered: Boolean(data?.fallbackTriggered),
+            model: data?.model
+          };
+        }
+
+        return {
+          ok: true,
+          text: data.text || '',
+          provider: (data.provider as AIProviderConfig['provider']) || 'BACKEND',
+          fallbackTriggered: Boolean(data.fallbackTriggered),
+          model: data.model
+        };
+      } catch (err: unknown) {
+        if (options.signal?.aborted) {
+          return { ok: false, text: '', error: 'Request cancelled by user.', aborted: true, provider };
+        }
+        if (timedOut || (err instanceof Error && err.name === 'AbortError')) {
+          return {
+            ok: false,
+            text: '',
+            error: `Backend request timed out after ${Math.round(timeoutMs / 1000)}s.`,
+            provider
+          };
+        }
+        return {
+          ok: false,
+          text: '',
+          error: 'Backend communication encountered a network or connection error.',
+          provider
+        };
+      } finally {
+        clearTimeout(timer);
+        options.signal?.removeEventListener('abort', onExternalAbort);
+      }
+    }
+
+    // 3. Client volatile key check for external client-side calls
+    if (!this.volatileApiKey) {
+      clearTimeout(timer);
+      options.signal?.removeEventListener('abort', onExternalAbort);
+      return {
+        ok: false,
+        text: '',
+        error: `No session API key supplied for ${provider}.`,
+        provider
+      };
+    }
 
     try {
       const systemContent = options.messages
@@ -489,9 +609,13 @@ export class ContextualAIService {
     }
   }
 
-  // Connects to external LLM API if key is supplied by user in volatile memory
+  // Connects to external LLM API or secure backend
   public async queryExternalAI(prompt: string, signal?: AbortSignal): Promise<string> {
-    if (this.config.provider === 'LOCAL' || !this.volatileApiKey) {
+    const isServer =
+      this.config.provider === 'BACKEND' ||
+      ((this.config.provider === 'GEMINI' || this.config.provider === 'GROQ') && !this.volatileApiKey);
+
+    if (this.config.provider === 'LOCAL' || (!isServer && !this.volatileApiKey)) {
       return '';
     }
 

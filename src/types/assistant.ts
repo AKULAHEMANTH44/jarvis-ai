@@ -72,12 +72,36 @@ export interface DesktopPermissionRequest {
   timestamp: number;
 }
 
+export type LLMMode = 'AUTO' | 'GEMINI_ONLY' | 'GROQ_ONLY';
+
+export type ProviderStatusState = 'connected' | 'not_configured' | 'error' | 'rate_limited' | 'disabled';
+
+export interface ProviderStatusDetail {
+  configured: boolean;
+  model: string;
+  status: ProviderStatusState;
+  message?: string;
+  lastChecked: number;
+}
+
+export interface BackendLLMStatusResponse {
+  ok: boolean;
+  mode: LLMMode;
+  primaryProvider: 'GEMINI';
+  fallbackProvider: 'GROQ';
+  gemini: ProviderStatusDetail;
+  groq: ProviderStatusDetail;
+  activeProvider: 'GEMINI' | 'GROQ' | 'NONE';
+  serverTime: number;
+}
+
 export interface AIProviderConfig {
-  provider: 'LOCAL' | 'OPENAI' | 'ANTHROPIC' | 'GEMINI';
+  provider: 'LOCAL' | 'BACKEND' | 'OPENAI' | 'ANTHROPIC' | 'GEMINI' | 'GROQ';
   apiKey?: string;
   modelName: string;
   customEndpoint?: string;
   temperature: number;
+  backendMode?: LLMMode;
 }
 
 // ============================================================================
@@ -107,6 +131,8 @@ export type IntentCategory =
   | 'DOCUMENTATION'
   | 'MEMORY_MANAGEMENT'
   | 'FILE_ACTION'
+  | 'FOLDER_ACTION'
+  | 'APPLICATION_LAUNCH'
   | 'BROWSER_ACTION'
   | 'WEB_SEARCH'
   | 'MUSIC_ACTION'
@@ -321,9 +347,12 @@ export interface PendingToolApproval {
 
 export type PermissionCategory =
   | 'FILE_ACCESS'
+  | 'FOLDER_ACCESS'
+  | 'APPLICATION_LAUNCH'
   | 'BROWSER_ACCESS'
   | 'WEB_SEARCH'
   | 'MUSIC_PLAYBACK'
+  | 'MUSIC_CONTROL'
   | 'EXTERNAL_NAVIGATION'
   | 'WORKSPACE_ACCESS';
 

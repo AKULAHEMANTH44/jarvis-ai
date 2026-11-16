@@ -1,9 +1,37 @@
 import { DesktopPermissionRequest, SystemStatusTelemetry } from '../types/assistant';
 import { audioService } from './soundFx';
+import { permissionManager } from './permissionManager';
 
-class DesktopBridgeService {
-  private pendingRequests: Map<string, { req: DesktopPermissionRequest; resolve: (approved: boolean) => void; timeout: ReturnType<typeof setTimeout> }> = new Map();
+export interface DesktopExecutionResult {
+  ok: boolean;
+  action: string;
+  target: string;
+  verified: boolean;
+  summary: string;
+  pid?: number;
+  error?: string;
+  details?: Record<string, unknown>;
+}
+
+export interface ApprovedAppInfo {
+  id: string;
+  displayName: string;
+  description: string;
+}
+
+export class DesktopBridgeService {
+  private pendingRequests: Map<
+    string,
+    { req: DesktopPermissionRequest; resolve: (approved: boolean) => void; timeout: ReturnType<typeof setTimeout> }
+  > = new Map();
   private onPermissionPrompt?: (req: DesktopPermissionRequest) => void;
+
+  public isElectron(): boolean {
+    return (
+      typeof window !== 'undefined' &&
+      Boolean((window as unknown as { jarvisDesktop?: { isElectron: boolean } }).jarvisDesktop?.isElectron)
+    );
+  }
 
   public setPromptCallback(cb: (req: DesktopPermissionRequest) => void) {
     this.onPermissionPrompt = cb;
@@ -47,6 +75,414 @@ class DesktopBridgeService {
     clearTimeout(entry.timeout);
     this.pendingRequests.delete(id);
     entry.resolve(approved);
+  }
+
+  // =========================================================================
+  // Phase 7 — Windows Desktop Automation & Permission Verification
+  // =========================================================================
+
+  /**
+   * Launch an approved application with strict single-use permission verification
+   */
+  public async launchApplication(
+    applicationId: string,
+    permissionId: string,
+    args: string[] = []
+  ): Promise<DesktopExecutionResult> {
+    const cleanAppId = applicationId.trim().toUpperCase().replace(/[\s-]+/g, '_');
+    const auth = permissionManager.beginAuthorizedExecution(
+      permissionId,
+      'APPLICATION_LAUNCH',
+      cleanAppId
+    );
+
+    if (!auth.authorized) {
+      audioService.playChirp(600);
+      return {
+        ok: false,
+        action: 'APPLICATION_LAUNCH',
+        target: cleanAppId,
+        verified: false,
+        summary: auth.error || 'Blocked: application launch not authorized.',
+        error: auth.error || 'PERMISSION_DENIED'
+      };
+    }
+
+    try {
+      // 1. Electron Desktop Bridge
+      if (this.isElectron()) {
+        const electronBridge = (window as unknown as {
+          jarvisDesktop: { launchApp: (id: string, a: string[]) => Promise<DesktopExecutionResult> };
+        }).jarvisDesktop;
+        const res = await electronBridge.launchApp(cleanAppId, args);
+        permissionManager.completeExecution(permissionId, res.ok, res.summary, res.error);
+        if (res.ok) audioService.playActivationWhoosh();
+        else audioService.playChirp(600);
+        return res;
+      }
+
+      // 2. Full-Stack Node.js Backend API
+      const response = await fetch('/api/desktop/launch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ applicationId: cleanAppId, args })
+      });
+
+      const data = (await response.json()) as DesktopExecutionResult;
+      permissionManager.completeExecution(permissionId, data.ok, data.summary, data.error);
+      if (data.ok) audioService.playActivationWhoosh();
+      else audioService.playChirp(600);
+      return data;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      permissionManager.completeExecution(permissionId, false, `Failed to launch application: ${msg}`, msg);
+      audioService.playChirp(600);
+      return {
+        ok: false,
+        action: 'APPLICATION_LAUNCH',
+        target: cleanAppId,
+        verified: false,
+        summary: `Application launch failed: ${msg}`,
+        error: msg
+      };
+    }
+  }
+
+  /**
+   * Open an approved file with strict single-use permission verification
+   */
+  public async openFile(filePath: string, permissionId: string): Promise<DesktopExecutionResult> {
+    const cleanPath = filePath.trim();
+    const auth = permissionManager.beginAuthorizedExecution(
+      permissionId,
+      'FILE_ACCESS',
+      cleanPath
+    );
+
+    if (!auth.authorized) {
+      audioService.playChirp(600);
+      return {
+        ok: false,
+        action: 'FILE_ACCESS',
+        target: cleanPath,
+        verified: false,
+        summary: auth.error || 'Blocked: file access not authorized.',
+        error: auth.error || 'PERMISSION_DENIED'
+      };
+    }
+
+    try {
+      if (this.isElectron()) {
+        const electronBridge = (window as unknown as {
+          jarvisDesktop: { openFile: (p: string) => Promise<DesktopExecutionResult> };
+        }).jarvisDesktop;
+        const res = await electronBridge.openFile(cleanPath);
+        permissionManager.completeExecution(permissionId, res.ok, res.summary, res.error);
+        if (res.ok) audioService.playActivationWhoosh();
+        else audioService.playChirp(600);
+        return res;
+      }
+
+      const response = await fetch('/api/desktop/file/open', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filePath: cleanPath })
+      });
+
+      const data = (await response.json()) as DesktopExecutionResult;
+      permissionManager.completeExecution(permissionId, data.ok, data.summary, data.error);
+      if (data.ok) audioService.playActivationWhoosh();
+      else audioService.playChirp(600);
+      return data;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      permissionManager.completeExecution(permissionId, false, `Failed to open file: ${msg}`, msg);
+      audioService.playChirp(600);
+      return {
+        ok: false,
+        action: 'FILE_ACCESS',
+        target: cleanPath,
+        verified: false,
+        summary: `File open failed: ${msg}`,
+        error: msg
+      };
+    }
+  }
+
+  /**
+   * Open an approved folder in the system file manager with permission verification
+   */
+  public async openFolder(folderPath: string, permissionId: string): Promise<DesktopExecutionResult> {
+    const cleanPath = folderPath.trim();
+    const auth = permissionManager.beginAuthorizedExecution(
+      permissionId,
+      'FOLDER_ACCESS',
+      cleanPath
+    );
+
+    if (!auth.authorized) {
+      audioService.playChirp(600);
+      return {
+        ok: false,
+        action: 'FOLDER_ACCESS',
+        target: cleanPath,
+        verified: false,
+        summary: auth.error || 'Blocked: folder access not authorized.',
+        error: auth.error || 'PERMISSION_DENIED'
+      };
+    }
+
+    try {
+      if (this.isElectron()) {
+        const electronBridge = (window as unknown as {
+          jarvisDesktop: { openFolder: (p: string) => Promise<DesktopExecutionResult> };
+        }).jarvisDesktop;
+        const res = await electronBridge.openFolder(cleanPath);
+        permissionManager.completeExecution(permissionId, res.ok, res.summary, res.error);
+        if (res.ok) audioService.playActivationWhoosh();
+        else audioService.playChirp(600);
+        return res;
+      }
+
+      const response = await fetch('/api/desktop/folder/open', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folderPath: cleanPath })
+      });
+
+      const data = (await response.json()) as DesktopExecutionResult;
+      permissionManager.completeExecution(permissionId, data.ok, data.summary, data.error);
+      if (data.ok) audioService.playActivationWhoosh();
+      else audioService.playChirp(600);
+      return data;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      permissionManager.completeExecution(permissionId, false, `Failed to open folder: ${msg}`, msg);
+      audioService.playChirp(600);
+      return {
+        ok: false,
+        action: 'FOLDER_ACCESS',
+        target: cleanPath,
+        verified: false,
+        summary: `Folder open failed: ${msg}`,
+        error: msg
+      };
+    }
+  }
+
+  /**
+   * Open the default web browser with permission verification
+   */
+  public async openBrowser(url: string, permissionId: string): Promise<DesktopExecutionResult> {
+    const cleanUrl = url.trim();
+    const auth = permissionManager.beginAuthorizedExecution(
+      permissionId,
+      'BROWSER_ACCESS',
+      cleanUrl
+    );
+
+    if (!auth.authorized) {
+      audioService.playChirp(600);
+      return {
+        ok: false,
+        action: 'BROWSER_ACCESS',
+        target: cleanUrl,
+        verified: false,
+        summary: auth.error || 'Blocked: browser access not authorized.',
+        error: auth.error || 'PERMISSION_DENIED'
+      };
+    }
+
+    try {
+      if (this.isElectron()) {
+        const electronBridge = (window as unknown as {
+          jarvisDesktop: { openBrowser: (u: string) => Promise<DesktopExecutionResult> };
+        }).jarvisDesktop;
+        const res = await electronBridge.openBrowser(cleanUrl);
+        permissionManager.completeExecution(permissionId, res.ok, res.summary, res.error);
+        if (res.ok) audioService.playActivationWhoosh();
+        else audioService.playChirp(600);
+        return res;
+      }
+
+      const response = await fetch('/api/desktop/browser/open', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: cleanUrl })
+      });
+
+      const data = (await response.json()) as DesktopExecutionResult;
+      permissionManager.completeExecution(permissionId, data.ok, data.summary, data.error);
+      if (data.ok) audioService.playActivationWhoosh();
+      else audioService.playChirp(600);
+      return data;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      permissionManager.completeExecution(permissionId, false, `Failed to open browser: ${msg}`, msg);
+      audioService.playChirp(600);
+      return {
+        ok: false,
+        action: 'BROWSER_ACCESS',
+        target: cleanUrl,
+        verified: false,
+        summary: `Browser open failed: ${msg}`,
+        error: msg
+      };
+    }
+  }
+
+  /**
+   * Perform an authorized web search in default browser
+   */
+  public async searchWeb(query: string, permissionId: string, engine = 'google'): Promise<DesktopExecutionResult> {
+    const cleanQuery = query.trim();
+    const auth = permissionManager.beginAuthorizedExecution(
+      permissionId,
+      'WEB_SEARCH',
+      cleanQuery
+    );
+
+    if (!auth.authorized) {
+      audioService.playChirp(600);
+      return {
+        ok: false,
+        action: 'WEB_SEARCH',
+        target: cleanQuery,
+        verified: false,
+        summary: auth.error || 'Blocked: web search not authorized.',
+        error: auth.error || 'PERMISSION_DENIED'
+      };
+    }
+
+    try {
+      if (this.isElectron()) {
+        const electronBridge = (window as unknown as {
+          jarvisDesktop: { searchWeb: (q: string, e: string) => Promise<DesktopExecutionResult> };
+        }).jarvisDesktop;
+        const res = await electronBridge.searchWeb(cleanQuery, engine);
+        permissionManager.completeExecution(permissionId, res.ok, res.summary, res.error);
+        if (res.ok) audioService.playActivationWhoosh();
+        else audioService.playChirp(600);
+        return res;
+      }
+
+      const response = await fetch('/api/desktop/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: cleanQuery, engine })
+      });
+
+      const data = (await response.json()) as DesktopExecutionResult;
+      permissionManager.completeExecution(permissionId, data.ok, data.summary, data.error);
+      if (data.ok) audioService.playActivationWhoosh();
+      else audioService.playChirp(600);
+      return data;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      permissionManager.completeExecution(permissionId, false, `Search failed: ${msg}`, msg);
+      audioService.playChirp(600);
+      return {
+        ok: false,
+        action: 'WEB_SEARCH',
+        target: cleanQuery,
+        verified: false,
+        summary: `Web search failed: ${msg}`,
+        error: msg
+      };
+    }
+  }
+
+  /**
+   * Launch approved music application or start music playback
+   */
+  public async launchMusic(musicTarget: string, permissionId: string): Promise<DesktopExecutionResult> {
+    const cleanTarget = musicTarget.trim();
+    const auth = permissionManager.beginAuthorizedExecution(
+      permissionId,
+      'MUSIC_CONTROL',
+      cleanTarget
+    );
+
+    if (!auth.authorized) {
+      audioService.playChirp(600);
+      return {
+        ok: false,
+        action: 'MUSIC_CONTROL',
+        target: cleanTarget,
+        verified: false,
+        summary: auth.error || 'Blocked: music control not authorized.',
+        error: auth.error || 'PERMISSION_DENIED'
+      };
+    }
+
+    try {
+      if (this.isElectron()) {
+        const electronBridge = (window as unknown as {
+          jarvisDesktop: { launchMusic: (t: string) => Promise<DesktopExecutionResult> };
+        }).jarvisDesktop;
+        const res = await electronBridge.launchMusic(cleanTarget);
+        permissionManager.completeExecution(permissionId, res.ok, res.summary, res.error);
+        if (res.ok) audioService.playActivationWhoosh();
+        else audioService.playChirp(600);
+        return res;
+      }
+
+      const response = await fetch('/api/desktop/music', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ musicTarget: cleanTarget })
+      });
+
+      const data = (await response.json()) as DesktopExecutionResult;
+      permissionManager.completeExecution(permissionId, data.ok, data.summary, data.error);
+      if (data.ok) audioService.playActivationWhoosh();
+      else audioService.playChirp(600);
+      return data;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      permissionManager.completeExecution(permissionId, false, `Music launch failed: ${msg}`, msg);
+      audioService.playChirp(600);
+      return {
+        ok: false,
+        action: 'MUSIC_CONTROL',
+        target: cleanTarget,
+        verified: false,
+        summary: `Music application launch failed: ${msg}`,
+        error: msg
+      };
+    }
+  }
+
+  /**
+   * Search for files within an authorized folder
+   */
+  public async findFilesInFolder(
+    folderPath: string,
+    filterPattern?: string
+  ): Promise<{ ok: boolean; folder: string; files: string[]; error?: string }> {
+    try {
+      if (this.isElectron()) {
+        const electronBridge = (window as unknown as {
+          jarvisDesktop: { findFilesInFolder: (f: string, p?: string) => Promise<{ ok: boolean; folder: string; files: string[]; error?: string }> };
+        }).jarvisDesktop;
+        return await electronBridge.findFilesInFolder(folderPath, filterPattern);
+      }
+
+      const response = await fetch('/api/desktop/folder/find', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folderPath, filterPattern })
+      });
+
+      return await response.json();
+    } catch (err: unknown) {
+      return {
+        ok: false,
+        folder: folderPath,
+        files: [],
+        error: err instanceof Error ? err.message : String(err)
+      };
+    }
   }
 
   // File Read via Native File System Access API
@@ -160,7 +596,7 @@ class DesktopBridgeService {
       };
 
       if (nav.hardwareConcurrency) {
-        telemetry.cpuLoad = Math.min(100, Math.round(35 + (nav.hardwareConcurrency * 4)));
+        telemetry.cpuLoad = Math.min(100, Math.round(35 + nav.hardwareConcurrency * 4));
       }
       if (nav.deviceMemory) {
         telemetry.memoryUsage = Math.min(100, Math.round(40 + (16 / nav.deviceMemory) * 10));

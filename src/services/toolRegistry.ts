@@ -1263,6 +1263,214 @@ export class ToolRegistry {
         return { ok: false, verified: false, summary: `Unknown music action "${action}".`, error: 'UNKNOWN_ACTION' };
       }
     });
+
+    // =========================================================================
+    // Phase 7 — Windows Desktop Automation & Application Tools
+    // =========================================================================
+
+    this.registerTool({
+      name: 'launch_desktop_application',
+      description: 'Launch an approved Windows/Desktop application (VS_CODE, NOTEPAD, CALCULATOR, EXPLORER, BROWSER, SPOTIFY) after explicit APPLICATION_LAUNCH permission.',
+      permissionLevel: 'CONSEQUENTIAL',
+      requiresConfirmation: true,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          applicationId: {
+            type: 'string',
+            description: 'Application identifier (VS_CODE, NOTEPAD, CALCULATOR, EXPLORER, BROWSER, SPOTIFY).'
+          },
+          permissionId: {
+            type: 'string',
+            description: 'Approved APPLICATION_LAUNCH permission ID.'
+          },
+          args: {
+            type: 'array',
+            description: 'Optional safe command line arguments.'
+          }
+        },
+        required: ['applicationId', 'permissionId']
+      },
+      execute: async (args) => {
+        const appId = String(args.applicationId || '');
+        const permissionId = String(args.permissionId || '');
+        const customArgs = Array.isArray(args.args) ? (args.args as string[]) : [];
+        const res = await desktopBridge.launchApplication(appId, permissionId, customArgs);
+        return {
+          ok: res.ok,
+          verified: res.verified,
+          summary: res.summary,
+          data: { desktopResult: res },
+          error: res.error
+        };
+      }
+    });
+
+    this.registerTool({
+      name: 'open_desktop_folder',
+      description: 'Open a verified local directory/folder in Windows Explorer after explicit FOLDER_ACCESS permission.',
+      permissionLevel: 'CONSEQUENTIAL',
+      requiresConfirmation: true,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          folderPath: { type: 'string', description: 'Validated path to folder.' },
+          permissionId: { type: 'string', description: 'Approved FOLDER_ACCESS permission ID.' }
+        },
+        required: ['folderPath', 'permissionId']
+      },
+      execute: async (args) => {
+        const folderPath = String(args.folderPath || '');
+        const permissionId = String(args.permissionId || '');
+        const res = await desktopBridge.openFolder(folderPath, permissionId);
+        return {
+          ok: res.ok,
+          verified: res.verified,
+          summary: res.summary,
+          data: { desktopResult: res },
+          error: res.error
+        };
+      }
+    });
+
+    this.registerTool({
+      name: 'open_desktop_file_system',
+      description: 'Open a verified file on the local filesystem using its default application after explicit FILE_ACCESS permission.',
+      permissionLevel: 'CONSEQUENTIAL',
+      requiresConfirmation: true,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: { type: 'string', description: 'Validated path to file.' },
+          permissionId: { type: 'string', description: 'Approved FILE_ACCESS permission ID.' }
+        },
+        required: ['filePath', 'permissionId']
+      },
+      execute: async (args) => {
+        const filePath = String(args.filePath || '');
+        const permissionId = String(args.permissionId || '');
+        const res = await desktopBridge.openFile(filePath, permissionId);
+        return {
+          ok: res.ok,
+          verified: res.verified,
+          summary: res.summary,
+          data: { desktopResult: res },
+          error: res.error
+        };
+      }
+    });
+
+    this.registerTool({
+      name: 'open_desktop_browser',
+      description: 'Open default web browser with a validated URL after explicit BROWSER_ACCESS permission.',
+      permissionLevel: 'CONSEQUENTIAL',
+      requiresConfirmation: true,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'Validated HTTP/HTTPS URL.' },
+          permissionId: { type: 'string', description: 'Approved BROWSER_ACCESS permission ID.' }
+        },
+        required: ['url', 'permissionId']
+      },
+      execute: async (args) => {
+        const url = String(args.url || '');
+        const permissionId = String(args.permissionId || '');
+        const res = await desktopBridge.openBrowser(url, permissionId);
+        return {
+          ok: res.ok,
+          verified: res.verified,
+          summary: res.summary,
+          data: { desktopResult: res },
+          error: res.error
+        };
+      }
+    });
+
+    this.registerTool({
+      name: 'desktop_web_search',
+      description: 'Search the web in default browser with validated query after explicit WEB_SEARCH permission.',
+      permissionLevel: 'CONSEQUENTIAL',
+      requiresConfirmation: true,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Search terms.' },
+          permissionId: { type: 'string', description: 'Approved WEB_SEARCH permission ID.' },
+          engine: { type: 'string', description: 'Search engine (google, duckduckgo, bing).' }
+        },
+        required: ['query', 'permissionId']
+      },
+      execute: async (args) => {
+        const query = String(args.query || '');
+        const permissionId = String(args.permissionId || '');
+        const engine = String(args.engine || 'google');
+        const res = await desktopBridge.searchWeb(query, permissionId, engine);
+        return {
+          ok: res.ok,
+          verified: res.verified,
+          summary: res.summary,
+          data: { desktopResult: res },
+          error: res.error
+        };
+      }
+    });
+
+    this.registerTool({
+      name: 'launch_desktop_music',
+      description: 'Launch Spotify or authorized desktop music player after explicit MUSIC_CONTROL permission.',
+      permissionLevel: 'CONSEQUENTIAL',
+      requiresConfirmation: true,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          musicTarget: { type: 'string', description: 'Music app or service target (e.g. Spotify).' },
+          permissionId: { type: 'string', description: 'Approved MUSIC_CONTROL permission ID.' }
+        },
+        required: ['musicTarget', 'permissionId']
+      },
+      execute: async (args) => {
+        const musicTarget = String(args.musicTarget || 'Spotify');
+        const permissionId = String(args.permissionId || '');
+        const res = await desktopBridge.launchMusic(musicTarget, permissionId);
+        return {
+          ok: res.ok,
+          verified: res.verified,
+          summary: res.summary,
+          data: { desktopResult: res },
+          error: res.error
+        };
+      }
+    });
+
+    this.registerTool({
+      name: 'find_folder_files',
+      description: 'Search and inspect file names inside an authorized directory path.',
+      permissionLevel: 'READ_ONLY',
+      requiresConfirmation: false,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          folderPath: { type: 'string', description: 'Directory path to inspect.' },
+          filterPattern: { type: 'string', description: 'Optional filename filter substring.' }
+        },
+        required: ['folderPath']
+      },
+      execute: async (args) => {
+        const folderPath = String(args.folderPath || '');
+        const filterPattern = args.filterPattern ? String(args.filterPattern) : undefined;
+        const res = await desktopBridge.findFilesInFolder(folderPath, filterPattern);
+        return {
+          ok: res.ok,
+          verified: res.ok,
+          summary: res.ok
+            ? `Found ${res.files.length} file(s) in "${res.folder}".`
+            : res.error || 'Unable to inspect folder.',
+          data: { searchResult: res },
+          error: res.error
+        };
+      }
+    });
   }
 }
 
