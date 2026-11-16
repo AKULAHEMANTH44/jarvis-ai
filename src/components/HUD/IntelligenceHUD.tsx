@@ -8,6 +8,7 @@ import {
   MemoryCategory,
   MemoryConsentCandidate,
   MemoryEntry,
+  PermissionAuditEntry,
   ToolActivityRecord,
   ToolDefinition,
   WorkspaceContextSnapshot
@@ -19,6 +20,9 @@ import { suggestionEngine } from '../../services/suggestionEngine';
 import { planningEngine } from '../../services/planningEngine';
 import { toolRegistry } from '../../services/toolRegistry';
 import { contextualAI } from '../../services/contextualAI';
+import { permissionManager } from '../../services/permissionManager';
+import { fileAccessService } from '../../services/fileAccessService';
+import { musicService } from '../../services/musicService';
 import { audioService } from '../../services/soundFx';
 import {
   Brain,
@@ -29,6 +33,7 @@ import {
   Plus,
   Send,
   ShieldAlert,
+  ShieldCheck,
   Sparkles,
   Square,
   Trash2,
@@ -37,11 +42,17 @@ import {
   Edit3,
   Bookmark,
   Play,
+  Pause,
+  Volume2,
   Settings,
-  AlertTriangle
+  AlertTriangle,
+  FolderOpen,
+  ExternalLink,
+  Search,
+  Music
 } from 'lucide-react';
 
-export type IntelligenceTabId = 'CHAT' | 'PLAN' | 'SUGGESTIONS' | 'MEMORY' | 'TOOLS';
+export type IntelligenceTabId = 'CHAT' | 'PERMISSIONS' | 'PLAN' | 'SUGGESTIONS' | 'MEMORY' | 'TOOLS';
 
 interface IntelligenceHUDProps {
   intelligenceState: IntelligenceStateSnapshot;
@@ -122,7 +133,11 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
   const [toolHistory, setToolHistory] = useState<ToolActivityRecord[]>(() =>
     toolRegistry.getActivityHistory(30)
   );
+  const [permissionHistory, setPermissionHistory] = useState<PermissionAuditEntry[]>(() =>
+    permissionManager.getAuditHistory(40)
+  );
   const [registeredTools] = useState<ToolDefinition[]>(() => toolRegistry.listTools());
+  const [filePickBusy, setFilePickBusy] = useState(false);
 
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -157,11 +172,15 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
     const unsubTool = toolRegistry.subscribe(() => {
       setToolHistory(toolRegistry.getActivityHistory(30));
     });
+    const unsubPerm = permissionManager.subscribe(() => {
+      setPermissionHistory(permissionManager.getAuditHistory(40));
+    });
     return () => {
       unsubMem();
       unsubSug();
       unsubPlan();
       unsubTool();
+      unsubPerm();
     };
   }, []);
 
@@ -184,6 +203,8 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
   const savedSuggestions = suggestions.filter((s) => s.status === 'SAVED');
   const latestPlan = plans[0] || null;
   const sessionSummary = conversationManager.summarizeSession(currentSessionId);
+  const pendingPerm = intelligenceState.pendingPermission;
+  const musicState = intelligenceState.musicState;
 
   const handleChatSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -192,6 +213,28 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
     audioService.playChirp(1350);
     setPromptInput('');
     onSubmitPrompt(trimmed);
+  };
+
+  const handleTriggerFilePicker = async (accept?: string) => {
+    if (filePickBusy) return;
+    setFilePickBusy(true);
+    try {
+      const picked = await fileAccessService.pickFilesFromBrowser({ accept });
+      if (picked.cancelled) {
+        intelligenceEngine.clearInteractivePrompt();
+        return;
+      }
+      const rawFiles = picked.files
+        .map((m) => fileAccessService.getRawFile(m.fileId))
+        .filter((f): f is File => Boolean(f));
+      if (rawFiles.length > 0) {
+        intelligenceEngine.handleUserPickedFiles(rawFiles, {
+          preferMusicPlayback: Boolean(accept?.includes('audio'))
+        });
+      }
+    } finally {
+      setFilePickBusy(false);
+    }
   };
 
   const handleSaveMemory = (e: React.FormEvent) => {
@@ -215,7 +258,7 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
   return (
     <div
       data-testid="intelligence-brain-panel"
-      className="flex flex-col w-full max-h-[60vh] rounded-xl bg-[#020914]/95 border border-cyan-500/40 shadow-[0_0_32px_rgba(0,240,255,0.22)] overflow-hidden text-cyan-200 font-mono"
+      className="flex flex-col w-full max-h-[62vh] rounded-xl bg-[#020914]/95 border border-cyan-500/40 shadow-[0_0_32px_rgba(0,240,255,0.22)] overflow-hidden text-cyan-200 font-mono"
     >
       {/* Top Header */}
       <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-cyan-500/25 bg-black/50 shrink-0">
@@ -236,7 +279,7 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
               </span>
             </div>
             <p className="text-[9.5px] text-cyan-400/75 truncate">
-              {intelligenceState.activitySummary}
+              {intelligenceState.stageFeedback} · {intelligenceState.activitySummary}
             </p>
           </div>
         </div>
@@ -249,7 +292,7 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
               onOpenAIConfig();
             }}
             title="Configure AI Provider & Volatile Session Key"
-            className={`flex items-center gap-1 px-2 py-1 rounded border text-[9px] font-orbitron transition-colors ${
+            className={`flex items-center gap-1 px-2 py-1 rounded border text-[9px] font-orbitron transition-colors whitespace-nowrap shrink-0 ${
               cfg.provider === 'LOCAL'
                 ? 'border-cyan-500/40 bg-cyan-950/40 text-cyan-300'
                 : hasKey
@@ -272,7 +315,7 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
                 onCancelRequest();
               }}
               aria-label="Cancel Active AI Request"
-              className="flex items-center gap-1 px-2 py-1 rounded border border-red-400/60 bg-red-950/50 text-red-200 hover:bg-red-900/60 text-[9px] font-orbitron"
+              className="flex items-center gap-1 px-2 py-1 rounded border border-red-400/60 bg-red-950/50 text-red-200 hover:bg-red-900/60 text-[9px] font-orbitron whitespace-nowrap shrink-0"
             >
               <Square className="w-2.5 h-2.5" />
               <span>CANCEL</span>
@@ -302,6 +345,11 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
         {(
           [
             { id: 'CHAT', label: 'CONTEXT', icon: Sparkles },
+            {
+              id: 'PERMISSIONS',
+              label: `PERMISSIONS${pendingPerm ? ' (1)' : permissionHistory.length > 0 ? ` (${permissionHistory.length})` : ''}`,
+              icon: ShieldCheck
+            },
             { id: 'PLAN', label: `PLAN${latestPlan ? ` (${latestPlan.steps.length})` : ''}`, icon: ListChecks },
             {
               id: 'SUGGESTIONS',
@@ -314,6 +362,7 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
         ).map((tab) => {
           const Icon = tab.icon;
           const selected = activeTab === tab.id;
+          const highlightPerm = tab.id === 'PERMISSIONS' && Boolean(pendingPerm);
           return (
             <button
               key={tab.id}
@@ -327,6 +376,8 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
               className={`flex items-center gap-1 px-2 py-1 rounded border text-[9.5px] font-orbitron tracking-wider whitespace-nowrap shrink-0 transition-colors ${
                 selected
                   ? 'border-cyan-400 bg-cyan-500/25 text-white font-bold'
+                  : highlightPerm
+                  ? 'border-amber-400/70 bg-amber-950/40 text-amber-200'
                   : 'border-transparent text-cyan-300/75 hover:text-white hover:border-cyan-500/30'
               }`}
             >
@@ -339,7 +390,236 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
 
       {/* Tab Body */}
       <div className="flex-1 overflow-y-auto p-3 space-y-2.5 text-[11px]">
-        {/* Consequential Tool Approval Banner (Always surfaced prominently if pending) */}
+        {/* Phase 5 Permission Approval Request Card (Always surfaced prominently when pending) */}
+        {pendingPerm && (
+          <div
+            data-testid="pending-permission-card"
+            className="p-3 rounded-lg border border-amber-400/80 bg-amber-950/45 text-amber-100 space-y-2"
+          >
+            <div className="flex items-center justify-between gap-2 text-[10px] font-orbitron text-amber-300">
+              <div className="flex items-center gap-1.5 font-bold">
+                <ShieldAlert className="w-4 h-4 shrink-0" />
+                <span>PERMISSION REQUEST</span>
+              </div>
+              <span className="tabular-nums text-[9.5px] text-amber-200/85">
+                {pendingPerm.category} · RISK {pendingPerm.riskLevel} · {pendingPerm.status}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 gap-1 text-[10.5px] border-t border-b border-amber-400/25 py-1.5">
+              <div>
+                <span className="text-amber-300/80">Action: </span>
+                <span className="text-white font-semibold">{pendingPerm.requestedAction}</span>
+              </div>
+              <div className="break-all">
+                <span className="text-amber-300/80">Target: </span>
+                <span className="text-white font-semibold">{pendingPerm.target}</span>
+              </div>
+              <div>
+                <span className="text-amber-300/80">Reason: </span>
+                <span>{pendingPerm.reason}</span>
+              </div>
+              <div className="text-[9.5px] text-amber-200/80 tabular-nums">
+                <span>Scope: {pendingPerm.requestedScope}</span>
+                <span aria-hidden="true"> · </span>
+                <span>
+                  Expires: {new Date(pendingPerm.expiresAt).toLocaleTimeString()}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                data-testid="permission-approve-btn"
+                onClick={() => {
+                  audioService.playChirp(1450);
+                  void intelligenceEngine.resolvePendingPermission('APPROVE_ONCE', pendingPerm.id);
+                }}
+                className="flex items-center gap-1 px-3 py-1.5 rounded border border-emerald-400/75 bg-emerald-950/60 hover:bg-emerald-900/70 text-emerald-100 text-[10px] font-orbitron whitespace-nowrap"
+              >
+                <Check className="w-3 h-3" />
+                <span>APPROVE ONCE</span>
+              </button>
+              <button
+                type="button"
+                data-testid="permission-deny-btn"
+                onClick={() => {
+                  audioService.playChirp(850);
+                  void intelligenceEngine.resolvePendingPermission('DENY', pendingPerm.id);
+                }}
+                className="flex items-center gap-1 px-3 py-1.5 rounded border border-red-400/65 bg-red-950/50 hover:bg-red-900/60 text-red-100 text-[10px] font-orbitron whitespace-nowrap"
+              >
+                <X className="w-3 h-3" />
+                <span>DENY</span>
+              </button>
+              <button
+                type="button"
+                data-testid="permission-cancel-btn"
+                onClick={() => {
+                  audioService.playChirp(750);
+                  void intelligenceEngine.resolvePendingPermission('CANCEL', pendingPerm.id);
+                }}
+                className="px-3 py-1.5 rounded border border-cyan-500/40 bg-black/40 hover:text-white text-cyan-200 text-[10px] font-orbitron whitespace-nowrap"
+              >
+                CANCEL
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Phase 5 Interactive File Picker or Music Source Prompt */}
+        {intelligenceState.interactivePrompt &&
+          intelligenceState.interactivePrompt.kind !== 'AMBIGUOUS_CLARIFICATION' && (
+            <div
+              data-testid="interactive-action-prompt"
+              className="p-2.5 rounded-lg border border-cyan-400/65 bg-cyan-950/40 space-y-2"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-orbitron text-[10px] text-white font-bold">
+                  {intelligenceState.interactivePrompt.kind === 'FILE_PICKER'
+                    ? 'USER FILE SELECTION'
+                    : 'SELECT MUSIC SOURCE'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => intelligenceEngine.clearInteractivePrompt()}
+                  aria-label="Dismiss prompt"
+                  className="text-cyan-400 hover:text-white"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              <p className="text-[10.5px] text-cyan-100">
+                {intelligenceState.interactivePrompt.message}
+              </p>
+
+              {intelligenceState.interactivePrompt.kind === 'FILE_PICKER' && (
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={filePickBusy}
+                    onClick={() =>
+                      void handleTriggerFilePicker(
+                        intelligenceState.interactivePrompt?.requestedAction?.includes('audio')
+                          ? 'audio/*'
+                          : undefined
+                      )
+                    }
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded border border-cyan-400 bg-cyan-500/20 hover:bg-cyan-500/35 text-white text-[10px] font-orbitron"
+                  >
+                    <FolderOpen className="w-3.5 h-3.5" />
+                    <span>{filePickBusy ? 'OPENING PICKER...' : 'SELECT FILE'}</span>
+                  </button>
+                </div>
+              )}
+
+              {intelligenceState.interactivePrompt.kind === 'MUSIC_SOURCE' &&
+                intelligenceState.interactivePrompt.musicChoices && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                    {intelligenceState.interactivePrompt.musicChoices.map((choice) => (
+                      <button
+                        key={choice.id}
+                        type="button"
+                        onClick={() => {
+                          audioService.playChirp(1300);
+                          intelligenceEngine.selectMusicSourceChoice(
+                            choice.id,
+                            intelligenceState.interactivePrompt?.query || ''
+                          );
+                        }}
+                        className="p-2 rounded border border-cyan-500/40 bg-black/50 hover:border-cyan-400 hover:bg-cyan-950/50 text-left space-y-0.5"
+                      >
+                        <div className="font-orbitron text-[10px] text-white font-bold">
+                          {choice.label}
+                        </div>
+                        <div className="text-[9.5px] text-cyan-300/80">{choice.description}</div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+            </div>
+          )}
+
+        {/* Active Music Playback Bar */}
+        {musicState.status !== 'IDLE' && (
+          <div
+            data-testid="music-status-bar"
+            className="p-2.5 rounded-lg border border-cyan-500/40 bg-black/55 space-y-1.5"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <Music className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                <span className="font-orbitron text-[10px] text-white truncate">
+                  {musicState.trackTitle || 'Audio Controller'}
+                </span>
+              </div>
+              <span className="text-[9.5px] text-cyan-300/85 shrink-0 tabular-nums">
+                {musicState.sourceType || 'AUDIO'} · {musicState.status}
+              </span>
+            </div>
+            <p className="text-[10px] text-cyan-200/90">{musicState.statusMessage}</p>
+            <div className="flex flex-wrap items-center gap-2 pt-0.5">
+              {musicState.sourceType === 'LOCAL_AUDIO' && (
+                <>
+                  {musicState.status === 'PLAYING' ? (
+                    <button
+                      type="button"
+                      onClick={() => musicService.pause()}
+                      className="flex items-center gap-1 px-2 py-1 rounded border border-cyan-400/60 bg-cyan-950/50 text-white text-[9.5px] font-orbitron"
+                    >
+                      <Pause className="w-3 h-3" />
+                      <span>PAUSE</span>
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => void musicService.resume()}
+                      className="flex items-center gap-1 px-2 py-1 rounded border border-emerald-400/60 bg-emerald-950/50 text-emerald-100 text-[9.5px] font-orbitron"
+                    >
+                      <Play className="w-3 h-3" />
+                      <span>RESUME</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => musicService.stop()}
+                    className="flex items-center gap-1 px-2 py-1 rounded border border-red-400/50 bg-red-950/40 text-red-200 text-[9.5px] font-orbitron"
+                  >
+                    <Square className="w-2.5 h-2.5" />
+                    <span>STOP</span>
+                  </button>
+                  <label className="flex items-center gap-1.5 text-[9.5px] text-cyan-300 ml-auto">
+                    <Volume2 className="w-3 h-3" />
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={Math.round(musicState.volume * 100)}
+                      onChange={(e) => musicService.setVolume(Number(e.target.value) / 100)}
+                      aria-label="Music Volume"
+                      className="w-20 accent-cyan-400"
+                    />
+                    <span className="tabular-nums w-8">{Math.round(musicState.volume * 100)}%</span>
+                  </label>
+                </>
+              )}
+              {musicState.sourceUrl && (
+                <a
+                  href={musicState.sourceUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded border border-cyan-400/50 text-cyan-200 hover:text-white text-[9.5px] font-orbitron"
+                >
+                  <ExternalLink className="w-3 h-3" />
+                  <span>OPEN SERVICE LINK</span>
+                </a>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Phase 4 Consequential Tool Approval Banner */}
         {intelligenceState.pendingApproval && (
           <div
             data-testid="pending-tool-approval-card"
@@ -350,7 +630,7 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
                 <ShieldAlert className="w-4 h-4 shrink-0" />
                 <span>CONFIRMATION REQUIRED: {intelligenceState.pendingApproval.toolName}</span>
               </div>
-              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-400/40">
+              <span className="text-[9px] text-amber-200/80">
                 {intelligenceState.pendingApproval.permissionLevel}
               </span>
             </div>
@@ -427,7 +707,7 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
           </div>
         )}
 
-        {/* TAB 1: CONTEXTUAL CONVERSATION */}
+        {/* TAB 1: CONTEXTUAL CONVERSATION & RESULT PREVIEWS */}
         {activeTab === 'CHAT' && (
           <div className="space-y-2.5">
             {/* Session Controls */}
@@ -453,6 +733,14 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
                 </select>
               </div>
               <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => void handleTriggerFilePicker()}
+                  className="flex items-center gap-1 px-2 py-0.5 rounded border border-cyan-500/40 bg-cyan-950/40 text-cyan-200 hover:text-white text-[9.5px]"
+                >
+                  <FolderOpen className="w-3 h-3" />
+                  <span>FILE</span>
+                </button>
                 <button
                   type="button"
                   onClick={() => {
@@ -497,7 +785,7 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
                     Contextual Brain ready for <strong>{workspaceSnapshot.selectedObjectName}</strong> ({workspaceSnapshot.objectCount} object{workspaceSnapshot.objectCount === 1 ? '' : 's'} active).
                   </p>
                   <p className="text-[9.5px] text-cyan-400/75">
-                    Try: "Inspect my current workspace", "Prepare my project for demonstration", "Calculate 24 * 18", or "What formats are supported?".
+                    Try: "Open GitHub", "Search for Three.js documentation", "Open my project report", or "Play relaxing music".
                   </p>
                 </div>
               ) : (
@@ -514,32 +802,126 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
                       <span className="font-orbitron font-bold">
                         {t.role === 'user' ? 'STARK // USER' : 'J.A.R.V.I.S. BRAIN'}
                       </span>
-                      <div className="flex items-center gap-1.5">
-                        {t.intent && (
-                          <span className="px-1 rounded bg-cyan-500/15 border border-cyan-500/25">
-                            {t.intent}
-                          </span>
-                        )}
+                      <div className="flex items-center gap-1.5 tabular-nums">
+                        {t.intent && <span>{t.intent}</span>}
+                        {t.intent && <span aria-hidden="true">·</span>}
                         <span>{new Date(t.timestamp).toLocaleTimeString()}</span>
                       </div>
                     </div>
                     <p className="leading-snug whitespace-pre-wrap">{t.text}</p>
                     {t.toolNames && t.toolNames.length > 0 && (
-                      <div className="mt-1 flex flex-wrap gap-1">
-                        {t.toolNames.map((tool) => (
-                          <span
-                            key={tool}
-                            className="px-1.5 py-0.5 rounded bg-emerald-950/50 border border-emerald-400/40 text-emerald-300 text-[9px]"
-                          >
-                            VERIFIED TOOL: {tool}
-                          </span>
-                        ))}
+                      <div className="mt-1 text-[9px] text-emerald-300">
+                        Verified tool: {t.toolNames.join(', ')}
                       </div>
                     )}
                   </div>
                 ))
               )}
             </div>
+
+            {/* Opened File Preview */}
+            {intelligenceState.lastOpenedFile?.ok && (
+              <div
+                data-testid="opened-file-preview"
+                className="p-2.5 rounded border border-emerald-500/35 bg-black/50 space-y-1.5"
+              >
+                <div className="flex items-center justify-between text-[10px]">
+                  <span className="font-orbitron font-bold text-white">
+                    {intelligenceState.lastOpenedFile.name}
+                  </span>
+                  <span className="text-cyan-300/80 tabular-nums">
+                    .{intelligenceState.lastOpenedFile.extension} · {intelligenceState.lastOpenedFile.sizeFormatted}
+                  </span>
+                </div>
+                {intelligenceState.lastOpenedFile.kind === 'IMAGE' && intelligenceState.lastOpenedFile.previewUrl && (
+                  <img
+                    src={intelligenceState.lastOpenedFile.previewUrl}
+                    alt={intelligenceState.lastOpenedFile.name}
+                    className="max-h-32 rounded border border-cyan-500/30 object-contain"
+                  />
+                )}
+                {intelligenceState.lastOpenedFile.textContent && (
+                  <pre className="max-h-28 overflow-y-auto p-2 rounded bg-black/75 border border-cyan-500/20 text-[10px] text-cyan-100 whitespace-pre-wrap">
+                    {intelligenceState.lastOpenedFile.textContent.slice(0, 2000)}
+                  </pre>
+                )}
+                {intelligenceState.lastOpenedFile.previewUrl &&
+                  intelligenceState.lastOpenedFile.kind === 'DOCUMENT' && (
+                    <a
+                      href={intelligenceState.lastOpenedFile.previewUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 text-[10px] text-cyan-300 hover:text-white underline"
+                    >
+                      <ExternalLink className="w-3 h-3" />
+                      <span>Open Document Preview</span>
+                    </a>
+                  )}
+              </div>
+            )}
+
+            {/* Popup Blocked Direct Fallback */}
+            {intelligenceState.lastBrowserAction?.popupBlocked && intelligenceState.lastBrowserAction.url && (
+              <div className="p-2.5 rounded border border-amber-400/60 bg-amber-950/35 text-[10px] space-y-1">
+                <p className="text-amber-200">{intelligenceState.lastBrowserAction.summary}</p>
+                <a
+                  href={intelligenceState.lastBrowserAction.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 text-white underline font-orbitron"
+                >
+                  <ExternalLink className="w-3 h-3" />
+                  <span>Open {intelligenceState.lastBrowserAction.hostname || 'Website'} Manually</span>
+                </a>
+              </div>
+            )}
+
+            {/* Web Search Results */}
+            {intelligenceState.lastSearchResult && (
+              <div
+                data-testid="web-search-results-card"
+                className="p-2.5 rounded border border-cyan-500/35 bg-black/50 space-y-1.5"
+              >
+                <div className="flex items-center justify-between gap-2 text-[9.5px]">
+                  <div className="flex items-center gap-1.5 font-orbitron text-white font-bold">
+                    <Search className="w-3.5 h-3.5 text-cyan-400" />
+                    <span>SEARCH: "{intelligenceState.lastSearchResult.query}"</span>
+                  </div>
+                  <span className="text-cyan-300/80">{intelligenceState.lastSearchResult.provider}</span>
+                </div>
+                <p className="text-[9.5px] text-amber-200/85">
+                  {intelligenceState.lastSearchResult.distinctionNotice}
+                </p>
+                {intelligenceState.lastSearchResult.results.length > 0 ? (
+                  <div className="space-y-1 max-h-28 overflow-y-auto pr-1">
+                    {intelligenceState.lastSearchResult.results.map((item, idx) => (
+                      <div key={idx} className="p-1.5 rounded border border-cyan-500/20 bg-black/45">
+                        <a
+                          href={item.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-[10.5px] text-white font-semibold hover:text-cyan-300 underline inline-flex items-center gap-1"
+                        >
+                          <span>{item.title}</span>
+                          <ExternalLink className="w-2.5 h-2.5" />
+                        </a>
+                        <p className="text-[9.5px] text-cyan-200/85 mt-0.5">{item.snippet}</p>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <a
+                    href={intelligenceState.lastSearchResult.searchUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-[10px] text-cyan-300 hover:text-white underline"
+                  >
+                    <ExternalLink className="w-3 h-3" />
+                    <span>Open Search Page on {intelligenceState.lastSearchResult.provider}</span>
+                  </a>
+                )}
+              </div>
+            )}
 
             {intelligenceState.lastError && (
               <div className="flex items-center gap-1.5 p-2 rounded border border-red-500/45 bg-red-950/40 text-red-200 text-[10px]">
@@ -554,7 +936,7 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
                 type="text"
                 value={promptInput}
                 onChange={(e) => setPromptInput(e.target.value)}
-                placeholder="Ask a contextual question, plan a task, or inspect workspace..."
+                placeholder="Ask JARVIS to open a file, open a website, search, or play music..."
                 className="flex-1 bg-black/75 border border-cyan-500/40 rounded px-2.5 py-1.5 text-xs text-white placeholder-cyan-500/50 focus:outline-none focus:border-cyan-400"
               />
               <button
@@ -569,7 +951,68 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
           </div>
         )}
 
-        {/* TAB 2: MULTI-STEP PLAN */}
+        {/* TAB 2: PERMISSION GUARD & ACTIVITY HISTORY */}
+        {activeTab === 'PERMISSIONS' && (
+          <div className="space-y-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded border border-cyan-500/25 bg-black/45">
+              <div>
+                <div className="font-orbitron text-[10px] text-white">
+                  EXPLICIT PERMISSION GOVERNANCE
+                </div>
+                <p className="text-[9.5px] text-cyan-300/80">
+                  Every file read, browser tab, web search, or music action requires single-use approval. Silence is never treated as approval.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleTriggerFilePicker()}
+                className="flex items-center gap-1 px-2.5 py-1 rounded border border-cyan-400/60 bg-cyan-500/15 hover:bg-cyan-500/30 text-white text-[9.5px] font-orbitron shrink-0"
+              >
+                <FolderOpen className="w-3 h-3" />
+                <span>SELECT FILE</span>
+              </button>
+            </div>
+
+            <div className="font-orbitron text-[9.5px] text-cyan-300">
+              PERMISSION ACTIVITY HISTORY ({permissionHistory.length})
+            </div>
+
+            {permissionHistory.length === 0 ? (
+              <p className="text-[10px] text-cyan-400/75 p-2.5 rounded border border-cyan-500/20 bg-black/35">
+                No file, browser, web-search, or music permissions requested in this session yet.
+              </p>
+            ) : (
+              <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                {permissionHistory.map((entry) => (
+                  <div
+                    key={entry.id}
+                    className="p-2 rounded border border-cyan-500/25 bg-black/45 space-y-0.5"
+                  >
+                    <div className="flex items-center justify-between gap-2 text-[9.5px]">
+                      <span className="font-orbitron font-bold text-white truncate">
+                        {entry.requestedAction}
+                      </span>
+                      <span className="text-[9px] text-cyan-300/80 shrink-0 tabular-nums">
+                        {entry.decision} · {entry.executionStatus}
+                      </span>
+                    </div>
+                    <div className="text-[10px] text-cyan-200/90 truncate">
+                      {entry.category} · {entry.target}
+                    </div>
+                    <div className="flex items-center justify-between gap-2 text-[9.5px] text-cyan-400/80">
+                      <span className="truncate">{entry.resultSummary}</span>
+                      <span className="shrink-0 tabular-nums">
+                        {new Date(entry.timestamp).toLocaleTimeString()}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* TAB 3: MULTI-STEP PLAN */}
         {activeTab === 'PLAN' && (
           <div className="space-y-2.5">
             {!latestPlan ? (
@@ -595,13 +1038,10 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
                     <div className="font-orbitron text-[10.5px] font-bold text-white">
                       {latestPlan.objective}
                     </div>
-                    <div className="text-[9.5px] text-cyan-400/80">
-                      Status: <span className="text-white font-semibold">{latestPlan.status}</span>
+                    <div className="text-[9.5px] text-cyan-400/80 tabular-nums">
+                      Status: <span className="text-white font-semibold">{latestPlan.status}</span> · {latestPlan.steps.length} steps
                     </div>
                   </div>
-                  <span className="px-1.5 py-0.5 rounded border border-cyan-500/35 text-[9px]">
-                    {latestPlan.steps.length} STEPS
-                  </span>
                 </div>
 
                 {latestPlan.constraints.length > 0 && (
@@ -644,14 +1084,14 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
                           {idx + 1}. {s.title}
                         </span>
                         <span
-                          className={`px-1.5 py-0.5 rounded text-[8.5px] font-orbitron ${
+                          className={`text-[9px] font-orbitron ${
                             s.status === 'COMPLETED'
-                              ? 'bg-emerald-950/60 text-emerald-300 border border-emerald-400/50'
+                              ? 'text-emerald-300'
                               : s.status === 'FAILED'
-                              ? 'bg-red-950/60 text-red-300 border border-red-400/50'
+                              ? 'text-red-300'
                               : s.status === 'RUNNING'
-                              ? 'bg-amber-950/60 text-amber-200 border border-amber-400/50'
-                              : 'bg-cyan-950/40 text-cyan-300 border border-cyan-500/30'
+                              ? 'text-amber-200'
+                              : 'text-cyan-300'
                           }`}
                         >
                           {s.status}
@@ -709,7 +1149,7 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
           </div>
         )}
 
-        {/* TAB 3: CONTEXTUAL SUGGESTIONS */}
+        {/* TAB 4: CONTEXTUAL SUGGESTIONS */}
         {activeTab === 'SUGGESTIONS' && (
           <div className="space-y-2">
             {activeSuggestions.length === 0 && savedSuggestions.length === 0 ? (
@@ -728,10 +1168,8 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
                         {sug.title}
                       </span>
                       <span
-                        className={`px-1.5 py-0.5 rounded text-[8.5px] font-orbitron border ${
-                          sug.priority === 'HIGH'
-                            ? 'border-amber-400 text-amber-200 bg-amber-950/50'
-                            : 'border-cyan-500/40 text-cyan-300 bg-cyan-950/40'
+                        className={`text-[9px] font-orbitron ${
+                          sug.priority === 'HIGH' ? 'text-amber-300' : 'text-cyan-300'
                         }`}
                       >
                         {sug.priority}
@@ -816,7 +1254,7 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
           </div>
         )}
 
-        {/* TAB 4: USER-CONTROLLED MEMORY */}
+        {/* TAB 5: USER-CONTROLLED MEMORY */}
         {activeTab === 'MEMORY' && (
           <div className="space-y-2.5">
             <div className="flex items-center justify-between gap-2 p-2 rounded border border-cyan-500/25 bg-black/45">
@@ -900,7 +1338,8 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
                   >
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-1.5 text-[9px] text-cyan-400/80">
-                        <span className="px-1 rounded border border-cyan-500/30">{m.category}</span>
+                        <span>{m.category}</span>
+                        <span aria-hidden="true">·</span>
                         <span className="font-semibold text-white truncate">{m.key}</span>
                       </div>
                       {editingMemoryId === m.id ? (
@@ -976,7 +1415,7 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
           </div>
         )}
 
-        {/* TAB 5: CONTROLLED TOOL ACTIVITY */}
+        {/* TAB 6: CONTROLLED TOOL ACTIVITY */}
         {activeTab === 'TOOLS' && (
           <div className="space-y-2">
             <div className="font-orbitron text-[9.5px] text-cyan-300">
@@ -995,22 +1434,9 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
                   >
                     <div className="flex items-center justify-between gap-2 text-[9px]">
                       <span className="font-orbitron font-bold text-white">{rec.toolName}</span>
-                      <div className="flex items-center gap-1">
-                        <span className="px-1 rounded border border-cyan-500/30 text-cyan-300">
-                          {rec.permissionLevel}
-                        </span>
-                        <span
-                          className={`px-1 rounded border ${
-                            rec.status === 'EXECUTED' && rec.verified
-                              ? 'border-emerald-400/60 text-emerald-300'
-                              : rec.status === 'PENDING_APPROVAL'
-                              ? 'border-amber-400/60 text-amber-200'
-                              : 'border-red-400/60 text-red-300'
-                          }`}
-                        >
-                          {rec.status}
-                          {rec.verified ? ' · VERIFIED' : ''}
-                        </span>
+                      <div className="text-cyan-300 tabular-nums">
+                        {rec.permissionLevel} · {rec.status}
+                        {rec.verified ? ' · VERIFIED' : ''}
                       </div>
                     </div>
                     <p className="text-[10px] text-cyan-200">{rec.summary}</p>

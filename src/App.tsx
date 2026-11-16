@@ -47,6 +47,8 @@ import { intelligenceEngine, IntelligenceStateSnapshot } from './services/intell
 import { toolRegistry, WorkspaceToolHost } from './services/toolRegistry';
 import { memoryManager } from './services/memoryManager';
 import { suggestionEngine } from './services/suggestionEngine';
+import { fileAccessService } from './services/fileAccessService';
+import { musicService } from './services/musicService';
 import {
   HudDrawerId,
   HudLayoutState,
@@ -370,7 +372,7 @@ export const App: React.FC = () => {
     return true;
   }, [appendMessage, refreshHistoryStatus, syncSpatialStates]);
 
-  // Wire up desktop bridge confirmation modal & speech status watcher
+  // Wire up desktop bridge confirmation modal, speech status watcher & Phase 5 service lifecycle
   useEffect(() => {
     desktopBridge.setPromptCallback((req) => {
       setPermissionRequest(req);
@@ -379,9 +381,21 @@ export const App: React.FC = () => {
       setIsVoiceActive(active);
       setVoiceError(err || null);
     });
+    fileAccessService.setHostCallbacks({
+      onImport3DModels: async (files) => {
+        if (importMeshFilesRef.current) {
+          await importMeshFilesRef.current(files);
+        } else {
+          throw new Error('3D holographic workspace is not initialized yet.');
+        }
+      }
+    });
     return () => {
       handTrackingService.stop();
       speechService.stopListening();
+      fileAccessService.setHostCallbacks({});
+      fileAccessService.disposeAllPreviewUrls();
+      musicService.stop();
     };
   }, []);
 
@@ -548,7 +562,9 @@ export const App: React.FC = () => {
   }, [appendMessage, syncSpatialStates]);
 
   const handleImportMeshFiles = useCallback(async (files: File[]) => {
-    if (!sceneManagerRef.current) return;
+    if (!sceneManagerRef.current) {
+      throw new Error('3D holographic scene is not ready yet.');
+    }
     setLabError(null);
     try {
       const inst = await sceneManagerRef.current.importMeshFromFiles(files);
@@ -567,6 +583,9 @@ export const App: React.FC = () => {
       throw err;
     }
   }, [appendMessage, syncSpatialStates]);
+
+  const importMeshFilesRef = useRef<((files: File[]) => Promise<void>) | null>(null);
+  importMeshFilesRef.current = handleImportMeshFiles;
 
   const handleImportMeshFile = useCallback(async (file: File) => {
     try {
@@ -1473,6 +1492,19 @@ export const App: React.FC = () => {
         feedbackText: 'Opening structured execution planner.'
       },
       {
+        patterns: ['open permissions', 'show permissions', 'permission center', 'open permission center'],
+        description: 'Open Phase 5 Permission Manager tab in Intelligence Brain',
+        category: 'AI',
+        action: () => {
+          setMode('WORKSPACE');
+          setRequestedBrainTab({ tab: 'PERMISSIONS', nonce: nextNonce() });
+          setHudState((prev) => openDrawerState(prev, 'BRAIN'));
+          audioService.playChirp(1350);
+          return true;
+        },
+        feedbackText: 'Opening centralized Permission & Real-World Action Monitor.'
+      },
+      {
         patterns: ['cancel request', 'stop thinking', 'stop speaking'],
         description: 'Cancel active AI request and speech synthesis',
         category: 'SYSTEM',
@@ -1503,6 +1535,15 @@ export const App: React.FC = () => {
           snapshot,
           source
         });
+        if (res.pendingPermission) {
+          setMode('WORKSPACE');
+          setRequestedBrainTab({ tab: 'PERMISSIONS', nonce: nextNonce() });
+          setHudState((prev) => openDrawerState(prev, 'BRAIN'));
+        } else if (res.interactivePrompt) {
+          setMode('WORKSPACE');
+          setRequestedBrainTab({ tab: 'CHAT', nonce: nextNonce() });
+          setHudState((prev) => openDrawerState(prev, 'BRAIN'));
+        }
         return res.reply;
       } finally {
         setIsProcessingCommand(false);
@@ -2013,7 +2054,8 @@ export const App: React.FC = () => {
       setMode('WORKSPACE');
       setHudState((prev) => openDrawerState(prev, drawer));
       return true;
-    }
+    },
+    import3DModelFiles: (files) => handleImportMeshFiles(files)
   };
 
   useEffect(() => {
@@ -2037,7 +2079,8 @@ export const App: React.FC = () => {
       redo: () => toolHostActionsRef.current!.redo(),
       appendNote: (t) => toolHostActionsRef.current!.appendNote(t),
       exportNotes: () => toolHostActionsRef.current!.exportNotes(),
-      openDrawer: (d) => toolHostActionsRef.current!.openDrawer!(d)
+      openDrawer: (d) => toolHostActionsRef.current!.openDrawer!(d),
+      import3DModelFiles: (files) => toolHostActionsRef.current!.import3DModelFiles!(files)
     };
     toolRegistry.setHost(proxyHost);
     return () => {
@@ -2152,6 +2195,9 @@ export const App: React.FC = () => {
         snapshot: buildWorkspaceSnapshot(),
         source: 'CONSOLE'
       });
+      if (res.pendingPermission) {
+        setRequestedBrainTab({ tab: 'PERMISSIONS', nonce: nextNonce() });
+      }
       appendMessage('USER', prompt, 'COMMAND');
       appendMessage('JARVIS', res.reply, res.error ? 'ALERT' : 'RESPONSE');
     },

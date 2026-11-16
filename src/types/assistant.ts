@@ -106,6 +106,10 @@ export type IntentCategory =
   | 'DIAGNOSTICS'
   | 'DOCUMENTATION'
   | 'MEMORY_MANAGEMENT'
+  | 'FILE_ACTION'
+  | 'BROWSER_ACTION'
+  | 'WEB_SEARCH'
+  | 'MUSIC_ACTION'
   | 'CLARIFICATION_NEEDED';
 
 export interface IntentClassification {
@@ -171,7 +175,7 @@ export interface MemoryPersistenceResult {
 }
 
 export type SuggestionPriority = 'LOW' | 'MEDIUM' | 'HIGH';
-export type SuggestionStatus = 'ACTIVE' | 'ACCEPTED' | 'REJECTED' | 'SAVED' | 'CONVERTED';
+export type SuggestionStatus = 'ACTIVE' | 'REJECTED' | 'ACCEPTED' | 'SAVED' | 'CONVERTED';
 
 export interface AISuggestion {
   id: string;
@@ -311,6 +315,189 @@ export interface PendingToolApproval {
   permissionLevel: ToolPermissionLevel;
 }
 
+// ============================================================================
+// Phase 5 — Permission-Based Real-World Action System Types
+// ============================================================================
+
+export type PermissionCategory =
+  | 'FILE_ACCESS'
+  | 'BROWSER_ACCESS'
+  | 'WEB_SEARCH'
+  | 'MUSIC_PLAYBACK'
+  | 'EXTERNAL_NAVIGATION'
+  | 'WORKSPACE_ACCESS';
+
+export type PermissionStatus =
+  | 'NOT_REQUESTED'
+  | 'AWAITING_APPROVAL'
+  | 'APPROVED'
+  | 'DENIED'
+  | 'CANCELLED'
+  | 'EXPIRED'
+  | 'EXECUTING'
+  | 'COMPLETED'
+  | 'FAILED';
+
+export type PermissionRiskLevel = 'LOW' | 'MEDIUM' | 'HIGH';
+
+export interface PermissionRequest {
+  id: string;
+  category: PermissionCategory;
+  requestedAction: string;
+  target: string;
+  targetFingerprint: string;
+  reason: string;
+  riskLevel: PermissionRiskLevel;
+  requestedScope: string;
+  createdAt: number;
+  expiresAt: number;
+  status: PermissionStatus;
+  decidedAt?: number;
+  executedAt?: number;
+  completedAt?: number;
+  resultSummary?: string;
+  error?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export type PermissionAuditDecision =
+  | 'REQUESTED'
+  | 'APPROVED_ONCE'
+  | 'DENIED'
+  | 'CANCELLED'
+  | 'EXPIRED'
+  | 'REJECTED_TARGET_MISMATCH'
+  | 'COMPLETED'
+  | 'FAILED';
+
+export interface PermissionAuditEntry {
+  id: string;
+  permissionId: string;
+  category: PermissionCategory;
+  requestedAction: string;
+  target: string;
+  decision: PermissionAuditDecision;
+  executionStatus: PermissionStatus;
+  resultSummary: string;
+  timestamp: number;
+}
+
+export type SupportedFileKind = 'TEXT' | 'DOCUMENT' | 'IMAGE' | 'AUDIO' | 'MODEL_3D' | 'UNSUPPORTED' | 'BLOCKED';
+
+export interface SelectedFileMetadata {
+  fileId: string;
+  name: string;
+  extension: string;
+  mimeType: string;
+  sizeBytes: number;
+  sizeFormatted: string;
+  kind: SupportedFileKind;
+  intendedOperation: string;
+  supported: boolean;
+  reasonIfUnsupported?: string;
+  selectedAt: number;
+}
+
+export interface FileInspectionResult {
+  ok: boolean;
+  fileId: string;
+  name: string;
+  extension: string;
+  kind: SupportedFileKind;
+  sizeFormatted: string;
+  intendedOperation: string;
+  textContent?: string;
+  summary?: string;
+  previewUrl?: string;
+  handedOffToLab?: boolean;
+  handedOffToMusic?: boolean;
+  error?: string;
+}
+
+export interface BrowserNavigationPreview {
+  valid: boolean;
+  rawInput: string;
+  normalizedUrl?: string;
+  hostname?: string;
+  protocol?: string;
+  error?: string;
+}
+
+export interface BrowserNavigationResult {
+  ok: boolean;
+  url?: string;
+  hostname?: string;
+  openedInNewTab: boolean;
+  popupBlocked?: boolean;
+  summary: string;
+  error?: string;
+}
+
+export type WebSearchProviderId = 'DUCKDUCKGO' | 'WIKIPEDIA' | 'GOOGLE' | 'MDN' | 'GITHUB';
+
+export interface WebSearchResultItem {
+  title: string;
+  url: string;
+  snippet: string;
+  source: string;
+}
+
+export interface WebSearchResponse {
+  ok: boolean;
+  query: string;
+  provider: WebSearchProviderId;
+  searchUrl: string;
+  results: WebSearchResultItem[];
+  sourceSummary?: string;
+  openedInBrowser?: boolean;
+  popupBlocked?: boolean;
+  cancelled?: boolean;
+  distinctionNotice: string;
+  error?: string;
+}
+
+export type MusicSourceType =
+  | 'LOCAL_AUDIO'
+  | 'SPOTIFY'
+  | 'YOUTUBE_MUSIC'
+  | 'SOUNDCLOUD'
+  | 'YOUTUBE'
+  | 'DIRECT_STREAM';
+
+export type MusicPlaybackStatus =
+  | 'IDLE'
+  | 'AWAITING_SOURCE'
+  | 'AWAITING_APPROVAL'
+  | 'PLAYING'
+  | 'PAUSED'
+  | 'STOPPED'
+  | 'OPENED_EXTERNAL_LINK'
+  | 'UNAVAILABLE'
+  | 'ERROR';
+
+export interface MusicPlaybackState {
+  status: MusicPlaybackStatus;
+  sourceType: MusicSourceType | null;
+  trackTitle: string | null;
+  sourceUrl?: string;
+  volume: number;
+  currentTimeSec: number;
+  durationSec: number;
+  isActualAudioPlaying: boolean;
+  autoplayBlocked?: boolean;
+  popupBlocked?: boolean;
+  statusMessage: string;
+  error?: string;
+}
+
+export interface PendingInteractivePrompt {
+  kind: 'FILE_PICKER' | 'MUSIC_SOURCE' | 'AMBIGUOUS_CLARIFICATION';
+  message: string;
+  requestedAction?: string;
+  query?: string;
+  musicChoices?: { id: MusicSourceType; label: string; description: string }[];
+}
+
 export interface IntelligenceRequestResult {
   id: string;
   input: string;
@@ -322,6 +509,12 @@ export interface IntelligenceRequestResult {
   toolRecords: ToolActivityRecord[];
   plan?: ExecutionPlan;
   pendingApproval?: PendingToolApproval;
+  pendingPermission?: PermissionRequest;
+  interactivePrompt?: PendingInteractivePrompt;
+  openedFile?: FileInspectionResult;
+  browserAction?: BrowserNavigationResult;
+  searchResult?: WebSearchResponse;
+  musicState?: MusicPlaybackState;
   memoryCandidate?: MemoryConsentCandidate;
   activitySummary: string;
   cancelled?: boolean;

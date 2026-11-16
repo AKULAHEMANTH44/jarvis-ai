@@ -9,6 +9,12 @@ import { HologramModelId, HologramRenderMode, LayoutFormation } from '../types/h
 import { conversationManager } from './conversationManager';
 import { memoryManager } from './memoryManager';
 import { desktopBridge } from './desktopBridge';
+import { permissionManager } from './permissionManager';
+import { fileAccessService } from './fileAccessService';
+import { browserActionService, validateNavigationUrl } from './browserActionService';
+import { webSearchService, extractSearchIntent } from './webSearchService';
+import { musicService } from './musicService';
+import { MusicSourceType, WebSearchProviderId } from '../types/assistant';
 
 export interface WorkspaceToolHost {
   getContextSnapshot: () => WorkspaceContextSnapshot;
@@ -32,6 +38,7 @@ export interface WorkspaceToolHost {
   exportNotes: () => Promise<boolean>;
   toggleCamera?: () => Promise<boolean> | boolean;
   openDrawer?: (drawer: 'GESTURE' | 'MODELS' | 'LAB' | 'TELEMETRY' | 'CONFIG' | 'TASKS' | 'VOICE' | 'BRAIN') => boolean;
+  import3DModelFiles?: (files: File[]) => Promise<void> | void;
 }
 
 const VALID_MODELS: HologramModelId[] = [
@@ -1017,6 +1024,243 @@ export class ToolRegistry {
           summary: res.ok ? 'Cleared all persistent user memories.' : `Memory clear failed: ${res.error}`,
           error: res.error
         };
+      }
+    });
+
+    // =========================================================================
+    // Phase 5 — Permission-Gated Real-World Action Tools
+    // =========================================================================
+
+    this.registerTool({
+      name: 'access_user_file',
+      description: 'Open or read a user-selected file after explicit FILE_ACCESS permission approval.',
+      permissionLevel: 'CONSEQUENTIAL',
+      requiresConfirmation: true,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          fileId: { type: 'string', description: 'Session file identifier selected by the user.' },
+          permissionId: { type: 'string', description: 'Single-use approved FILE_ACCESS permission ID.' }
+        },
+        required: ['fileId', 'permissionId']
+      },
+      execute: async (args) => {
+        const fileId = String(args.fileId || '');
+        const permissionId = String(args.permissionId || '');
+        const res = await fileAccessService.openAuthorizedFile(fileId, permissionId);
+        return {
+          ok: res.ok,
+          verified: res.ok,
+          summary: res.summary || res.error || 'Unable to open selected file.',
+          data: { fileResult: res },
+          error: res.error
+        };
+      }
+    });
+
+    this.registerTool({
+      name: 'open_external_url',
+      description: 'Open a validated HTTPS website in a new browser tab after explicit BROWSER_ACCESS approval.',
+      permissionLevel: 'CONSEQUENTIAL',
+      requiresConfirmation: true,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'Validated HTTPS URL to open.' },
+          permissionId: { type: 'string', description: 'Single-use approved BROWSER_ACCESS permission ID.' }
+        },
+        required: ['url', 'permissionId']
+      },
+      execute: (args) => {
+        const rawUrl = String(args.url || '');
+        const permissionId = String(args.permissionId || '');
+        const preview = validateNavigationUrl(rawUrl);
+        if (!preview.valid || !preview.normalizedUrl) {
+          return {
+            ok: false,
+            verified: false,
+            summary: preview.error || 'Blocked invalid URL.',
+            error: preview.error
+          };
+        }
+        const nav = browserActionService.openApprovedUrl(preview.normalizedUrl, permissionId, 'BROWSER_ACCESS');
+        return {
+          ok: nav.ok,
+          verified: nav.ok && nav.openedInNewTab,
+          summary: nav.summary,
+          data: { browserAction: nav },
+          error: nav.error
+        };
+      }
+    });
+
+    this.registerTool({
+      name: 'search_web',
+      description: 'Execute a user-approved web search query via public HTTPS endpoints or browser search tab.',
+      permissionLevel: 'CONSEQUENTIAL',
+      requiresConfirmation: true,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Extracted search query string.' },
+          provider: {
+            type: 'string',
+            description: 'Search provider destination.',
+            enum: ['DUCKDUCKGO', 'WIKIPEDIA', 'GOOGLE', 'MDN', 'GITHUB']
+          },
+          permissionId: { type: 'string', description: 'Single-use approved WEB_SEARCH permission ID.' },
+          openInBrowserFallback: {
+            type: 'boolean',
+            description: 'Open approved query in browser tab if API returns zero results.'
+          }
+        },
+        required: ['query', 'permissionId']
+      },
+      execute: async (args) => {
+        const intent = extractSearchIntent(String(args.query || ''));
+        const cleanQuery = intent.query || String(args.query || '').trim();
+        const permissionId = String(args.permissionId || '');
+        const provider = (args.provider as WebSearchProviderId | undefined) || 'DUCKDUCKGO';
+        const searchRes = await webSearchService.executeApprovedSearch(cleanQuery, permissionId, {
+          provider,
+          openInBrowserFallback: Boolean(args.openInBrowserFallback)
+        });
+        return {
+          ok: searchRes.ok,
+          verified: searchRes.ok && (searchRes.results.length > 0 || Boolean(searchRes.openedInBrowser)),
+          summary: searchRes.ok
+            ? searchRes.sourceSummary || `Search completed for "${searchRes.query}" via ${searchRes.provider}.`
+            : searchRes.error || 'Unable to complete web search.',
+          data: { searchResult: searchRes },
+          error: searchRes.error
+        };
+      }
+    });
+
+    this.registerTool({
+      name: 'control_music_playback',
+      description: 'Play user-approved local audio or open an official music service link; pause, resume, stop, or adjust volume.',
+      permissionLevel: 'CONSEQUENTIAL',
+      requiresConfirmation: true,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          action: {
+            type: 'string',
+            description: 'Music operation to execute.',
+            enum: ['PLAY_LOCAL', 'OPEN_SERVICE', 'PAUSE', 'RESUME', 'STOP', 'SET_VOLUME']
+          },
+          fileId: { type: 'string', description: 'Selected local audio file ID.' },
+          sourceType: {
+            type: 'string',
+            description: 'Music service source type.',
+            enum: ['LOCAL_AUDIO', 'SPOTIFY', 'YOUTUBE_MUSIC', 'SOUNDCLOUD', 'YOUTUBE']
+          },
+          query: { type: 'string', description: 'Requested song, artist, or genre query.' },
+          volume: { type: 'number', description: 'Volume between 0 and 1.', min: 0, max: 1 },
+          permissionId: { type: 'string', description: 'Approved MUSIC_PLAYBACK permission ID when starting playback or opening external service.' }
+        },
+        required: ['action']
+      },
+      execute: async (args) => {
+        const action = String(args.action || '');
+        if (action === 'PAUSE') {
+          const ok = musicService.pause();
+          const st = musicService.getState();
+          return {
+            ok,
+            verified: ok,
+            summary: st.statusMessage,
+            data: { musicState: st },
+            error: ok ? undefined : 'No active local audio track to pause.'
+          };
+        }
+        if (action === 'RESUME') {
+          const ok = await musicService.resume();
+          const st = musicService.getState();
+          return {
+            ok,
+            verified: ok,
+            summary: st.statusMessage,
+            data: { musicState: st },
+            error: ok ? undefined : st.error || 'Unable to resume audio.'
+          };
+        }
+        if (action === 'STOP') {
+          const ok = musicService.stop();
+          const st = musicService.getState();
+          return {
+            ok,
+            verified: true,
+            summary: st.statusMessage,
+            data: { musicState: st }
+          };
+        }
+        if (action === 'SET_VOLUME') {
+          const vol = musicService.setVolume(Number(args.volume ?? 0.75));
+          const st = musicService.getState();
+          return {
+            ok: true,
+            verified: Math.abs(st.volume - vol) < 0.01,
+            summary: st.statusMessage,
+            data: { musicState: st }
+          };
+        }
+
+        const permissionId = String(args.permissionId || '');
+        if (!permissionId) {
+          return {
+            ok: false,
+            verified: false,
+            summary: 'Explicit MUSIC_PLAYBACK permission is required before starting music playback or opening a service link.',
+            error: 'USER_CONFIRMATION_REQUIRED'
+          };
+        }
+
+        if (action === 'PLAY_LOCAL') {
+          const fileId = String(args.fileId || '');
+          const file = fileAccessService.getRawFile(fileId);
+          if (!file) {
+            permissionManager.completeExecution(permissionId, false, 'Audio file unavailable.', 'MISSING_FILE');
+            return { ok: false, verified: false, summary: 'Selected local audio file was not found.', error: 'MISSING_FILE' };
+          }
+          const st = await musicService.playApprovedLocalAudio(file, permissionId);
+          const ok = st.status === 'PLAYING' || (st.status === 'PAUSED' && Boolean(st.autoplayBlocked));
+          return {
+            ok,
+            verified: ok,
+            summary: st.statusMessage,
+            data: { musicState: st },
+            error: st.error
+          };
+        }
+
+        if (action === 'OPEN_SERVICE') {
+          const sourceType = (args.sourceType as MusicSourceType | undefined) || 'SPOTIFY';
+          if (sourceType === 'LOCAL_AUDIO' || sourceType === 'DIRECT_STREAM') {
+            return {
+              ok: false,
+              verified: false,
+              summary: 'Specify SPOTIFY, YOUTUBE_MUSIC, SOUNDCLOUD, or YOUTUBE for external service links.',
+              error: 'INVALID_SOURCE_TYPE'
+            };
+          }
+          const st = musicService.openApprovedMusicServiceLink(
+            sourceType,
+            String(args.query || ''),
+            permissionId
+          );
+          const ok = st.status === 'OPENED_EXTERNAL_LINK';
+          return {
+            ok,
+            verified: ok,
+            summary: st.statusMessage,
+            data: { musicState: st },
+            error: st.error
+          };
+        }
+
+        return { ok: false, verified: false, summary: `Unknown music action "${action}".`, error: 'UNKNOWN_ACTION' };
       }
     });
   }

@@ -54,11 +54,12 @@ export const VoiceConsoleHUD: React.FC<VoiceConsoleHUDProps> = ({
     'Hello JARVIS',
     'Inspect my current workspace',
     'Prepare my project for demonstration',
+    'Open GitHub',
+    'Search web for Three.js',
+    'Open a file',
+    'Play music',
     'Show me the vehicle',
-    'Rotate it 360 degrees',
     'Explode the model',
-    'Disintegrate',
-    'Reconstruct the object',
     'Return to normal view'
   ];
 
