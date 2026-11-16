@@ -10,6 +10,7 @@ import { BootSequenceOverlay } from './components/HUD/BootSequenceOverlay';
 import { FloatingSpatialPanels } from './components/Workspace/FloatingSpatialPanels';
 import { PermissionConfirmationModal } from './components/Workspace/PermissionConfirmationModal';
 import { AIConfigModal } from './components/HUD/AIConfigModal';
+import { IntelligenceHUD, IntelligenceTabId } from './components/HUD/IntelligenceHUD';
 import { HologramSceneManager } from './three/HologramScene';
 import {
   CameraControlMode,
@@ -28,7 +29,12 @@ import {
   GestureType,
   SpatialVisualFeedback
 } from './types/gesture';
-import { AssistantMessage, VoiceCommand, DesktopPermissionRequest } from './types/assistant';
+import {
+  AssistantMessage,
+  VoiceCommand,
+  DesktopPermissionRequest,
+  WorkspaceContextSnapshot
+} from './types/assistant';
 import { handTrackingService } from './services/handTracking';
 import { gestureEngine } from './services/gestureEngine';
 import { spatialInteractionController } from './services/spatialInteractionController';
@@ -37,6 +43,10 @@ import { speechService } from './services/speechService';
 import { desktopBridge } from './services/desktopBridge';
 import { automationEngine } from './services/automationEngine';
 import { contextualAI } from './services/contextualAI';
+import { intelligenceEngine, IntelligenceStateSnapshot } from './services/intelligenceEngine';
+import { toolRegistry, WorkspaceToolHost } from './services/toolRegistry';
+import { memoryManager } from './services/memoryManager';
+import { suggestionEngine } from './services/suggestionEngine';
 import {
   HudDrawerId,
   HudLayoutState,
@@ -51,7 +61,7 @@ import {
 } from './utils/hudState';
 import { SpatialHistoryManager } from './utils/spatialHistory';
 import { WorkspaceSnapshot } from './three/SpatialObjectManager';
-import { X } from 'lucide-react';
+import { X, Sparkles } from 'lucide-react';
 
 interface WorkspaceUndoState {
   spatial: WorkspaceSnapshot;
@@ -83,6 +93,10 @@ export const App: React.FC = () => {
   const [isProcessingCommand, setIsProcessingCommand] = useState<boolean>(false);
   const [cameraControlMode, setCameraControlMode] = useState<CameraControlMode>('OBJECT');
   const [labError, setLabError] = useState<string | null>(null);
+  const [isCanvasInteracting, setIsCanvasInteracting] = useState<boolean>(false);
+  const [intelligenceState, setIntelligenceState] = useState<IntelligenceStateSnapshot>(() =>
+    intelligenceEngine.getSnapshot()
+  );
 
   // Unified Hologram-First Contextual HUD & Focus Mode State
   const [hudState, setHudState] = useState<HudLayoutState>({
@@ -108,6 +122,10 @@ export const App: React.FC = () => {
     tab: 'MODELS' | 'DIAGNOSTICS' | 'SETTINGS';
     nonce: number;
   } | null>({ tab: 'MODELS', nonce: 1 });
+  const [requestedBrainTab, setRequestedBrainTab] = useState<{
+    tab: IntelligenceTabId;
+    nonce: number;
+  } | null>({ tab: 'CHAT', nonce: 1 });
 
   // Modals & Panels State
   const [permissionRequest, setPermissionRequest] = useState<DesktopPermissionRequest | null>(null);
@@ -1401,6 +1419,68 @@ export const App: React.FC = () => {
         action: () => handleRedo(),
         feedbackText: 'Restoring undone workspace transformation.',
         failureText: 'No undone transformation state available to redo.'
+      },
+      {
+        patterns: ['open intelligence brain', 'open ai brain', 'open brain', 'show brain'],
+        description: 'Open the AI Intelligence Brain HUD',
+        category: 'AI',
+        action: () => {
+          setMode('WORKSPACE');
+          setRequestedBrainTab({ tab: 'CHAT', nonce: nextNonce() });
+          setHudState((prev) => openDrawerState(prev, 'BRAIN'));
+          audioService.playChirp(1350);
+          return true;
+        },
+        feedbackText: 'Opening J.A.R.V.I.S. AI Intelligence Brain.'
+      },
+      {
+        patterns: ['show suggestions', 'open suggestions', 'ai suggestions'],
+        description: 'Open Intelligence Brain Suggestions tab',
+        category: 'AI',
+        action: () => {
+          setMode('WORKSPACE');
+          setRequestedBrainTab({ tab: 'SUGGESTIONS', nonce: nextNonce() });
+          setHudState((prev) => openDrawerState(prev, 'BRAIN'));
+          audioService.playChirp(1350);
+          return true;
+        },
+        feedbackText: 'Displaying contextual workspace suggestions.'
+      },
+      {
+        patterns: ['show memory', 'open memory', 'memory controls'],
+        description: 'Open User-Controlled Memory panel',
+        category: 'AI',
+        action: () => {
+          setMode('WORKSPACE');
+          setRequestedBrainTab({ tab: 'MEMORY', nonce: nextNonce() });
+          setHudState((prev) => openDrawerState(prev, 'BRAIN'));
+          audioService.playChirp(1350);
+          return true;
+        },
+        feedbackText: 'Opening user-controlled persistent memory controls.'
+      },
+      {
+        patterns: ['show plan', 'open plan', 'execution plan'],
+        description: 'Open Multi-Step Planning panel',
+        category: 'AI',
+        action: () => {
+          setMode('WORKSPACE');
+          setRequestedBrainTab({ tab: 'PLAN', nonce: nextNonce() });
+          setHudState((prev) => openDrawerState(prev, 'BRAIN'));
+          audioService.playChirp(1350);
+          return true;
+        },
+        feedbackText: 'Opening structured execution planner.'
+      },
+      {
+        patterns: ['cancel request', 'stop thinking', 'stop speaking'],
+        description: 'Cancel active AI request and speech synthesis',
+        category: 'SYSTEM',
+        action: () => {
+          speechService.interruptAndCancel();
+          return true;
+        },
+        feedbackText: 'Active AI request and vocal synthesis cancelled.'
       }
     ];
 
@@ -1408,54 +1488,27 @@ export const App: React.FC = () => {
     speechService.setMessageCallback((msg) => {
       setMessages((prev) => [...prev, msg]);
     });
-    speechService.setUnmatchedTranscriptHandler(async (transcript) => {
-      const cfg = contextualAI.getConfig();
-      if (cfg.provider !== 'LOCAL' && contextualAI.hasApiKey()) {
-        setIsProcessingCommand(true);
-        try {
-          const extReply = await contextualAI.queryExternalAI(transcript);
-          if (extReply) return extReply;
-        } finally {
-          setIsProcessingCommand(false);
-        }
+    speechService.setCommandExecutedCallback((_cmd, rawTranscript) => {
+      memoryManager.recordCommandUsage(rawTranscript);
+    });
+    speechService.setCancelCallback(() => {
+      intelligenceEngine.cancelActiveRequest();
+    });
+    speechService.setUnmatchedTranscriptHandler(async (transcript, source) => {
+      setIsProcessingCommand(true);
+      try {
+        const snapshot = buildWorkspaceSnapshotRef.current();
+        const res = await intelligenceEngine.processRequest({
+          input: transcript,
+          snapshot,
+          source
+        });
+        return res.reply;
+      } finally {
+        setIsProcessingCommand(false);
       }
-
-      const activeName =
-        sceneManagerRef.current?.spatialManager.getSelected()?.name || currentModelId.replace(/_/g, ' ');
-      const intent = contextualAI.parseLocalIntent(transcript, activeName);
-
-      if (intent.action === 'RECONSTRUCT_SCAN') {
-        handleTriggerRescan();
-      } else if (intent.action === 'DUPLICATE' && selectedObjectId) {
-        handleDuplicateObject(selectedObjectId);
-      } else if (intent.action === 'DELETE' && selectedObjectId) {
-        void handleDeleteObject(selectedObjectId);
-      } else if (intent.action === 'FORMATION_ORBIT') {
-        handleApplyFormation('ORBIT');
-      } else if (intent.action === 'FORMATION_GRID') {
-        handleApplyFormation('GRID');
-      } else if (intent.action === 'FORMATION_LINE') {
-        handleApplyFormation('LINE');
-      } else if (intent.action === 'SAVE_FILE') {
-        void desktopBridge
-          .requestAuthorization(
-            'FILE_WRITE',
-            'stark_lab_notes.txt',
-            'Export mission memorandum notes to authorized local file system.'
-          )
-          .then((approved) => {
-            if (approved) {
-              return desktopBridge.saveAuthorizedFile('stark_lab_notes.txt', notes);
-            }
-          });
-      }
-
-      contextualAI.addHistory('user', transcript);
-      contextualAI.addHistory('assistant', intent.reply);
-      return intent.reply;
     });
   }, [
-    currentModelId,
     handleApplyFormation,
     handleDeleteObject,
     handleDisintegrate,
@@ -1469,10 +1522,7 @@ export const App: React.FC = () => {
     handleSelectModel,
     handleTriggerRescan,
     handleTriggerShockwave,
-    handleUndo,
-    notes,
-    selectedObjectId,
-    syncSpatialStates
+    handleUndo
   ]);
 
   // Voice Assistant toggle with explicit microphone permission flow
@@ -1498,7 +1548,7 @@ export const App: React.FC = () => {
 
   // Local voice commands always take priority over external LLM chat responses
   const handleSendConsoleCommand = useCallback((text: string) => {
-    speechService.handleTranscript(text);
+    speechService.handleTranscript(text, 'CONSOLE');
   }, []);
 
   // Camera & Tracking toggle with clear permission feedback
@@ -1818,6 +1868,235 @@ export const App: React.FC = () => {
   const selectedSpatialObj = spatialObjects.find((o) => o.id === selectedObjectId) || spatialObjects[0] || null;
   const isTrackingLost = Boolean(isCameraActive && gestureResult?.trackingLost);
 
+  const buildWorkspaceSnapshot = useCallback((): WorkspaceContextSnapshot => {
+    const cfg = contextualAI.getConfig();
+    const sel = spatialObjects.find((o) => o.id === selectedObjectId) || spatialObjects[0] || null;
+    return {
+      mode,
+      selectedObjectId: sel?.id || selectedObjectId || null,
+      selectedObjectName: sel?.name || currentModelId.replace(/_/g, ' ').toUpperCase(),
+      selectedModelId: sel?.modelId || currentModelId,
+      objectCount: spatialObjects.length,
+      objectsSummary: spatialObjects.map((o) => ({
+        id: o.id,
+        name: o.name,
+        modelId: o.modelId,
+        vertexCount: o.vertexCount,
+        faceCount: o.faceCount,
+        componentCount: o.componentCount,
+        isLocked: o.isLocked,
+        isDisintegrated: Boolean(o.isDisintegrated),
+        dispersionPhase: o.dispersionPhase,
+        renderMode: o.renderMode,
+        selectedComponentId: o.selectedComponentId,
+        isolatedComponentId: o.isolatedComponentId,
+        components: o.components?.map((c) => ({ id: c.id, name: c.name }))
+      })),
+      renderMode: visualSettings.renderMode,
+      explosionAmount: visualSettings.explosionAmount,
+      dispersionAmount: visualSettings.dispersionAmount,
+      isCameraActive,
+      isVoiceActive,
+      hasLabError: Boolean(labError),
+      labError,
+      provider: cfg.provider,
+      hasProviderKey: contextualAI.hasApiKey(),
+      modelName: cfg.modelName,
+      notesPreview: notes.slice(0, 240),
+      isInteracting: isCanvasInteracting
+    };
+  }, [
+    currentModelId,
+    isCameraActive,
+    isCanvasInteracting,
+    isVoiceActive,
+    labError,
+    mode,
+    notes,
+    selectedObjectId,
+    spatialObjects,
+    visualSettings.dispersionAmount,
+    visualSettings.explosionAmount,
+    visualSettings.renderMode
+  ]);
+
+  const buildWorkspaceSnapshotRef = useRef<() => WorkspaceContextSnapshot>(buildWorkspaceSnapshot);
+  buildWorkspaceSnapshotRef.current = buildWorkspaceSnapshot;
+
+  const toolHostActionsRef = useRef<WorkspaceToolHost | null>(null);
+  toolHostActionsRef.current = {
+    getContextSnapshot: () => buildWorkspaceSnapshot(),
+    selectModel: (modelId) => {
+      if (!sceneManagerRef.current) return false;
+      handleSelectModel(modelId);
+      return true;
+    },
+    setRenderMode: (renderMode) => {
+      handleUpdateVisualSettingsWithHistory({
+        renderMode,
+        wireframe: renderMode !== 'SOLID_HOLO'
+      });
+      return true;
+    },
+    setExplosionAmount: (amount) => {
+      const clamped = Math.max(0, Math.min(1, amount));
+      handleUpdateVisualSettingsWithHistory({
+        explodedView: clamped > 0.05,
+        explosionAmount: clamped,
+        showComponentLabels: true
+      });
+      return true;
+    },
+    disintegrate: () => handleDisintegrate(),
+    reconstruct: () => handleReconstruct(),
+    rotate360: () => handleRotate360(),
+    frameModel: () => {
+      if (!sceneManagerRef.current) return false;
+      handleFrameSelectedObject();
+      return true;
+    },
+    resetCamera: () => {
+      if (!sceneManagerRef.current) return false;
+      handleResetCamera();
+      return true;
+    },
+    resetTransform: () => {
+      if (!sceneManagerRef.current) return false;
+      handleResetTransform();
+      return true;
+    },
+    applyFormation: (formation) => {
+      if (!sceneManagerRef.current) return false;
+      handleApplyFormation(formation);
+      return true;
+    },
+    duplicateSelected: () => {
+      const targetId = selectedObjectId || spatialObjects[0]?.id;
+      if (!targetId) return false;
+      return handleDuplicateObject(targetId);
+    },
+    deleteSelected: async () => {
+      const targetId = selectedObjectId || spatialObjects[0]?.id;
+      if (!targetId) return false;
+      return handleDeleteObject(targetId);
+    },
+    selectComponent: (componentId) => {
+      const targetId = selectedObjectId || spatialObjects[0]?.id;
+      if (!targetId) return false;
+      handleSelectComponent(targetId, componentId);
+      return true;
+    },
+    isolateComponent: (componentId) => {
+      const targetId = selectedObjectId || spatialObjects[0]?.id;
+      if (!targetId) return false;
+      handleIsolateComponent(targetId, componentId);
+      return true;
+    },
+    undo: () => handleUndo(),
+    redo: () => handleRedo(),
+    appendNote: (text) => {
+      const line = text.trim();
+      if (!line) return false;
+      setNotes((prev) => `${prev.trimEnd()}\n• ${line}`);
+      return true;
+    },
+    exportNotes: async () => {
+      const approved = await desktopBridge.requestAuthorization(
+        'FILE_WRITE',
+        'stark_lab_notes.txt',
+        'Export mission memorandum notes to authorized local file system.'
+      );
+      if (!approved) return false;
+      return desktopBridge.saveAuthorizedFile('stark_lab_notes.txt', notes);
+    },
+    openDrawer: (drawer) => {
+      setMode('WORKSPACE');
+      setHudState((prev) => openDrawerState(prev, drawer));
+      return true;
+    }
+  };
+
+  useEffect(() => {
+    const proxyHost: WorkspaceToolHost = {
+      getContextSnapshot: () => toolHostActionsRef.current!.getContextSnapshot(),
+      selectModel: (id) => toolHostActionsRef.current!.selectModel(id),
+      setRenderMode: (m) => toolHostActionsRef.current!.setRenderMode(m),
+      setExplosionAmount: (amt) => toolHostActionsRef.current!.setExplosionAmount(amt),
+      disintegrate: () => toolHostActionsRef.current!.disintegrate(),
+      reconstruct: () => toolHostActionsRef.current!.reconstruct(),
+      rotate360: () => toolHostActionsRef.current!.rotate360(),
+      frameModel: () => toolHostActionsRef.current!.frameModel(),
+      resetCamera: () => toolHostActionsRef.current!.resetCamera(),
+      resetTransform: () => toolHostActionsRef.current!.resetTransform(),
+      applyFormation: (f) => toolHostActionsRef.current!.applyFormation(f),
+      duplicateSelected: () => toolHostActionsRef.current!.duplicateSelected(),
+      deleteSelected: () => toolHostActionsRef.current!.deleteSelected(),
+      selectComponent: (c) => toolHostActionsRef.current!.selectComponent(c),
+      isolateComponent: (c) => toolHostActionsRef.current!.isolateComponent(c),
+      undo: () => toolHostActionsRef.current!.undo(),
+      redo: () => toolHostActionsRef.current!.redo(),
+      appendNote: (t) => toolHostActionsRef.current!.appendNote(t),
+      exportNotes: () => toolHostActionsRef.current!.exportNotes(),
+      openDrawer: (d) => toolHostActionsRef.current!.openDrawer!(d)
+    };
+    toolRegistry.setHost(proxyHost);
+    return () => {
+      toolRegistry.setHost(null);
+    };
+  }, []);
+
+  useEffect(() => {
+    const unsub = intelligenceEngine.subscribe((snap) => {
+      setIntelligenceState(snap);
+      const busy =
+        snap.status === 'UNDERSTANDING' ||
+        snap.status === 'ANALYZING' ||
+        snap.status === 'PLANNING' ||
+        snap.status === 'EXECUTING' ||
+        snap.status === 'VERIFYING';
+      setIsProcessingCommand(busy);
+    });
+    return () => unsub();
+  }, []);
+
+  useEffect(() => {
+    intelligenceEngine.setListeningState(isVoiceActive);
+  }, [isVoiceActive]);
+
+  useEffect(() => {
+    if (mode === 'STANDBY' || isCanvasInteracting) return;
+    intelligenceEngine.refreshSuggestions(buildWorkspaceSnapshot());
+  }, [
+    buildWorkspaceSnapshot,
+    isCanvasInteracting,
+    labError,
+    mode,
+    selectedObjectId,
+    spatialObjects.length,
+    visualSettings.dispersionAmount,
+    visualSettings.explosionAmount
+  ]);
+
+  useEffect(() => {
+    if (!isCanvasInteracting) return;
+    const clearInteracting = () => setIsCanvasInteracting(false);
+    window.addEventListener('pointerup', clearInteracting);
+    window.addEventListener('pointercancel', clearInteracting);
+    return () => {
+      window.removeEventListener('pointerup', clearInteracting);
+      window.removeEventListener('pointercancel', clearInteracting);
+    };
+  }, [isCanvasInteracting]);
+
+  const isBrainBusyStatus =
+    intelligenceState.status === 'UNDERSTANDING' ||
+    intelligenceState.status === 'ANALYZING' ||
+    intelligenceState.status === 'PLANNING' ||
+    intelligenceState.status === 'AWAITING_APPROVAL' ||
+    intelligenceState.status === 'EXECUTING' ||
+    intelligenceState.status === 'VERIFYING' ||
+    intelligenceState.status === 'ERROR';
+
   const coreActivityLabel = isTrackingLost
     ? 'TRACKING LOST'
     : selectedSpatialObj?.dispersionPhase && selectedSpatialObj.dispersionPhase !== 'COMPLETE'
@@ -1826,6 +2105,8 @@ export const App: React.FC = () => {
     ? 'DISINTEGRATED'
     : selectedSpatialObj?.isFrozen
     ? 'OBJECT FROZEN'
+    : isBrainBusyStatus
+    ? intelligenceState.status.replace('_', ' ')
     : isSpeaking
     ? 'SPEAKING'
     : isVoiceActive
@@ -1864,6 +2145,19 @@ export const App: React.FC = () => {
     handleResetTransform();
   }, [handleReconstruct, handleResetTransform]);
 
+  const handleSubmitBrainPrompt = useCallback(
+    async (prompt: string) => {
+      const res = await intelligenceEngine.processRequest({
+        input: prompt,
+        snapshot: buildWorkspaceSnapshot(),
+        source: 'CONSOLE'
+      });
+      appendMessage('USER', prompt, 'COMMAND');
+      appendMessage('JARVIS', res.reply, res.error ? 'ALERT' : 'RESPONSE');
+    },
+    [appendMessage, buildWorkspaceSnapshot]
+  );
+
   const handleBootProgress = useCallback((p: number) => {
     sceneManagerRef.current?.setInitializationProgress(p);
   }, []);
@@ -1881,6 +2175,17 @@ export const App: React.FC = () => {
     mode !== 'STANDBY' && !hudState.isFocusMode && hudState.activeDrawer === 'TASKS';
   const showVoiceConsole =
     mode !== 'STANDBY' && !hudState.isFocusMode && hudState.activeDrawer === 'VOICE';
+  const showBrainConsole =
+    mode !== 'STANDBY' && !hudState.isFocusMode && hudState.activeDrawer === 'BRAIN';
+
+  const topSuggestion = intelligenceState.activeSuggestions[0] || null;
+  const showSuggestionToast =
+    Boolean(topSuggestion) &&
+    mode !== 'STANDBY' &&
+    !hudState.isFocusMode &&
+    !isCanvasInteracting &&
+    !isProcessingCommand &&
+    hudState.activeDrawer !== 'BRAIN';
 
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-[#02060c] font-mono text-cyan-400 select-none flex flex-col">
@@ -1906,6 +2211,7 @@ export const App: React.FC = () => {
         onSelectComponent={handleSelectComponent}
         onHighlightComponent={handleHighlightComponent}
         onTransformStart={() => {
+          setIsCanvasInteracting(true);
           pendingCanvasBeforeRef.current = captureUndoState();
         }}
         onTransformChange={() => {
@@ -1941,6 +2247,8 @@ export const App: React.FC = () => {
           isVoiceActive={isVoiceActive}
           activeDrawer={hudState.activeDrawer}
           isFocusMode={hudState.isFocusMode}
+          intelligenceStatus={intelligenceState.status}
+          activeSuggestionCount={intelligenceState.activeSuggestions.length}
           onSelectVisionHome={handleSelectVisionHome}
           onSelectDrawer={handleSelectDrawer}
           onToggleFocusMode={handleToggleFocusMode}
@@ -2230,12 +2538,92 @@ export const App: React.FC = () => {
                 isListening={isVoiceActive}
                 isSpeaking={isSpeaking}
                 isProcessing={isProcessingCommand}
+                intelligenceStatus={intelligenceState.status}
                 voiceError={voiceError}
                 onToggleVoice={handleToggleVoice}
+                onCancelRequest={() => speechService.interruptAndCancel()}
+                onOpenBrain={() => {
+                  setRequestedBrainTab({ tab: 'CHAT', nonce: nextNonce() });
+                  setHudState((prev) => openDrawerState(prev, 'BRAIN'));
+                }}
                 onClearHistory={() => setMessages((prev) => prev.slice(0, 1))}
                 onClose={() => setHudState(closeDrawerState)}
               />
             </section>
+          )}
+
+          {/* Bottom-Center Contextual Panel: AI Intelligence Brain */}
+          {showBrainConsole && (
+            <section
+              aria-label="JARVIS AI Intelligence Brain"
+              data-testid="intelligence-brain-drawer"
+              className="pointer-events-auto fixed bottom-20 left-1/2 -translate-x-1/2 w-[min(600px,94vw)] rounded-xl animate-fade-in"
+            >
+              <IntelligenceHUD
+                intelligenceState={intelligenceState}
+                workspaceSnapshot={buildWorkspaceSnapshot()}
+                requestedTab={requestedBrainTab}
+                onSubmitPrompt={(prompt) => void handleSubmitBrainPrompt(prompt)}
+                onCancelRequest={() => intelligenceEngine.cancelActiveRequest()}
+                onOpenAIConfig={() => setIsAIConfigOpen(true)}
+                onOpenTasksDrawer={() => {
+                  setTaskSubTab('AUTOMATION');
+                  setRequestedTaskTab({ tab: 'AUTOMATION', nonce: nextNonce() });
+                  setHudState((prev) => openDrawerState(prev, 'TASKS'));
+                }}
+                onClose={() => setHudState(closeDrawerState)}
+              />
+            </section>
+          )}
+
+          {/* Non-Intrusive Proactive Suggestion Toast (Suppressed during active canvas interaction & Focus mode) */}
+          {showSuggestionToast && topSuggestion && (
+            <div
+              role="status"
+              data-testid="proactive-suggestion-toast"
+              className="pointer-events-auto fixed bottom-20 right-4 w-[min(300px,88vw)] p-2.5 rounded-xl bg-[#020914]/92 border border-cyan-400/55 shadow-[0_0_24px_rgba(0,240,255,0.2)] space-y-1.5 animate-fade-in"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 font-orbitron text-[9.5px] font-bold text-cyan-200 truncate">
+                  <Sparkles className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                  <span className="truncate">{topSuggestion.title}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => suggestionEngine.rejectSuggestion(topSuggestion.id)}
+                  aria-label="Dismiss Suggestion"
+                  className="text-cyan-400/70 hover:text-white shrink-0"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              <p className="text-[10px] text-cyan-100/90 leading-snug">
+                {topSuggestion.explanation}
+              </p>
+              <div className="flex items-center gap-1.5 pt-0.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    audioService.playChirp(1400);
+                    void suggestionEngine.acceptSuggestion(topSuggestion.id);
+                  }}
+                  className="px-2 py-0.5 rounded border border-emerald-400/60 bg-emerald-950/50 text-emerald-200 text-[9px] font-orbitron"
+                >
+                  APPLY
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    audioService.playChirp(1250);
+                    setRequestedBrainTab({ tab: 'SUGGESTIONS', nonce: nextNonce() });
+                    setHudState((prev) => openDrawerState(prev, 'BRAIN'));
+                  }}
+                  className="px-2 py-0.5 rounded border border-cyan-500/40 text-cyan-200 text-[9px] font-orbitron"
+                >
+                  DETAILS
+                </button>
+              </div>
+            </div>
           )}
         </div>
       )}
@@ -2252,6 +2640,8 @@ export const App: React.FC = () => {
           isFocusMode={hudState.isFocusMode}
           isCameraActive={isCameraActive}
           isVoiceActive={isVoiceActive}
+          intelligenceStatus={intelligenceState.status}
+          activeSuggestionCount={intelligenceState.activeSuggestions.length}
           onSelectVisionHome={handleSelectVisionHome}
           onSelectDrawer={handleSelectDrawer}
           onResetTransform={handleResetEnvironment}

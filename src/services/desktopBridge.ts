@@ -2,7 +2,7 @@ import { DesktopPermissionRequest, SystemStatusTelemetry } from '../types/assist
 import { audioService } from './soundFx';
 
 class DesktopBridgeService {
-  private pendingRequests: Map<string, DesktopPermissionRequest> = new Map();
+  private pendingRequests: Map<string, { req: DesktopPermissionRequest; resolve: (approved: boolean) => void; timeout: ReturnType<typeof setTimeout> }> = new Map();
   private onPermissionPrompt?: (req: DesktopPermissionRequest) => void;
 
   public setPromptCallback(cb: (req: DesktopPermissionRequest) => void) {
@@ -24,38 +24,29 @@ class DesktopBridgeService {
       timestamp: Date.now()
     };
 
-    this.pendingRequests.set(id, req);
     audioService.playChirp(900);
 
     return new Promise((resolve) => {
-      if (this.onPermissionPrompt) {
-        this.onPermissionPrompt(req);
-      }
-
-      const check = setInterval(() => {
-        if (!this.pendingRequests.has(id)) {
-          clearInterval(check);
-          resolve(true);
-        }
-      }, 200);
-
-      // Auto-reject after 30 seconds
-      setTimeout(() => {
+      const timeout = setTimeout(() => {
         if (this.pendingRequests.has(id)) {
           this.pendingRequests.delete(id);
-          clearInterval(check);
           resolve(false);
         }
       }, 30000);
+
+      this.pendingRequests.set(id, { req, resolve, timeout });
+      if (this.onPermissionPrompt) {
+        this.onPermissionPrompt(req);
+      }
     });
   }
 
   public resolvePermission(id: string, approved: boolean) {
-    if (approved) {
-      this.pendingRequests.delete(id);
-    } else {
-      this.pendingRequests.delete(id);
-    }
+    const entry = this.pendingRequests.get(id);
+    if (!entry) return;
+    clearTimeout(entry.timeout);
+    this.pendingRequests.delete(id);
+    entry.resolve(approved);
   }
 
   // File Read via Native File System Access API

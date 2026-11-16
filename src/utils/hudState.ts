@@ -7,7 +7,8 @@ export type HudDrawerId =
   | 'TELEMETRY'
   | 'CONFIG'
   | 'TASKS'
-  | 'VOICE';
+  | 'VOICE'
+  | 'BRAIN';
 
 export interface HudLayoutState {
   activeDrawer: HudDrawerId | null;

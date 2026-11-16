@@ -99,6 +99,21 @@ describe('hudState contextual drawer and Focus mode transitions', () => {
     expect(handleEscapeKeyState(initialState)).toEqual(initialState);
   });
 
+  it('supports BRAIN center drawer mutual exclusion and Focus/Escape dismissal', () => {
+    const withModels = openDrawerState(initialState, 'MODELS');
+    const withBrain = toggleDrawerState(withModels, 'BRAIN');
+    expect(withBrain.activeDrawer).toBe('BRAIN');
+    expect(isRightDrawer(withBrain.activeDrawer)).toBe(false);
+    expect(getDrawerSide(withBrain.activeDrawer)).toBe('CENTER');
+
+    const brainToggledOff = toggleDrawerState(withBrain, 'BRAIN');
+    expect(brainToggledOff.activeDrawer).toBeNull();
+
+    const focusFromBrain = toggleFocusModeState(withBrain);
+    expect(focusFromBrain.isFocusMode).toBe(true);
+    expect(focusFromBrain.activeDrawer).toBeNull();
+  });
+
   it('restores clean Vision home state on enterVisionHomeState', () => {
     const dirty: HudLayoutState = { activeDrawer: 'TASKS', isFocusMode: true };
     expect(enterVisionHomeState()).toEqual({ activeDrawer: null, isFocusMode: false });

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { audioService } from '../../services/soundFx';
 import { HudDrawerId } from '../../utils/hudState';
+import { IntelligenceStatus } from '../../types/assistant';
 import {
   Volume2,
   VolumeX,
@@ -17,6 +18,8 @@ interface TopStatusBarProps {
   isVoiceActive: boolean;
   activeDrawer: HudDrawerId | null;
   isFocusMode: boolean;
+  intelligenceStatus?: IntelligenceStatus;
+  activeSuggestionCount?: number;
   onSelectVisionHome: () => void;
   onSelectDrawer: (drawer: HudDrawerId) => void;
   onToggleFocusMode: () => void;
@@ -28,6 +31,7 @@ const NAV_ITEMS: { id: 'VISION' | HudDrawerId; label: string }[] = [
   { id: 'TELEMETRY', label: 'TELEMETRY' },
   { id: 'GESTURE', label: 'GESTURE' },
   { id: 'TASKS', label: 'TASKS' },
+  { id: 'BRAIN', label: 'BRAIN' },
   { id: 'CONFIG', label: 'CONFIG' }
 ];
 
@@ -38,6 +42,8 @@ export const TopStatusBar: React.FC<TopStatusBarProps> = ({
   isVoiceActive,
   activeDrawer,
   isFocusMode,
+  intelligenceStatus = 'STANDBY',
+  activeSuggestionCount = 0,
   onSelectVisionHome,
   onSelectDrawer,
   onToggleFocusMode
@@ -182,6 +188,11 @@ export const TopStatusBar: React.FC<TopStatusBarProps> = ({
             item.id === 'VISION'
               ? activeDrawer === null
               : activeDrawer === item.id || (item.id === 'MODELS' && activeDrawer === 'LAB');
+          const showBrainBadge =
+            item.id === 'BRAIN' &&
+            (activeSuggestionCount > 0 ||
+              intelligenceStatus === 'AWAITING_APPROVAL' ||
+              intelligenceStatus === 'ERROR');
 
           return (
             <button
@@ -196,13 +207,25 @@ export const TopStatusBar: React.FC<TopStatusBarProps> = ({
                 }
               }}
               aria-pressed={isActive}
-              className={`relative px-1.5 sm:px-2.5 py-1 text-[9px] sm:text-[10px] font-orbitron tracking-wider whitespace-nowrap shrink-0 rounded transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-cyan-400 ${
+              title={
+                item.id === 'BRAIN'
+                  ? `AI Intelligence Brain (${intelligenceStatus})`
+                  : undefined
+              }
+              className={`relative flex items-center gap-1 px-1.5 sm:px-2.5 py-1 text-[9px] sm:text-[10px] font-orbitron tracking-wider whitespace-nowrap shrink-0 rounded transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-cyan-400 ${
                 isActive
                   ? 'text-white bg-cyan-500/20 border border-cyan-400/70 shadow-[0_0_12px_rgba(0,240,255,0.22)]'
+                  : showBrainBadge
+                  ? 'text-amber-200 border border-amber-400/40 bg-amber-950/30 hover:text-white'
                   : 'text-cyan-300/75 border border-transparent hover:text-white hover:border-cyan-500/30'
               }`}
             >
-              {item.label}
+              <span>{item.label}</span>
+              {item.id === 'BRAIN' && activeSuggestionCount > 0 && (
+                <span className="px-1 rounded bg-amber-400/25 text-amber-200 text-[8px] font-mono">
+                  {activeSuggestionCount}
+                </span>
+              )}
             </button>
           );
         })}

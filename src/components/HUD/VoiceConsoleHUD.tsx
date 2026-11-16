@@ -1,7 +1,7 @@
 import React, { useRef, useEffect } from 'react';
 import { HolographicPanel } from '../Common/HolographicPanel';
-import { AssistantMessage } from '../../types/assistant';
-import { Volume2, Send, Terminal, Trash2, Mic, MicOff, X } from 'lucide-react';
+import { AssistantMessage, IntelligenceStatus } from '../../types/assistant';
+import { Volume2, Send, Terminal, Trash2, Mic, MicOff, X, Brain, Square } from 'lucide-react';
 import { audioService } from '../../services/soundFx';
 
 interface VoiceConsoleHUDProps {
@@ -10,8 +10,11 @@ interface VoiceConsoleHUDProps {
   isListening: boolean;
   isSpeaking: boolean;
   isProcessing?: boolean;
+  intelligenceStatus?: IntelligenceStatus;
   voiceError?: string | null;
   onToggleVoice?: () => void;
+  onCancelRequest?: () => void;
+  onOpenBrain?: () => void;
   onClearHistory?: () => void;
   onClose?: () => void;
 }
@@ -22,8 +25,11 @@ export const VoiceConsoleHUD: React.FC<VoiceConsoleHUDProps> = ({
   isListening,
   isSpeaking,
   isProcessing = false,
+  intelligenceStatus = 'STANDBY',
   voiceError = null,
   onToggleVoice,
+  onCancelRequest,
+  onOpenBrain,
   onClearHistory,
   onClose
 }) => {
@@ -46,33 +52,63 @@ export const VoiceConsoleHUD: React.FC<VoiceConsoleHUDProps> = ({
 
   const quickPrompts = [
     'Hello JARVIS',
-    'Open holographic workspace',
+    'Inspect my current workspace',
+    'Prepare my project for demonstration',
     'Show me the vehicle',
     'Rotate it 360 degrees',
     'Explode the model',
     'Disintegrate',
     'Reconstruct the object',
-    'Return to normal view',
-    'Activate diagnostics'
+    'Return to normal view'
   ];
 
   return (
     <div className="w-full flex flex-col space-y-2">
       <HolographicPanel
         title="J.A.R.V.I.S. VOCAL CONSOLE"
-        subtitle={`SPEECH & SYNTHESIS STREAM · ${messages.length} ENTRIES`}
+        subtitle={`SPEECH & INTELLIGENCE STREAM · ${messages.length} ENTRIES`}
         reactive={isListening || isSpeaking || isProcessing}
         icon={<Terminal className="w-4 h-4 text-cyan-400" />}
         headerRight={
           <div className="flex items-center space-x-1.5 font-mono text-[10px]">
-            {isProcessing && (
-              <span className="text-amber-300 font-bold">PROCESSING</span>
+            {(isProcessing || (intelligenceStatus !== 'STANDBY' && intelligenceStatus !== 'LISTENING')) && (
+              <span className="px-1.5 py-0.5 rounded border border-amber-400/50 bg-amber-950/40 text-amber-200 font-bold">
+                {intelligenceStatus}
+              </span>
+            )}
+            {isProcessing && onCancelRequest && (
+              <button
+                type="button"
+                onClick={() => {
+                  audioService.playChirp(900);
+                  onCancelRequest();
+                }}
+                title="Cancel Active AI Request"
+                className="flex items-center space-x-1 px-1.5 py-0.5 rounded border border-red-400/60 bg-red-950/50 text-red-200 hover:bg-red-900/60"
+              >
+                <Square className="w-2.5 h-2.5" />
+                <span>STOP</span>
+              </button>
             )}
             {isSpeaking && (
               <span className="flex items-center space-x-1 text-cyan-300">
                 <Volume2 className="w-3.5 h-3.5" />
                 <span>SPEAKING</span>
               </span>
+            )}
+            {onOpenBrain && (
+              <button
+                type="button"
+                onClick={() => {
+                  audioService.playChirp(1300);
+                  onOpenBrain();
+                }}
+                title="Open AI Intelligence Brain"
+                className="flex items-center space-x-1 px-2 py-0.5 rounded border border-cyan-500/40 bg-cyan-950/40 text-cyan-200 hover:text-white"
+              >
+                <Brain className="w-3 h-3" />
+                <span>BRAIN</span>
+              </button>
             )}
             {onToggleVoice && (
               <button

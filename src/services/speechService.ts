@@ -54,12 +54,16 @@ class SpeechService {
   private onMessageCallback: ((msg: AssistantMessage) => void) | null = null;
   private onStatusChangeCallback: ((active: boolean, error?: string) => void) | null = null;
   private unmatchedTranscriptHandler:
-    | ((rawTranscript: string) => Promise<string | null> | string | null)
+    | ((rawTranscript: string, source: 'VOICE' | 'CONSOLE') => Promise<string | null> | string | null)
     | null = null;
+  private onCommandExecutedCallback: ((cmd: VoiceCommand, rawTranscript: string) => void) | null = null;
+  private onCancelCallback: (() => void) | null = null;
   private selectedVoice: SpeechSynthesisVoice | null = null;
   private isSpeaking: boolean = false;
   private restartTimeout: number | null = null;
   private lastError: string | null = null;
+  private lastVoiceTranscript: string = '';
+  private lastVoiceTranscriptAt: number = 0;
 
   constructor() {
     this.initSpeechSynthesis();
@@ -94,9 +98,24 @@ class SpeechService {
   }
 
   public setUnmatchedTranscriptHandler(
-    handler: ((rawTranscript: string) => Promise<string | null> | string | null) | null
+    handler:
+      | ((rawTranscript: string, source: 'VOICE' | 'CONSOLE') => Promise<string | null> | string | null)
+      | null
   ) {
     this.unmatchedTranscriptHandler = handler;
+  }
+
+  public setCommandExecutedCallback(cb: ((cmd: VoiceCommand, rawTranscript: string) => void) | null) {
+    this.onCommandExecutedCallback = cb;
+  }
+
+  public setCancelCallback(cb: (() => void) | null) {
+    this.onCancelCallback = cb;
+  }
+
+  public interruptAndCancel() {
+    this.stopSpeaking();
+    this.onCancelCallback?.();
   }
 
   public findMatchingCommand(rawTranscript: string): VoiceCommand | null {
@@ -296,7 +315,14 @@ class SpeechService {
         const lastResult = event.results[event.results.length - 1];
         if (lastResult.isFinal) {
           const rawTranscript = lastResult[0].transcript.trim();
-          this.handleTranscript(rawTranscript);
+          const normalized = rawTranscript.toLowerCase();
+          const now = Date.now();
+          if (normalized && normalized === this.lastVoiceTranscript && now - this.lastVoiceTranscriptAt < 650) {
+            return;
+          }
+          this.lastVoiceTranscript = normalized;
+          this.lastVoiceTranscriptAt = now;
+          this.handleTranscript(rawTranscript, 'VOICE');
         }
       };
 
@@ -364,9 +390,13 @@ class SpeechService {
     return this.isListening;
   }
 
-  public handleTranscript(rawTranscript: string) {
-    if (!rawTranscript) return;
+  public handleTranscript(rawTranscript: string, source: 'VOICE' | 'CONSOLE' = 'CONSOLE') {
+    if (!rawTranscript || !rawTranscript.trim()) return;
     const clean = rawTranscript.toLowerCase().replace(/[.,!?;:]/g, '');
+
+    if (clean === 'stop speaking' || clean === 'cancel request' || clean === 'stop thinking') {
+      this.interruptAndCancel();
+    }
 
     if (this.onMessageCallback) {
       this.onMessageCallback({
@@ -382,6 +412,9 @@ class SpeechService {
 
     if (bestCmd) {
       const emitOutcome = (ok: boolean) => {
+        if (ok) {
+          this.onCommandExecutedCallback?.(bestCmd, rawTranscript);
+        }
         const responseText = ok
           ? bestCmd.feedbackText
           : bestCmd.failureText || 'Unable to execute that command under current conditions, sir.';
@@ -439,7 +472,7 @@ class SpeechService {
 
     if (this.unmatchedTranscriptHandler) {
       try {
-        const handled = this.unmatchedTranscriptHandler(rawTranscript);
+        const handled = this.unmatchedTranscriptHandler(rawTranscript, source);
         if (handled instanceof Promise) {
           void handled
             .then((reply) => emitFallback(reply && reply.trim() ? reply : getBuiltinFallback()))

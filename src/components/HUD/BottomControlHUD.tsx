@@ -1,10 +1,12 @@
 import React, { useState } from 'react';
 import { audioService } from '../../services/soundFx';
 import { HudDrawerId } from '../../utils/hudState';
+import { IntelligenceStatus } from '../../types/assistant';
 import {
   Orbit,
   Hand,
   Mic,
+  Brain,
   Layers,
   RotateCcw,
   Eye,
@@ -17,6 +19,8 @@ interface BottomControlHUDProps {
   isFocusMode: boolean;
   isCameraActive: boolean;
   isVoiceActive: boolean;
+  intelligenceStatus?: IntelligenceStatus;
+  activeSuggestionCount?: number;
   onSelectVisionHome: () => void;
   onSelectDrawer: (drawer: HudDrawerId) => void;
   onResetTransform: () => void;
@@ -28,6 +32,8 @@ export const BottomControlHUD: React.FC<BottomControlHUDProps> = ({
   isFocusMode,
   isCameraActive,
   isVoiceActive,
+  intelligenceStatus = 'STANDBY',
+  activeSuggestionCount = 0,
   onSelectVisionHome,
   onSelectDrawer,
   onResetTransform,
@@ -40,7 +46,12 @@ export const BottomControlHUD: React.FC<BottomControlHUDProps> = ({
   const isVisionActive = activeDrawer === null;
   const isGestureActive = activeDrawer === 'GESTURE';
   const isVoiceDrawerActive = activeDrawer === 'VOICE';
+  const isBrainActive = activeDrawer === 'BRAIN';
   const isModelsActive = activeDrawer === 'MODELS' || activeDrawer === 'LAB';
+  const isBrainAttention =
+    intelligenceStatus === 'AWAITING_APPROVAL' ||
+    intelligenceStatus === 'ERROR' ||
+    activeSuggestionCount > 0;
 
   return (
     <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-30 flex flex-col items-center gap-1.5 max-w-[95vw] pointer-events-none select-none">
@@ -62,7 +73,7 @@ export const BottomControlHUD: React.FC<BottomControlHUDProps> = ({
       <nav
         aria-label="Hologram Quick Controls"
         className={`pointer-events-auto px-2 py-1.5 rounded-xl bg-[#020812]/88 border border-cyan-500/30 shadow-[0_0_24px_rgba(0,240,255,0.15)] transition-all duration-200 ${
-          mobileCollapsed ? 'hidden sm:flex sm:items-center sm:gap-1.5' : 'grid grid-cols-3 gap-1 sm:flex sm:items-center sm:gap-1.5'
+          mobileCollapsed ? 'hidden sm:flex sm:items-center sm:gap-1.5' : 'grid grid-cols-4 gap-1 sm:flex sm:items-center sm:gap-1.5'
         }`}
       >
         <button
@@ -123,6 +134,32 @@ export const BottomControlHUD: React.FC<BottomControlHUDProps> = ({
         >
           <Mic className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
           <span>VOICE</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            audioService.playChirp(1300);
+            onSelectDrawer('BRAIN');
+          }}
+          data-testid="bottom-brain-btn"
+          title={`Open AI Intelligence Brain (${intelligenceStatus})`}
+          aria-pressed={isBrainActive}
+          className={`relative flex items-center justify-center gap-1 sm:gap-1.5 px-2 sm:px-2.5 py-1 sm:py-1.5 rounded-lg border text-[9px] sm:text-[10px] font-orbitron tracking-wider whitespace-nowrap shrink-0 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-cyan-400 ${
+            isBrainActive
+              ? 'border-cyan-400 bg-cyan-500/20 text-white shadow-[0_0_12px_rgba(0,240,255,0.25)]'
+              : isBrainAttention
+              ? 'border-amber-400/55 bg-amber-950/30 text-amber-200 hover:border-amber-300'
+              : 'border-transparent text-cyan-300/80 hover:text-white hover:border-cyan-500/30'
+          }`}
+        >
+          <Brain className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+          <span>BRAIN</span>
+          {activeSuggestionCount > 0 && (
+            <span className="px-1 rounded bg-amber-400/25 text-amber-200 text-[8px] font-mono">
+              {activeSuggestionCount}
+            </span>
+          )}
         </button>
 
         <button

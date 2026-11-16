@@ -89,7 +89,7 @@ export const AIConfigModal: React.FC<AIConfigModalProps> = ({ isOpen, onClose })
                 </button>
                 <button
                   type="button"
-                  onClick={() => { audioService.playChirp(1200); setConfig(c => ({ ...c, provider: 'GEMINI', modelName: 'gemini-2.5-flash', customEndpoint: undefined })); }}
+                  onClick={() => { audioService.playChirp(1200); setConfig(c => ({ ...c, provider: 'GEMINI', modelName: 'gemini-4-hydrogen', customEndpoint: undefined })); }}
                   className={`p-2 rounded border text-left flex flex-col ${
                     config.provider === 'GEMINI'
                       ? 'border-cyan-400 bg-cyan-950/40 text-white font-bold'
@@ -153,7 +153,7 @@ export const AIConfigModal: React.FC<AIConfigModalProps> = ({ isOpen, onClose })
                     onChange={(e) => setConfig({ ...config, modelName: e.target.value })}
                     placeholder={
                       config.provider === 'GEMINI'
-                        ? 'gemini-2.5-flash'
+                        ? 'gemini-4-hydrogen'
                         : config.provider === 'ANTHROPIC'
                         ? 'claude-3-5-sonnet-latest'
                         : 'gpt-4o-mini or custom model'
@@ -172,7 +172,7 @@ export const AIConfigModal: React.FC<AIConfigModalProps> = ({ isOpen, onClose })
                     onChange={(e) => setConfig({ ...config, customEndpoint: e.target.value })}
                     placeholder={
                       config.provider === 'GEMINI'
-                        ? 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent'
+                        ? 'https://generativelanguage.googleapis.com/v1beta/models/gemini-4-hydrogen:generateContent'
                         : config.provider === 'ANTHROPIC'
                         ? 'https://api.anthropic.com/v1/messages'
                         : 'https://api.openai.com/v1/chat/completions'
@@ -183,11 +183,11 @@ export const AIConfigModal: React.FC<AIConfigModalProps> = ({ isOpen, onClose })
               </div>
             )}
 
-            {/* Privacy Guarantee */}
+            {/* Privacy & Architecture Disclosure */}
             <div className="p-2.5 bg-cyan-950/30 border border-cyan-500/20 rounded flex items-start space-x-2 text-[10px]">
               <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
               <p className="text-cyan-300/80 leading-relaxed">
-                <strong className="text-white">Security Shield:</strong> API keys are held exclusively in volatile RAM for the active session and are never persisted to disk, localStorage, or bundled into source files. In Local mode, JARVIS operates offline with zero external requests.
+                <strong className="text-white">Volatile Session Notice:</strong> This app runs purely client-side without a server-side secret vault. Entered API keys stay only in browser volatile JavaScript RAM for this session (never persisted to disk or localStorage) and are sent directly over HTTPS/localhost to your chosen provider. Use <strong className="text-emerald-300">LOCAL AUTONOMOUS</strong> mode for zero external requests or keys.
               </p>
             </div>
 
