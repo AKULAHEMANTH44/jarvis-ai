@@ -53,6 +53,9 @@ class SpeechService {
   private commands: VoiceCommand[] = [];
   private onMessageCallback: ((msg: AssistantMessage) => void) | null = null;
   private onStatusChangeCallback: ((active: boolean, error?: string) => void) | null = null;
+  private unmatchedTranscriptHandler:
+    | ((rawTranscript: string) => Promise<string | null> | string | null)
+    | null = null;
   private selectedVoice: SpeechSynthesisVoice | null = null;
   private isSpeaking: boolean = false;
   private restartTimeout: number | null = null;
@@ -88,6 +91,30 @@ class SpeechService {
 
   public setStatusChangeCallback(cb: (active: boolean, error?: string) => void) {
     this.onStatusChangeCallback = cb;
+  }
+
+  public setUnmatchedTranscriptHandler(
+    handler: ((rawTranscript: string) => Promise<string | null> | string | null) | null
+  ) {
+    this.unmatchedTranscriptHandler = handler;
+  }
+
+  public findMatchingCommand(rawTranscript: string): VoiceCommand | null {
+    if (!rawTranscript) return null;
+    const clean = rawTranscript.toLowerCase().replace(/[.,!?;:]/g, '');
+    let bestCmd: VoiceCommand | null = null;
+    let bestPatternLen = 0;
+
+    for (const cmd of this.commands) {
+      for (const pattern of cmd.patterns) {
+        const lowerPat = pattern.toLowerCase();
+        if (clean.includes(lowerPat) && lowerPat.length > bestPatternLen) {
+          bestCmd = cmd;
+          bestPatternLen = lowerPat.length;
+        }
+      }
+    }
+    return bestCmd;
   }
 
   public getLastError(): string | null {
@@ -351,24 +378,13 @@ class SpeechService {
       });
     }
 
-    let bestCmd: VoiceCommand | null = null;
-    let bestPatternLen = 0;
-
-    for (const cmd of this.commands) {
-      for (const pattern of cmd.patterns) {
-        const lowerPat = pattern.toLowerCase();
-        if (clean.includes(lowerPat) && lowerPat.length > bestPatternLen) {
-          bestCmd = cmd;
-          bestPatternLen = lowerPat.length;
-        }
-      }
-    }
+    const bestCmd = this.findMatchingCommand(rawTranscript);
 
     if (bestCmd) {
       const emitOutcome = (ok: boolean) => {
         const responseText = ok
-          ? bestCmd!.feedbackText
-          : bestCmd!.failureText || 'Unable to execute that command under current conditions, sir.';
+          ? bestCmd.feedbackText
+          : bestCmd.failureText || 'Unable to execute that command under current conditions, sir.';
         if (this.onMessageCallback) {
           this.onMessageCallback({
             id: Math.random().toString(36).substring(7),
@@ -396,7 +412,20 @@ class SpeechService {
       return;
     }
 
-    {
+    const emitFallback = (replyText: string) => {
+      if (this.onMessageCallback) {
+        this.onMessageCallback({
+          id: Math.random().toString(36).substring(7),
+          sender: 'JARVIS',
+          text: replyText,
+          timestamp: new Date().toLocaleTimeString(),
+          type: 'RESPONSE'
+        });
+      }
+      this.speak(replyText);
+    };
+
+    const getBuiltinFallback = (): string => {
       let fallback = "I heard you, sir, but that command is not recognized in current security protocols.";
       if (clean.includes('hello') || clean.includes('hey jarvis') || clean.includes('jarvis')) {
         fallback = "Good day, sir. Systems are at your disposal.";
@@ -405,18 +434,26 @@ class SpeechService {
       } else if (clean.includes('thank')) {
         fallback = "At your service, sir. Always a pleasure.";
       }
+      return fallback;
+    };
 
-      if (this.onMessageCallback) {
-        this.onMessageCallback({
-          id: Math.random().toString(36).substring(7),
-          sender: 'JARVIS',
-          text: fallback,
-          timestamp: new Date().toLocaleTimeString(),
-          type: 'RESPONSE'
-        });
+    if (this.unmatchedTranscriptHandler) {
+      try {
+        const handled = this.unmatchedTranscriptHandler(rawTranscript);
+        if (handled instanceof Promise) {
+          void handled
+            .then((reply) => emitFallback(reply && reply.trim() ? reply : getBuiltinFallback()))
+            .catch(() => emitFallback(getBuiltinFallback()));
+        } else {
+          emitFallback(handled && handled.trim() ? handled : getBuiltinFallback());
+        }
+        return;
+      } catch {
+        // fall through to built-in fallback
       }
-      this.speak(fallback);
     }
+
+    emitFallback(getBuiltinFallback());
   }
 }
 

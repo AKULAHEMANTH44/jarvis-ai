@@ -1,9 +1,11 @@
 import * as THREE from 'three';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import {
+  CameraControlMode,
   ComponentLabel2D,
   DispersionPhase,
   HologramModelId,
@@ -21,8 +23,9 @@ import { RingGimbalsEffect } from './effects/RingGimbals';
 import {
   buildDepthReliefGeometry,
   buildPresetGeometry,
+  disposeObject3DResources,
   parseGLTFOrGLB,
-  parseOBJ,
+  parseOBJAsGroup,
   parseSTL,
   reconstructFromImageFiles
 } from './objects/ReconstructedHologram';
@@ -43,11 +46,27 @@ function detectSoftwareWebGL(): boolean {
   }
 }
 
+export interface ComponentHitInfo {
+  instanceId: string;
+  componentId: string;
+  componentName: string;
+  point: { x: number; y: number; z: number };
+}
+
 export class HologramSceneManager {
   private container: HTMLElement;
   private renderer: THREE.WebGLRenderer;
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
+  private orbitControls: OrbitControls | null = null;
+  private cameraControlMode: CameraControlMode = 'OBJECT';
+  private isCameraFree: boolean = false;
+  private cameraFrameTransition: {
+    active: boolean;
+    targetPos: THREE.Vector3;
+    targetLookAt: THREE.Vector3;
+  } | null = null;
+
   private composer: EffectComposer | null = null;
   private bloomPass: UnrealBloomPass | null = null;
   private isSoftwareGl: boolean = false;
@@ -82,12 +101,23 @@ export class HologramSceneManager {
   private pointerNdc: { x: number; y: number } = { x: 0, y: 0 };
   private baseCameraZ: number = 6.55;
   private settings: HologramVisualSettings;
+  private visualSettingsInitialized: boolean = false;
   private angularVelocity: THREE.Vector3 = new THREE.Vector3(0, 0, 0);
   private rotationDamping: number = 6.5;
   private isTrackingLostFeedback: boolean = false;
   private lastDispersionAmount: number = 0;
   private lastDispersionShockwaveTime: number = 0;
   private initProgress: number = 1.0;
+
+  // Reusable scratch vectors to avoid per-frame allocations
+  private readonly _rayNdc = new THREE.Vector2();
+  private readonly _camOffset = new THREE.Vector3();
+  private readonly _camRight = new THREE.Vector3();
+  private readonly _camUp = new THREE.Vector3();
+  private readonly _spherical = new THREE.Spherical();
+  private readonly _frameBox = new THREE.Box3();
+  private readonly _frameSize = new THREE.Vector3();
+  private readonly _frameCenter = new THREE.Vector3();
 
   constructor(container: HTMLElement, initialSettings: HologramVisualSettings, startAtInitZero = false) {
     this.container = container;
@@ -120,11 +150,27 @@ export class HologramSceneManager {
     this.renderer.domElement.addEventListener('webglcontextlost', this.onContextLost);
     this.renderer.domElement.addEventListener('webglcontextrestored', this.onContextRestored);
 
-    // 2. Camera (responsive framing so Vision X sphere dominates ~75-85% of viewport across desktop/tablet/mobile)
+    // 2. Camera + OrbitControls (Orbit/Pan/Zoom enabled seamlessly in CAMERA mode or Alt/Middle-drag)
     this.baseCameraZ = this.computeAdaptiveCameraZ(width, height);
     this.camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 100);
     this.camera.position.set(0, 0, this.baseCameraZ);
     this.camera.lookAt(0, 0, 0);
+
+    try {
+      const controls = new OrbitControls(this.camera, this.renderer.domElement);
+      controls.enableDamping = !this.isSoftwareGl;
+      controls.dampingFactor = 0.08;
+      controls.minDistance = 1.8;
+      controls.maxDistance = 26.0;
+      controls.enablePan = true;
+      controls.enableZoom = true;
+      controls.screenSpacePanning = true;
+      controls.enabled = false; // OBJECT mode is default; switched cleanly to true in CAMERA mode
+      controls.addEventListener('start', this.onOrbitControlsStart);
+      this.orbitControls = controls;
+    } catch {
+      this.orbitControls = null;
+    }
 
     // 3. Post-Processing Bloom Pipeline (skipped on software GL or reducedEffects mode)
     if (!this.isSoftwareGl && !initialSettings.reducedEffects) {
@@ -196,12 +242,20 @@ export class HologramSceneManager {
         getAngularVelocity: () => this.getAngularVelocity(),
         getStates: () => this.getSpatialStates(),
         getInitProgress: () => this.initProgress,
-        setDispersion: (v: number) => this.setDispersion(v)
+        setDispersion: (v: number) => this.setDispersion(v),
+        frameObject: (id?: string) => this.frameObject(id),
+        resetCamera: () => this.resetCamera()
       };
     }
 
     this.animate();
   }
+
+  private onOrbitControlsStart = () => {
+    this.isCameraFree = true;
+    this.cameraFrameTransition = null;
+    this.lastUserInteractionTime = performance.now();
+  };
 
   private onContextLost = (e: Event) => {
     e.preventDefault();
@@ -309,6 +363,128 @@ export class HologramSceneManager {
     }
   }
 
+  // Camera Control & Adaptive Framing API
+  public setCameraControlMode(mode: CameraControlMode) {
+    this.cameraControlMode = mode;
+    if (this.orbitControls) {
+      this.orbitControls.enabled = mode === 'CAMERA';
+    }
+  }
+
+  public getCameraControlMode(): CameraControlMode {
+    return this.cameraControlMode;
+  }
+
+  public orbitCamera(deltaX: number, deltaY: number) {
+    this.isCameraFree = true;
+    this.cameraFrameTransition = null;
+    this.lastUserInteractionTime = performance.now();
+
+    const target = this.orbitControls ? this.orbitControls.target : this._frameCenter.set(0, 0, 0);
+    this._camOffset.copy(this.camera.position).sub(target);
+    if (this._camOffset.lengthSq() < 1e-4) {
+      this._camOffset.set(0, 0, this.baseCameraZ);
+    }
+
+    this._spherical.setFromVector3(this._camOffset);
+    this._spherical.theta -= deltaX * 0.008;
+    this._spherical.phi = Math.max(0.12, Math.min(Math.PI - 0.12, this._spherical.phi - deltaY * 0.008));
+    this._camOffset.setFromSpherical(this._spherical);
+
+    this.camera.position.copy(target).add(this._camOffset);
+    this.camera.lookAt(target);
+    this.orbitControls?.update();
+  }
+
+  public panCamera(deltaX: number, deltaY: number) {
+    this.isCameraFree = true;
+    this.cameraFrameTransition = null;
+    this.lastUserInteractionTime = performance.now();
+
+    const target = this.orbitControls ? this.orbitControls.target : this._frameCenter.set(0, 0, 0);
+    const dist = Math.max(1.5, this.camera.position.distanceTo(target));
+    const panScale = dist * 0.0014;
+
+    this._camRight.setFromMatrixColumn(this.camera.matrix, 0).multiplyScalar(-deltaX * panScale);
+    this._camUp.setFromMatrixColumn(this.camera.matrix, 1).multiplyScalar(deltaY * panScale);
+
+    this.camera.position.add(this._camRight).add(this._camUp);
+    target.add(this._camRight).add(this._camUp);
+    this.camera.lookAt(target);
+    this.orbitControls?.update();
+  }
+
+  public zoomCamera(zoomFactor: number) {
+    this.isCameraFree = true;
+    this.cameraFrameTransition = null;
+    this.lastUserInteractionTime = performance.now();
+
+    const target = this.orbitControls ? this.orbitControls.target : this._frameCenter.set(0, 0, 0);
+    this._camOffset.copy(this.camera.position).sub(target);
+    const currentDist = Math.max(1.8, this._camOffset.length());
+    const nextDist = Math.max(1.8, Math.min(26.0, currentDist * zoomFactor));
+    this._camOffset.normalize().multiplyScalar(nextDist);
+    this.camera.position.copy(target).add(this._camOffset);
+    this.camera.lookAt(target);
+    this.orbitControls?.update();
+  }
+
+  public frameObject(id?: string): boolean {
+    const targetInst = id
+      ? this.spatialManager.getAll().find((i) => i.id === id) || null
+      : this.spatialManager.getSelected();
+    if (!targetInst) return false;
+
+    // Position the model root cleanly at targetPosition so Box3 reflects target placement
+    targetInst.group.updateMatrixWorld(true);
+    this._frameBox.setFromObject(targetInst.modelGroup);
+
+    let center: THREE.Vector3;
+    let radius: number;
+
+    if (!this._frameBox.isEmpty() && targetInst.modelGroup.visible) {
+      center = this._frameBox.getCenter(this._frameCenter);
+      this._frameBox.getSize(this._frameSize);
+      radius = Math.max(0.7, this._frameSize.length() * 0.5);
+    } else {
+      center = this._frameCenter.copy(targetInst.targetPosition);
+      radius = 2.0 * Math.max(0.5, targetInst.targetScale);
+    }
+
+    const vFov = THREE.MathUtils.degToRad(this.camera.fov * 0.5);
+    const aspect = Math.max(0.45, this.camera.aspect || 1);
+    const hFov = Math.atan(Math.tan(vFov) * aspect);
+    const distV = radius / Math.sin(vFov);
+    const distH = radius / Math.sin(hFov);
+    const idealDist = Math.max(2.6, Math.min(22.0, Math.max(distV, distH) * 1.24));
+
+    const currentTarget = this.orbitControls ? this.orbitControls.target : new THREE.Vector3(0, 0, 0);
+    const viewDir = this._camOffset.copy(this.camera.position).sub(currentTarget);
+    if (viewDir.lengthSq() < 1e-4) {
+      viewDir.set(0, 0, 1);
+    } else {
+      viewDir.normalize();
+    }
+
+    const destPos = center.clone().addScaledVector(viewDir, idealDist);
+    this.isCameraFree = true;
+    this.cameraFrameTransition = {
+      active: true,
+      targetPos: destPos,
+      targetLookAt: center.clone()
+    };
+    return true;
+  }
+
+  public resetCamera() {
+    this.isCameraFree = false;
+    this.cameraFrameTransition = {
+      active: true,
+      targetPos: new THREE.Vector3(0, 0, this.baseCameraZ),
+      targetLookAt: new THREE.Vector3(0, 0, 0)
+    };
+  }
+
   public setInitializationProgress(progress: number) {
     this.initProgress = Math.max(0, Math.min(1, progress));
     this.spatialManager.setInitializationProgress(this.initProgress);
@@ -407,58 +583,87 @@ export class HologramSceneManager {
   public synthesizePreset(presetId: ReconstructionPresetId): SpatialInstance {
     const { name, geometry } = buildPresetGeometry(presetId);
     this.ringGimbals.setVisionSphereActive(false);
-    return this.spatialManager.createReconstructedInstance(
+    const inst = this.spatialManager.createReconstructedInstance(
       name,
       geometry,
       new THREE.Vector3(0, 0, 0),
       'PROCEDURAL STARK LAB SPECIMEN'
     );
+    this.frameObject(inst.id);
+    return inst;
   }
 
-  public async importMeshFromFile(file: File): Promise<SpatialInstance> {
-    const lower = file.name.toLowerCase();
-    const cleanName = file.name.replace(/\.(glb|gltf|obj|stl)$/i, '').slice(0, 28) || 'Imported Model';
-    this.ringGimbals.setVisionSphereActive(false);
+  public async importMeshFromFiles(files: File[]): Promise<SpatialInstance> {
+    if (!files || files.length === 0) {
+      throw new Error('No files selected for 3D import.');
+    }
+
+    const primaryFile =
+      files.find((f) => /\.(glb|gltf|obj|stl)$/i.test(f.name)) || files[0];
+    const lower = primaryFile.name.toLowerCase();
+    const cleanName = primaryFile.name.replace(/\.(glb|gltf|obj|stl)$/i, '').slice(0, 28) || 'Imported Model';
 
     if (lower.endsWith('.glb') || lower.endsWith('.gltf')) {
-      const buf = await file.arrayBuffer();
-      const parsed = await parseGLTFOrGLB(buf, file.name);
-      return this.spatialManager.createReconstructedInstance(
+      const buf = await primaryFile.arrayBuffer();
+      const companionFiles = files.filter((f) => f !== primaryFile);
+      const parsed = await parseGLTFOrGLB(buf, primaryFile.name, companionFiles);
+      this.ringGimbals.setVisionSphereActive(false);
+      const inst = this.spatialManager.createReconstructedInstance(
         cleanName,
         parsed.group,
         new THREE.Vector3(0, 0, 0),
-        `IMPORTED GLTF/GLB MESH (${parsed.componentCount} parts)`
+        `IMPORTED ${lower.endsWith('.glb') ? 'GLB' : 'GLTF'} MESH (${parsed.componentCount} parts)`
       );
+      this.frameObject(inst.id);
+      return inst;
     }
 
-    let geometry: THREE.BufferGeometry;
     if (lower.endsWith('.obj')) {
-      const text = await file.text();
-      geometry = parseOBJ(text);
-    } else if (lower.endsWith('.stl')) {
-      const buf = await file.arrayBuffer();
-      geometry = parseSTL(buf);
-    } else {
-      throw new Error('Unsupported format. Please select a .glb, .gltf, .obj, or .stl file.');
+      const text = await primaryFile.text();
+      const parsed = parseOBJAsGroup(text);
+      this.ringGimbals.setVisionSphereActive(false);
+      const inst = this.spatialManager.createReconstructedInstance(
+        cleanName,
+        parsed.group,
+        new THREE.Vector3(0, 0, 0),
+        `IMPORTED OBJ MESH (${parsed.componentCount} parts)`
+      );
+      this.frameObject(inst.id);
+      return inst;
     }
 
-    return this.spatialManager.createReconstructedInstance(
-      cleanName,
-      geometry,
-      new THREE.Vector3(0, 0, 0),
-      `IMPORTED ${lower.endsWith('.obj') ? 'OBJ' : 'STL'} GEOMETRY`
-    );
+    if (lower.endsWith('.stl')) {
+      const buf = await primaryFile.arrayBuffer();
+      const geometry = parseSTL(buf);
+      this.ringGimbals.setVisionSphereActive(false);
+      const inst = this.spatialManager.createReconstructedInstance(
+        cleanName,
+        geometry,
+        new THREE.Vector3(0, 0, 0),
+        'IMPORTED STL GEOMETRY'
+      );
+      this.frameObject(inst.id);
+      return inst;
+    }
+
+    throw new Error('Unsupported format. Please select or drop .glb, .gltf (+companion .bin/textures), .obj, or .stl files.');
+  }
+
+  public async importMeshFromFile(file: File): Promise<SpatialInstance> {
+    return this.importMeshFromFiles([file]);
   }
 
   public async reconstructFromImages(files: File[]): Promise<SpatialInstance> {
     const { name, geometry, methodLabel } = await reconstructFromImageFiles(files);
     this.ringGimbals.setVisionSphereActive(false);
-    return this.spatialManager.createReconstructedInstance(
+    const inst = this.spatialManager.createReconstructedInstance(
       name,
       geometry,
       new THREE.Vector3(0, 0, 0),
       methodLabel
     );
+    this.frameObject(inst.id);
+    return inst;
   }
 
   public reconstructFromVideo(videoEl: HTMLVideoElement): SpatialInstance | null {
@@ -578,19 +783,119 @@ export class HologramSceneManager {
     this.ringGimbals.setVisionSphereActive(this.getModelId() === 'vision_sphere');
   }
 
+  public selectComponent(instanceId: string | null, componentId: string | null): boolean {
+    return this.spatialManager.selectComponent(instanceId, componentId);
+  }
+
+  public isolateComponent(instanceId: string | null, componentId: string | null): boolean {
+    return this.spatialManager.isolateComponent(instanceId, componentId);
+  }
+
+  public highlightComponent(instanceId: string | null, componentId: string | null): boolean {
+    return this.spatialManager.highlightComponent(instanceId, componentId);
+  }
+
   public raycastSelect(ndcX: number, ndcY: number): string | null {
-    this.raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), this.camera);
+    this._rayNdc.set(ndcX, ndcY);
+    this.raycaster.setFromCamera(this._rayNdc, this.camera);
     const instances = this.spatialManager.getAll();
 
+    let bestHit: { dist: number; inst: SpatialInstance } | null = null;
     for (const inst of instances) {
+      if (!inst.modelGroup.visible) continue;
       const intersects = this.raycaster.intersectObjects(inst.modelGroup.children, true);
-      if (intersects.length > 0) {
-        this.spatialManager.select(inst.id);
-        this.ringGimbals.setVisionSphereActive(inst.modelId === 'vision_sphere');
-        return inst.id;
+      for (const hit of intersects) {
+        if (!hit.object.visible || hit.object.userData?.isHoloOverlay) continue;
+        if (!bestHit || hit.distance < bestHit.dist) {
+          bestHit = { dist: hit.distance, inst };
+        }
+        break;
       }
     }
+
+    if (bestHit) {
+      this.spatialManager.select(bestHit.inst.id);
+      this.ringGimbals.setVisionSphereActive(bestHit.inst.modelId === 'vision_sphere');
+      return bestHit.inst.id;
+    }
     return null;
+  }
+
+  public raycastComponent(ndcX: number, ndcY: number): ComponentHitInfo | null {
+    this._rayNdc.set(ndcX, ndcY);
+    this.raycaster.setFromCamera(this._rayNdc, this.camera);
+    const instances = this.spatialManager.getAll();
+
+    let closest: {
+      dist: number;
+      inst: SpatialInstance;
+      componentId: string;
+      componentName: string;
+      point: THREE.Vector3;
+    } | null = null;
+
+    for (const inst of instances) {
+      if (!inst.modelGroup.visible) continue;
+      const components = this.spatialManager.getComponents(inst.id);
+      const intersects = this.raycaster.intersectObjects(inst.modelGroup.children, true);
+
+      for (const hit of intersects) {
+        if (!hit.object.visible || hit.object.userData?.isHoloOverlay) continue;
+
+        let cursor: THREE.Object3D | null = hit.object;
+        let compId: string | null = null;
+        let compName: string | null = null;
+
+        while (cursor && cursor !== inst.modelGroup) {
+          if (typeof cursor.userData?.componentId === 'string') {
+            compId = cursor.userData.componentId;
+            compName = (cursor.userData.componentLabel as string) || cursor.name || compId;
+            break;
+          }
+          if (typeof cursor.userData?.componentLabel === 'string') {
+            const matched = components.find((c) => c.name === cursor!.userData.componentLabel);
+            if (matched) {
+              compId = matched.id;
+              compName = matched.name;
+              break;
+            }
+          }
+          cursor = cursor.parent;
+        }
+
+        if (!compId && components.length > 0) {
+          compId = components[0].id;
+          compName = components[0].name;
+        }
+
+        if (!compId || !compName) continue;
+        if (inst.reconstructedObj?.isComponentHidden(compId)) continue;
+        if (inst.isolatedComponentId && inst.isolatedComponentId !== compId) continue;
+
+        if (!closest || hit.distance < closest.dist) {
+          closest = {
+            dist: hit.distance,
+            inst,
+            componentId: compId,
+            componentName: compName,
+            point: hit.point
+          };
+        }
+        break;
+      }
+    }
+
+    if (!closest) return null;
+    return {
+      instanceId: closest.inst.id,
+      componentId: closest.componentId,
+      componentName: closest.componentName,
+      point: {
+        x: closest.point.x,
+        y: closest.point.y,
+        z: closest.point.z
+      }
+    };
   }
 
   public updateLaserPointer(ndcX: number, ndcY: number, active: boolean): LaserTargetInfo | null {
@@ -599,7 +904,8 @@ export class HologramSceneManager {
       return null;
     }
 
-    this.raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), this.camera);
+    this._rayNdc.set(ndcX, ndcY);
+    this.raycaster.setFromCamera(this._rayNdc, this.camera);
     const instances = this.spatialManager.getAll();
 
     let closestHit: { dist: number; point: THREE.Vector3; inst: SpatialInstance } | null = null;
@@ -667,10 +973,21 @@ export class HologramSceneManager {
     this.spatialManager.applyClippingPlanes([this.slicePlane]);
   }
 
+  public syncVisualSettingsState(settings: Partial<HologramVisualSettings>) {
+    this.settings = { ...this.settings, ...settings };
+  }
+
   public updateVisualSettings(settings: Partial<HologramVisualSettings>) {
+    const prev = this.settings;
+    const isInitial = !this.visualSettingsInitialized;
+    this.visualSettingsInitialized = true;
     this.settings = { ...this.settings, ...settings };
 
-    if (settings.reducedEffects !== undefined && !this.isSoftwareGl) {
+    if (
+      settings.reducedEffects !== undefined &&
+      (isInitial || settings.reducedEffects !== prev.reducedEffects) &&
+      !this.isSoftwareGl
+    ) {
       if (settings.reducedEffects) {
         this.disposeComposer();
       } else if (this.container) {
@@ -682,7 +999,7 @@ export class HologramSceneManager {
       }
     }
 
-    if (settings.colorTheme) {
+    if (settings.colorTheme && (isInitial || settings.colorTheme !== prev.colorTheme)) {
       const hex = this.getThemeHex(settings.colorTheme);
       this.spatialManager.setColorTheme(hex);
       this.ringGimbals.setColorTheme(hex);
@@ -690,17 +1007,20 @@ export class HologramSceneManager {
       this.shockwave.setColorTheme(hex);
       (this.sliceFrame.material as THREE.LineBasicMaterial).color.setHex(hex);
     }
-    if (settings.renderMode !== undefined) {
+    if (settings.renderMode !== undefined && (isInitial || settings.renderMode !== prev.renderMode)) {
       this.spatialManager.setGlobalRenderMode(settings.renderMode);
     }
-    if (settings.glowIntensity !== undefined) {
+    if (settings.glowIntensity !== undefined && (isInitial || settings.glowIntensity !== prev.glowIntensity)) {
       this.spatialManager.setGlowIntensity(settings.glowIntensity);
       this.particleField.setGlowIntensity(settings.glowIntensity);
       if (this.bloomPass) {
         this.bloomPass.strength = Math.min(0.85, 0.25 + settings.glowIntensity * 0.16);
       }
     }
-    if (settings.particleCount !== undefined || settings.reducedEffects !== undefined) {
+    if (
+      (settings.particleCount !== undefined && (isInitial || settings.particleCount !== prev.particleCount)) ||
+      (settings.reducedEffects !== undefined && (isInitial || settings.reducedEffects !== prev.reducedEffects))
+    ) {
       const targetCount = this.settings.reducedEffects
         ? Math.min(1200, this.settings.particleCount)
         : this.settings.particleCount;
@@ -709,27 +1029,38 @@ export class HologramSceneManager {
         inst.visionSphereObj?.setParticleCount(targetCount);
       });
     }
-    if (settings.pulseEnabled !== undefined) {
+    if (settings.pulseEnabled !== undefined && (isInitial || settings.pulseEnabled !== prev.pulseEnabled)) {
       this.spatialManager.setPulseEnabled(settings.pulseEnabled);
     }
-    if (settings.showBoundingBoxes !== undefined) {
+    if (settings.showBoundingBoxes !== undefined && (isInitial || settings.showBoundingBoxes !== prev.showBoundingBoxes)) {
       this.spatialManager.setShowBoundingBoxes(settings.showBoundingBoxes);
     }
-    if (settings.explosionAmount !== undefined) {
+    if (settings.explosionAmount !== undefined && (isInitial || settings.explosionAmount !== prev.explosionAmount)) {
       this.spatialManager.setExplosionAmount(settings.explosionAmount);
-    } else if (settings.explodedView !== undefined) {
+    } else if (
+      settings.explodedView !== undefined &&
+      settings.explosionAmount === undefined &&
+      (isInitial || settings.explodedView !== prev.explodedView)
+    ) {
       this.spatialManager.setExplodedView(settings.explodedView);
     }
-    if (settings.dispersionAmount !== undefined) {
+    if (
+      settings.dispersionAmount !== undefined &&
+      (isInitial || settings.dispersionAmount !== prev.dispersionAmount)
+    ) {
       this.setDispersion(settings.dispersionAmount);
     }
-    if (settings.spatialFormation !== undefined) {
+    if (
+      settings.spatialFormation !== undefined &&
+      (isInitial || settings.spatialFormation !== prev.spatialFormation)
+    ) {
       this.spatialManager.applyFormation(settings.spatialFormation);
     }
     if (
-      settings.sliceEnabled !== undefined ||
-      settings.sliceAxis !== undefined ||
-      settings.sliceOffset !== undefined
+      isInitial ||
+      (settings.sliceEnabled !== undefined && settings.sliceEnabled !== prev.sliceEnabled) ||
+      (settings.sliceAxis !== undefined && settings.sliceAxis !== prev.sliceAxis) ||
+      (settings.sliceOffset !== undefined && settings.sliceOffset !== prev.sliceOffset)
     ) {
       this.updateSlicePlane(
         this.settings.sliceEnabled,
@@ -738,7 +1069,7 @@ export class HologramSceneManager {
       );
     }
 
-    if (settings.particleSpeed !== undefined) {
+    if (settings.particleSpeed !== undefined && (isInitial || settings.particleSpeed !== prev.particleSpeed)) {
       this.particleField.setParticleSpeed(settings.particleSpeed);
     }
 
@@ -756,9 +1087,9 @@ export class HologramSceneManager {
     });
   }
 
-  public setDispersion(amount: number, phase?: DispersionPhase) {
+  public setDispersion(amount: number, phase?: DispersionPhase, targetId?: string) {
     const clamped = Math.max(0, Math.min(1, amount));
-    this.spatialManager.setGlobalDispersion(clamped, phase);
+    this.spatialManager.setInstanceDispersion(targetId ?? null, clamped, phase);
     this.particleField.setDispersion(clamped);
     this.ringGimbals.setCoreActivity({ energyBoost: 0.25 + clamped * 0.65 });
     if (this.bloomPass) {
@@ -876,11 +1207,9 @@ export class HologramSceneManager {
 
   private computeAdaptiveCameraZ(width: number, height: number): number {
     const aspect = width / Math.max(1, height);
-    // Vision sphere outer radius is ~2.74; at fov=45deg on landscape desktop z=6.45 frames it at ~80% height
     if (aspect >= 1.15) {
       return 6.45;
     }
-    // Pull back gracefully on narrow tablet/portrait/mobile viewports so horizontal outer arcs do not clip
     return Math.min(11.5, Math.max(6.45, 6.45 / Math.max(0.54, aspect * 0.9)));
   }
 
@@ -903,7 +1232,6 @@ export class HologramSceneManager {
   private scheduleNextFrame() {
     if (this.isDestroyed) return;
     if (this.isSoftwareGl) {
-      // Yield macrotask on software GL (SwiftShader) so browser input/screenshot tasks never starve
       this.softwareTimeoutId = window.setTimeout(() => {
         if (!this.isDestroyed) {
           this.animationFrameId = requestAnimationFrame(this.animate);
@@ -924,17 +1252,49 @@ export class HologramSceneManager {
     const speed = this.settings.rotationSpeed;
     const isUserActive = now - this.lastUserInteractionTime < 1200;
 
-    // Subtle spatial camera parallax (pointer + active hand centroid)
-    const targetCamX = this.activeHandCentroid
-      ? (this.activeHandCentroid.x - 0.5) * 0.65
-      : this.pointerNdc.x * 0.32;
-    const targetCamY = this.activeHandCentroid
-      ? -(this.activeHandCentroid.y - 0.5) * 0.45
-      : this.pointerNdc.y * 0.22;
-    this.camera.position.x = THREE.MathUtils.damp(this.camera.position.x, targetCamX, 4.5, delta);
-    this.camera.position.y = THREE.MathUtils.damp(this.camera.position.y, targetCamY, 4.5, delta);
-    this.camera.position.z = THREE.MathUtils.damp(this.camera.position.z, this.baseCameraZ, 4.5, delta);
-    this.camera.lookAt(0, 0, 0);
+    // Camera animation: Adaptive Framing Transition -> OrbitControls Free Camera -> Default Home Parallax
+    if (this.cameraFrameTransition?.active) {
+      const tr = this.cameraFrameTransition;
+      const dampLambda = 7.5;
+      this.camera.position.x = THREE.MathUtils.damp(this.camera.position.x, tr.targetPos.x, dampLambda, delta);
+      this.camera.position.y = THREE.MathUtils.damp(this.camera.position.y, tr.targetPos.y, dampLambda, delta);
+      this.camera.position.z = THREE.MathUtils.damp(this.camera.position.z, tr.targetPos.z, dampLambda, delta);
+      if (this.orbitControls) {
+        this.orbitControls.target.x = THREE.MathUtils.damp(this.orbitControls.target.x, tr.targetLookAt.x, dampLambda, delta);
+        this.orbitControls.target.y = THREE.MathUtils.damp(this.orbitControls.target.y, tr.targetLookAt.y, dampLambda, delta);
+        this.orbitControls.target.z = THREE.MathUtils.damp(this.orbitControls.target.z, tr.targetLookAt.z, dampLambda, delta);
+        this.orbitControls.update();
+      } else {
+        this.camera.lookAt(tr.targetLookAt);
+      }
+
+      const distPos = this.camera.position.distanceTo(tr.targetPos);
+      if (distPos < 0.025) {
+        this.camera.position.copy(tr.targetPos);
+        if (this.orbitControls) {
+          this.orbitControls.target.copy(tr.targetLookAt);
+          this.orbitControls.update();
+        }
+        tr.active = false;
+        this.cameraFrameTransition = null;
+      }
+    } else if (this.isCameraFree && this.orbitControls) {
+      this.orbitControls.update();
+    } else {
+      const targetCamX = this.activeHandCentroid
+        ? (this.activeHandCentroid.x - 0.5) * 0.65
+        : this.pointerNdc.x * 0.32;
+      const targetCamY = this.activeHandCentroid
+        ? -(this.activeHandCentroid.y - 0.5) * 0.45
+        : this.pointerNdc.y * 0.22;
+      this.camera.position.x = THREE.MathUtils.damp(this.camera.position.x, targetCamX, 4.5, delta);
+      this.camera.position.y = THREE.MathUtils.damp(this.camera.position.y, targetCamY, 4.5, delta);
+      this.camera.position.z = THREE.MathUtils.damp(this.camera.position.z, this.baseCameraZ, 4.5, delta);
+      this.camera.lookAt(0, 0, 0);
+      if (this.orbitControls) {
+        this.orbitControls.target.set(0, 0, 0);
+      }
+    }
 
     const selected = this.spatialManager.getSelected();
     if (selected && !selected.isLocked && !selected.isFrozen) {
@@ -1005,10 +1365,20 @@ export class HologramSceneManager {
     this.renderer.domElement.removeEventListener('webglcontextlost', this.onContextLost);
     this.renderer.domElement.removeEventListener('webglcontextrestored', this.onContextRestored);
 
+    if (this.orbitControls) {
+      this.orbitControls.removeEventListener('start', this.onOrbitControlsStart);
+      this.orbitControls.dispose();
+      this.orbitControls = null;
+    }
+
     this.disposeComposer();
     this.spatialManager.clearAll();
     this.ringGimbals.dispose();
     this.particleField.dispose();
+    this.shockwave.dispose();
+    disposeObject3DResources(this.sliceFrame);
+    disposeObject3DResources(this.laserReticle);
+    this.scene.clear();
     this.renderer.dispose();
     if (this.container.contains(this.renderer.domElement)) {
       this.container.removeChild(this.renderer.domElement);

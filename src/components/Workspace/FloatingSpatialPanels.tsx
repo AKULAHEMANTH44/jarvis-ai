@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { HolographicPanel } from '../Common/HolographicPanel';
 import {
+  CameraControlMode,
   SpatialObjectState,
   LayoutFormation,
   HologramModelId,
@@ -36,7 +37,13 @@ import {
   RotateCcw,
   RotateCw,
   Link2,
-  ImagePlus
+  ImagePlus,
+  Focus,
+  Eye,
+  Orbit,
+  Undo2,
+  Redo2,
+  X
 } from 'lucide-react';
 
 interface FloatingSpatialPanelsProps {
@@ -63,6 +70,22 @@ interface FloatingSpatialPanelsProps {
   onApplyFormation: (formation: LayoutFormation) => void;
   onSynthesizePreset: (presetId: ReconstructionPresetId) => void;
   onImportMeshFile: (file: File) => void;
+  onImportMeshFiles?: (files: File[]) => void;
+  labError?: string | null;
+  onClearLabError?: () => void;
+  cameraControlMode?: CameraControlMode;
+  onSetCameraControlMode?: (mode: CameraControlMode) => void;
+  onFrameSelectedObject?: () => void;
+  onResetCamera?: () => void;
+  onSelectComponent?: (instanceId: string, componentId: string | null) => void;
+  onIsolateComponent?: (instanceId: string, componentId: string | null) => void;
+  onHighlightComponent?: (instanceId: string, componentId: string | null) => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
+  undoLabel?: string | null;
+  redoLabel?: string | null;
+  onUndo?: () => void;
+  onRedo?: () => void;
   onReconstructImages: (files: File[]) => void;
   onCaptureWebcamScan: () => void;
   onTriggerRescan: () => void;
@@ -94,6 +117,22 @@ export const FloatingSpatialPanels: React.FC<FloatingSpatialPanelsProps> = ({
   onApplyFormation,
   onSynthesizePreset,
   onImportMeshFile,
+  onImportMeshFiles,
+  labError,
+  onClearLabError,
+  cameraControlMode = 'OBJECT',
+  onSetCameraControlMode,
+  onFrameSelectedObject,
+  onResetCamera,
+  onSelectComponent,
+  onIsolateComponent,
+  onHighlightComponent,
+  canUndo = false,
+  canRedo = false,
+  undoLabel,
+  redoLabel,
+  onUndo,
+  onRedo,
   onReconstructImages,
   onCaptureWebcamScan,
   onTriggerRescan,
@@ -174,9 +213,13 @@ export const FloatingSpatialPanels: React.FC<FloatingSpatialPanelsProps> = ({
   };
 
   const handleMeshFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      onImportMeshFile(file);
+    const files = e.target.files ? Array.from(e.target.files) : [];
+    if (files.length > 0) {
+      if (onImportMeshFiles) {
+        onImportMeshFiles(files);
+      } else {
+        onImportMeshFile(files[0]);
+      }
     }
     e.target.value = '';
   };
@@ -441,15 +484,124 @@ export const FloatingSpatialPanels: React.FC<FloatingSpatialPanelsProps> = ({
               subtitle="SCANNER // SLICER // PRECISION RIG"
               icon={<ScanLine className="w-4 h-4 text-cyan-400" />}
               headerRight={
-                <button
-                  onClick={() => { audioService.playActivationWhoosh(); onTriggerRescan(); }}
-                  className="px-2 py-0.5 rounded border border-cyan-400 bg-cyan-500/20 hover:bg-cyan-500/40 text-white font-orbitron text-[9px]"
-                >
-                  RESCAN
-                </button>
+                <div className="flex items-center space-x-1">
+                  {onUndo && (
+                    <button
+                      type="button"
+                      data-testid="lab-undo-btn"
+                      onClick={() => {
+                        audioService.playChirp(1150);
+                        onUndo();
+                      }}
+                      disabled={!canUndo}
+                      title={undoLabel ? `Undo: ${undoLabel} (Ctrl+Z)` : 'Undo (Ctrl+Z)'}
+                      aria-label={undoLabel ? `Undo ${undoLabel}` : 'Undo transformation'}
+                      className="p-1 rounded border border-cyan-500/40 bg-cyan-950/50 hover:bg-cyan-500/30 text-cyan-200 hover:text-white disabled:opacity-35 disabled:cursor-not-allowed"
+                    >
+                      <Undo2 className="w-3 h-3" />
+                    </button>
+                  )}
+                  {onRedo && (
+                    <button
+                      type="button"
+                      data-testid="lab-redo-btn"
+                      onClick={() => {
+                        audioService.playChirp(1250);
+                        onRedo();
+                      }}
+                      disabled={!canRedo}
+                      title={redoLabel ? `Redo: ${redoLabel} (Ctrl+Y)` : 'Redo (Ctrl+Y)'}
+                      aria-label={redoLabel ? `Redo ${redoLabel}` : 'Redo transformation'}
+                      className="p-1 rounded border border-cyan-500/40 bg-cyan-950/50 hover:bg-cyan-500/30 text-cyan-200 hover:text-white disabled:opacity-35 disabled:cursor-not-allowed"
+                    >
+                      <Redo2 className="w-3 h-3" />
+                    </button>
+                  )}
+                  <button
+                    onClick={() => { audioService.playActivationWhoosh(); onTriggerRescan(); }}
+                    className="px-2 py-0.5 rounded border border-cyan-400 bg-cyan-500/20 hover:bg-cyan-500/40 text-white font-orbitron text-[9px]"
+                  >
+                    RESCAN
+                  </button>
+                </div>
               }
             >
               <div className="space-y-2.5 max-h-72 overflow-y-auto pr-1">
+                {labError && (
+                  <div
+                    role="alert"
+                    data-testid="lab-import-error"
+                    className="p-2 rounded border border-red-400/70 bg-red-950/50 text-red-200 font-mono text-[10px] flex items-start justify-between gap-2"
+                  >
+                    <div className="flex items-start gap-1.5 min-w-0">
+                      <AlertTriangle className="w-3.5 h-3.5 text-red-400 shrink-0 mt-0.5" />
+                      <span className="break-words">{labError}</span>
+                    </div>
+                    {onClearLabError && (
+                      <button
+                        type="button"
+                        onClick={onClearLabError}
+                        aria-label="Dismiss import error"
+                        className="text-red-300 hover:text-white shrink-0"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {/* Camera Orbit & Bounding-Box Framing Strip */}
+                {(onSetCameraControlMode || onFrameSelectedObject) && (
+                  <div className="grid grid-cols-3 gap-1 font-orbitron text-[8.5px]">
+                    {onSetCameraControlMode && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          audioService.playChirp(1300);
+                          onSetCameraControlMode(cameraControlMode === 'CAMERA' ? 'OBJECT' : 'CAMERA');
+                        }}
+                        title="Toggle pointer between Object manipulation and Camera orbit/pan/zoom (or hold Alt+Drag)"
+                        className={`py-1 px-1.5 rounded border flex items-center justify-center gap-1 ${
+                          cameraControlMode === 'CAMERA'
+                            ? 'border-amber-400 bg-amber-500/25 text-amber-200 font-bold'
+                            : 'border-cyan-500/35 bg-black/40 text-cyan-300 hover:text-white'
+                        }`}
+                      >
+                        <Orbit className="w-2.5 h-2.5 shrink-0" />
+                        <span>{cameraControlMode === 'CAMERA' ? 'CAM ORBIT' : 'OBJ DRAG'}</span>
+                      </button>
+                    )}
+                    {onFrameSelectedObject && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          audioService.playChirp(1400);
+                          onFrameSelectedObject();
+                        }}
+                        title="Adaptively frame selected 3D model to fit viewport"
+                        className="py-1 px-1.5 rounded border border-cyan-400/50 bg-cyan-500/15 hover:bg-cyan-500/30 text-white flex items-center justify-center gap-1"
+                      >
+                        <Focus className="w-2.5 h-2.5 shrink-0" />
+                        <span>FIT MODEL</span>
+                      </button>
+                    )}
+                    {onResetCamera && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          audioService.playChirp(1100);
+                          onResetCamera();
+                        }}
+                        title="Reset camera viewpoint to origin"
+                        className="py-1 px-1.5 rounded border border-cyan-500/35 bg-black/40 hover:bg-cyan-500/20 text-cyan-300 hover:text-white flex items-center justify-center gap-1"
+                      >
+                        <RotateCcw className="w-2.5 h-2.5 shrink-0" />
+                        <span>RESET CAM</span>
+                      </button>
+                    )}
+                  </div>
+                )}
+
                 {/* 0. Cinematic Object Animation Sequence Controls */}
                 <div>
                   <span className="text-[10px] font-mono text-cyan-400/70 block mb-1">
@@ -499,7 +651,7 @@ export const FloatingSpatialPanels: React.FC<FloatingSpatialPanelsProps> = ({
                 {/* 1. Reconstruction Synthesis, Mesh & Multi-View Image Upload */}
                 <div className="pt-2 border-t border-cyan-500/20">
                   <span className="text-[10px] font-mono text-cyan-400/70 block mb-1">
-                    RECONSTRUCT 3D SPECIMEN:
+                    RECONSTRUCT 3D SPECIMEN (OR DRAG & DROP ON CANVAS):
                   </span>
                   <div className="grid grid-cols-2 gap-1 font-mono text-[10px] mb-1.5">
                     <button
@@ -532,7 +684,8 @@ export const FloatingSpatialPanels: React.FC<FloatingSpatialPanelsProps> = ({
                     <input
                       ref={fileInputRef}
                       type="file"
-                      accept=".glb,.gltf,.obj,.stl"
+                      accept=".glb,.gltf,.obj,.stl,.bin,.png,.jpg,.jpeg,.webp"
+                      multiple
                       onChange={handleMeshFileChange}
                       className="hidden"
                     />
@@ -546,7 +699,7 @@ export const FloatingSpatialPanels: React.FC<FloatingSpatialPanelsProps> = ({
                     />
                     <button
                       onClick={() => { audioService.playChirp(1300); fileInputRef.current?.click(); }}
-                      title="Import .GLB, .GLTF, .OBJ or .STL 3D model"
+                      title="Import .GLB, .GLTF (+companion .bin/textures), .OBJ or .STL 3D model"
                       className="py-1.5 px-1.5 rounded border border-cyan-400/60 bg-cyan-500/20 hover:bg-cyan-500/35 text-white font-orbitron text-[8.5px] flex items-center justify-center space-x-1"
                     >
                       <Upload className="w-3 h-3 shrink-0" />
@@ -574,9 +727,84 @@ export const FloatingSpatialPanels: React.FC<FloatingSpatialPanelsProps> = ({
                     </button>
                   </div>
                   <p className="mt-1 text-[8.5px] font-mono text-amber-300/75 leading-tight">
-                    Image upload builds an illustrative 2.5D depth relief (1 photo) or silhouette hull approximation (multi-view) unless an external photogrammetry service is configured.
+                    Drop .glb/.gltf/.obj/.stl anywhere on viewport, or select .gltf together with companion .bin/textures.
                   </p>
                 </div>
+
+                {/* Component Selection & Isolation Inspector */}
+                {selectedObj?.components && selectedObj.components.length > 1 && (onSelectComponent || onIsolateComponent) && (
+                  <div className="pt-2 border-t border-cyan-500/20 space-y-1">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-mono text-cyan-400/80">
+                        COMPONENT INSPECTOR ({selectedObj.components.length})
+                      </span>
+                      {(selectedObj.selectedComponentId || selectedObj.isolatedComponentId) && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            audioService.playChirp(1050);
+                            onIsolateComponent?.(selectedObj.id, null);
+                            onSelectComponent?.(selectedObj.id, null);
+                          }}
+                          className="text-[8.5px] font-mono px-1.5 py-0.5 rounded border border-cyan-500/40 text-cyan-300 hover:text-white"
+                        >
+                          SHOW ALL
+                        </button>
+                      )}
+                    </div>
+                    <div className="max-h-24 overflow-y-auto space-y-1 pr-0.5">
+                      {selectedObj.components.map((comp) => (
+                        <div
+                          key={comp.id}
+                          onMouseEnter={() => onHighlightComponent?.(selectedObj.id, comp.id)}
+                          onMouseLeave={() => onHighlightComponent?.(selectedObj.id, null)}
+                          className={`flex items-center justify-between px-1.5 py-1 rounded border text-[9.5px] font-mono transition-colors ${
+                            comp.isSelected || comp.isIsolated
+                              ? 'border-amber-400/70 bg-amber-950/35 text-amber-100'
+                              : 'border-cyan-500/20 bg-black/40 text-cyan-200/85 hover:border-cyan-400/60'
+                          }`}
+                        >
+                          <button
+                            type="button"
+                            onFocus={() => onHighlightComponent?.(selectedObj.id, comp.id)}
+                            onBlur={() => onHighlightComponent?.(selectedObj.id, null)}
+                            onClick={() => {
+                              audioService.playChirp(1350);
+                              onSelectComponent?.(
+                                selectedObj.id,
+                                comp.isSelected ? null : comp.id
+                              );
+                            }}
+                            className="flex-1 text-left truncate pr-1.5"
+                            title={`Select ${comp.name}`}
+                          >
+                            {comp.name}
+                          </button>
+                          {onIsolateComponent && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                audioService.playChirp(1450);
+                                onIsolateComponent(
+                                  selectedObj.id,
+                                  comp.isIsolated ? null : comp.id
+                                );
+                              }}
+                              title={comp.isIsolated ? 'Show all components' : `Isolate ${comp.name}`}
+                              className={`p-0.5 rounded border shrink-0 ${
+                                comp.isIsolated
+                                  ? 'border-amber-400 bg-amber-500/30 text-white'
+                                  : 'border-cyan-500/30 text-cyan-300 hover:text-white'
+                              }`}
+                            >
+                              <Eye className="w-2.5 h-2.5" />
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 {/* 2. Render Topology Mode */}
                 <div className="pt-2 border-t border-cyan-500/20">

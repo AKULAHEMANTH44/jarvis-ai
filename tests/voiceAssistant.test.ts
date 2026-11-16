@@ -1,8 +1,14 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { speechService } from '../src/services/speechService';
+import { ContextualAIService } from '../src/services/contextualAI';
 import { VoiceCommand } from '../src/types/assistant';
 
 describe('SpeechService Voice Command Engine', () => {
+  afterEach(() => {
+    speechService.setUnmatchedTranscriptHandler(null);
+    vi.restoreAllMocks();
+  });
+
   it('matches recognized voice commands and prioritizes longest specific patterns', () => {
     let executedAction = '';
 
@@ -193,5 +199,83 @@ describe('SpeechService Voice Command Engine', () => {
     expect(logged.length).toBe(1);
     expect(logged[0].type).toBe('ALERT');
     expect(logged[0].text).toBe('Optical sensor is offline. Enable the camera first.');
+  });
+
+  it('prioritizes local voice commands before falling back to external AI or local intent', async () => {
+    const ai = new ContextualAIService();
+    ai.saveConfig({ provider: 'OPENAI', apiKey: 'sk-volatile-test', modelName: 'gpt-4o-mini' });
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: 'Titanium alloy recommended, sir.' } }] })
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    let exploded = false;
+    const replies: string[] = [];
+    speechService.setMessageCallback((msg) => {
+      if (msg.sender === 'JARVIS') replies.push(msg.text);
+    });
+    speechService.registerCommands([
+      {
+        patterns: ['explode the model'],
+        description: 'Explode model',
+        category: 'MANIPULATION',
+        action: () => { exploded = true; return true; },
+        feedbackText: 'Expanding assembly layers.'
+      }
+    ]);
+    speechService.setUnmatchedTranscriptHandler(async (transcript) => ai.queryExternalAI(transcript));
+
+    // Matched local command runs locally without calling external LLM API
+    speechService.handleTranscript('Explode the model');
+    expect(exploded).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // Unmatched conversational question routes to external AI & logs assistant turn
+    speechService.handleTranscript('What alloy best resists arc thermal stress?');
+    await new Promise((r) => setTimeout(r, 15));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(replies[replies.length - 1]).toBe('Titanium alloy recommended, sir.');
+    expect(ai.getHistory().some((m) => m.role === 'assistant' && m.content.includes('Titanium'))).toBe(true);
+    ai.clearApiKey();
+  });
+
+  it('supports Gemini and Anthropic external AI endpoints while keeping API keys in volatile RAM only', async () => {
+    const ai = new ContextualAIService();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          candidates: [{ content: { parts: [{ text: 'Gemini analysis online, sir.' }] } }]
+        })
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          content: [{ text: 'Claude analysis complete, sir.' }]
+        })
+      });
+    vi.stubGlobal('fetch', fetchMock);
+
+    ai.saveConfig({ provider: 'GEMINI', apiKey: 'AIza-volatile-test', modelName: 'gemini-2.5-flash' });
+    const geminiReply = await ai.queryExternalAI('Evaluate containment stability');
+    expect(geminiReply).toBe('Gemini analysis online, sir.');
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining('generativelanguage.googleapis.com'),
+      expect.objectContaining({ method: 'POST' })
+    );
+
+    ai.saveConfig({ provider: 'ANTHROPIC', apiKey: 'sk-ant-volatile-test', modelName: 'claude-3-5-sonnet-latest' });
+    const claudeReply = await ai.queryExternalAI('Summarize orbital diagnostics');
+    expect(claudeReply).toBe('Claude analysis complete, sir.');
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      'https://api.anthropic.com/v1/messages',
+      expect.objectContaining({ method: 'POST' })
+    );
+
+    ai.clearApiKey();
   });
 });

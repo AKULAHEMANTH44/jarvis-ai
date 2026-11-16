@@ -65,7 +65,7 @@ export const AIConfigModal: React.FC<AIConfigModalProps> = ({ isOpen, onClose })
               <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
-                  onClick={() => { audioService.playChirp(1200); setConfig(c => ({ ...c, provider: 'LOCAL', modelName: 'JARVIS Local Core MK-7' })); }}
+                  onClick={() => { audioService.playChirp(1200); setConfig(c => ({ ...c, provider: 'LOCAL', modelName: 'JARVIS Local Core MK-7', customEndpoint: undefined })); }}
                   className={`p-2 rounded border text-left flex flex-col ${
                     config.provider === 'LOCAL'
                       ? 'border-emerald-400 bg-emerald-950/40 text-white font-bold'
@@ -73,18 +73,42 @@ export const AIConfigModal: React.FC<AIConfigModalProps> = ({ isOpen, onClose })
                   }`}
                 >
                   <span className="font-orbitron text-[11px]">LOCAL AUTONOMOUS</span>
-                  <span className="text-[9px] text-emerald-400 font-normal">100% On-Device • Zero Network • Private</span>
+                  <span className="text-[9px] text-emerald-400 font-normal">100% On-Device • Zero Network</span>
                 </button>
                 <button
                   type="button"
-                  onClick={() => { audioService.playChirp(1200); setConfig(c => ({ ...c, provider: 'OPENAI', modelName: 'gpt-4o-mini' })); }}
+                  onClick={() => { audioService.playChirp(1200); setConfig(c => ({ ...c, provider: 'OPENAI', modelName: 'gpt-4o-mini', customEndpoint: undefined })); }}
                   className={`p-2 rounded border text-left flex flex-col ${
                     config.provider === 'OPENAI'
                       ? 'border-cyan-400 bg-cyan-950/40 text-white font-bold'
                       : 'border-cyan-500/30 bg-black/50 text-cyan-400/80 hover:bg-cyan-950/40'
                   }`}
                 >
-                  <span className="font-orbitron text-[11px]">OPENAI / CUSTOM API</span>
+                  <span className="font-orbitron text-[11px]">OPENAI / COMPAT</span>
+                  <span className="text-[9px] text-cyan-400/70 font-normal">Volatile RAM Key • HTTPS Only</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { audioService.playChirp(1200); setConfig(c => ({ ...c, provider: 'GEMINI', modelName: 'gemini-2.5-flash', customEndpoint: undefined })); }}
+                  className={`p-2 rounded border text-left flex flex-col ${
+                    config.provider === 'GEMINI'
+                      ? 'border-cyan-400 bg-cyan-950/40 text-white font-bold'
+                      : 'border-cyan-500/30 bg-black/50 text-cyan-400/80 hover:bg-cyan-950/40'
+                  }`}
+                >
+                  <span className="font-orbitron text-[11px]">GOOGLE GEMINI</span>
+                  <span className="text-[9px] text-cyan-400/70 font-normal">Volatile RAM Key • HTTPS Only</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { audioService.playChirp(1200); setConfig(c => ({ ...c, provider: 'ANTHROPIC', modelName: 'claude-3-5-sonnet-latest', customEndpoint: undefined })); }}
+                  className={`p-2 rounded border text-left flex flex-col ${
+                    config.provider === 'ANTHROPIC'
+                      ? 'border-cyan-400 bg-cyan-950/40 text-white font-bold'
+                      : 'border-cyan-500/30 bg-black/50 text-cyan-400/80 hover:bg-cyan-950/40'
+                  }`}
+                >
+                  <span className="font-orbitron text-[11px]">ANTHROPIC CLAUDE</span>
                   <span className="text-[9px] text-cyan-400/70 font-normal">Volatile RAM Key • HTTPS Only</span>
                 </button>
               </div>
@@ -114,7 +138,7 @@ export const AIConfigModal: React.FC<AIConfigModalProps> = ({ isOpen, onClose })
                     autoComplete="off"
                     value={config.apiKey || ''}
                     onChange={(e) => setConfig({ ...config, apiKey: e.target.value })}
-                    placeholder="sk-..."
+                    placeholder={config.provider === 'GEMINI' ? 'AIza...' : config.provider === 'ANTHROPIC' ? 'sk-ant-...' : 'sk-...'}
                     className="w-full bg-cyan-950/50 border border-cyan-500/40 rounded px-2.5 py-1 text-white focus:outline-none focus:border-cyan-400"
                   />
                 </div>
@@ -127,20 +151,32 @@ export const AIConfigModal: React.FC<AIConfigModalProps> = ({ isOpen, onClose })
                     type="text"
                     value={config.modelName}
                     onChange={(e) => setConfig({ ...config, modelName: e.target.value })}
-                    placeholder="gpt-4o-mini or custom model"
+                    placeholder={
+                      config.provider === 'GEMINI'
+                        ? 'gemini-2.5-flash'
+                        : config.provider === 'ANTHROPIC'
+                        ? 'claude-3-5-sonnet-latest'
+                        : 'gpt-4o-mini or custom model'
+                    }
                     className="w-full bg-cyan-950/50 border border-cyan-500/40 rounded px-2.5 py-1 text-white focus:outline-none focus:border-cyan-400"
                   />
                 </div>
 
                 <div>
                   <label className="block text-[10px] text-cyan-400/80 mb-1">
-                    CUSTOM ENDPOINT (HTTPS OR LOCALHOST ONLY):
+                    CUSTOM ENDPOINT (OPTIONAL — HTTPS OR LOCALHOST ONLY):
                   </label>
                   <input
                     type="text"
                     value={config.customEndpoint || ''}
                     onChange={(e) => setConfig({ ...config, customEndpoint: e.target.value })}
-                    placeholder="https://api.openai.com/v1/chat/completions"
+                    placeholder={
+                      config.provider === 'GEMINI'
+                        ? 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent'
+                        : config.provider === 'ANTHROPIC'
+                        ? 'https://api.anthropic.com/v1/messages'
+                        : 'https://api.openai.com/v1/chat/completions'
+                    }
                     className="w-full bg-cyan-950/50 border border-cyan-500/40 rounded px-2.5 py-1 text-white focus:outline-none focus:border-cyan-400"
                   />
                 </div>

@@ -12,6 +12,7 @@ import { PermissionConfirmationModal } from './components/Workspace/PermissionCo
 import { AIConfigModal } from './components/HUD/AIConfigModal';
 import { HologramSceneManager } from './three/HologramScene';
 import {
+  CameraControlMode,
   ComponentLabel2D,
   HologramModelId,
   HologramVisualSettings,
@@ -48,7 +49,21 @@ import {
   handleEscapeKeyState,
   shouldShowProjectedLabels
 } from './utils/hudState';
+import { SpatialHistoryManager } from './utils/spatialHistory';
+import { WorkspaceSnapshot } from './three/SpatialObjectManager';
 import { X } from 'lucide-react';
+
+interface WorkspaceUndoState {
+  spatial: WorkspaceSnapshot;
+  visual: {
+    renderMode: HologramVisualSettings['renderMode'];
+    wireframe: boolean;
+    explodedView: boolean;
+    explosionAmount: number;
+    dispersionAmount: number;
+    spatialFormation: HologramVisualSettings['spatialFormation'];
+  };
+}
 
 export const App: React.FC = () => {
   const autostart =
@@ -66,6 +81,8 @@ export const App: React.FC = () => {
   const [activeGestureFeedback, setActiveGestureFeedback] = useState<string | null>(null);
   const [spatialFeedback, setSpatialFeedback] = useState<SpatialVisualFeedback | null>(null);
   const [isProcessingCommand, setIsProcessingCommand] = useState<boolean>(false);
+  const [cameraControlMode, setCameraControlMode] = useState<CameraControlMode>('OBJECT');
+  const [labError, setLabError] = useState<string | null>(null);
 
   // Unified Hologram-First Contextual HUD & Focus Mode State
   const [hudState, setHudState] = useState<HudLayoutState>({
@@ -197,10 +214,37 @@ export const App: React.FC = () => {
     }
   ]);
 
-  // Three.js Scene Reference
+  // Three.js Scene Reference & Undo/Redo History
   const sceneManagerRef = useRef<HologramSceneManager | null>(null);
   const lastGestureRef = useRef<GestureType>('NONE');
   const lastDispatchedGestureRef = useRef<GestureDetectionResult | null>(null);
+  const historyRef = useRef<SpatialHistoryManager<WorkspaceUndoState>>(
+    new SpatialHistoryManager<WorkspaceUndoState>(50, 600)
+  );
+  const pendingCanvasBeforeRef = useRef<WorkspaceUndoState | null>(null);
+  const visualSettingsRef = useRef<HologramVisualSettings>(visualSettings);
+  visualSettingsRef.current = visualSettings;
+
+  const [historyStatus, setHistoryStatus] = useState<{
+    canUndo: boolean;
+    canRedo: boolean;
+    undoLabel: string | null;
+    redoLabel: string | null;
+  }>({
+    canUndo: false,
+    canRedo: false,
+    undoLabel: null,
+    redoLabel: null
+  });
+
+  const refreshHistoryStatus = useCallback(() => {
+    setHistoryStatus({
+      canUndo: historyRef.current.canUndo(),
+      canRedo: historyRef.current.canRedo(),
+      undoLabel: historyRef.current.getUndoLabel(),
+      redoLabel: historyRef.current.getRedoLabel()
+    });
+  }, []);
 
   const appendMessage = useCallback(
     (sender: AssistantMessage['sender'], text: string, type: AssistantMessage['type'] = 'INFO') => {
@@ -226,6 +270,87 @@ export const App: React.FC = () => {
       setSelectedObjectId(sceneManagerRef.current.spatialManager.getSelectedId());
     }
   }, []);
+
+  const captureUndoState = useCallback(
+    (visualOverride?: Partial<HologramVisualSettings>): WorkspaceUndoState | null => {
+      if (!sceneManagerRef.current) return null;
+      const merged = { ...visualSettingsRef.current, ...(visualOverride || {}) };
+      return {
+        spatial: sceneManagerRef.current.spatialManager.captureWorkspaceSnapshot(),
+        visual: {
+          renderMode: merged.renderMode,
+          wireframe: merged.wireframe,
+          explodedView: merged.explodedView,
+          explosionAmount: merged.explosionAmount,
+          dispersionAmount: merged.dispersionAmount,
+          spatialFormation: merged.spatialFormation
+        }
+      };
+    },
+    []
+  );
+
+  const recordHistoryTransition = useCallback(
+    (
+      before: WorkspaceUndoState | null,
+      label: string,
+      mergeKey?: string,
+      afterVisualOverride?: Partial<HologramVisualSettings>
+    ) => {
+      if (!before) return;
+      const after = captureUndoState(afterVisualOverride);
+      if (!after) return;
+      if (historyRef.current.record(before, after, label, mergeKey)) {
+        refreshHistoryStatus();
+      }
+    },
+    [captureUndoState, refreshHistoryStatus]
+  );
+
+  const syncVisualDisplayToSelected = useCallback(() => {
+    if (!sceneManagerRef.current) return;
+    const selected = sceneManagerRef.current.spatialManager.getSelected();
+    if (!selected) return;
+    const nextPatch: Partial<HologramVisualSettings> = {
+      explosionAmount: selected.explosionAmount,
+      explodedView: selected.explosionAmount > 0.05,
+      dispersionAmount: selected.visionSphereObj
+        ? selected.visionSphereObj.getDispersion()
+        : selected.targetDisintegration
+    };
+    sceneManagerRef.current.syncVisualSettingsState(nextPatch);
+    setVisualSettings((v) => ({ ...v, ...nextPatch }));
+  }, []);
+
+  const handleUndo = useCallback((): boolean => {
+    if (!sceneManagerRef.current) return false;
+    const undone = historyRef.current.undo();
+    if (!undone) return false;
+
+    sceneManagerRef.current.spatialManager.restoreWorkspaceSnapshot(undone.state.spatial);
+    sceneManagerRef.current.syncVisualSettingsState(undone.state.visual);
+    setVisualSettings((v) => ({ ...v, ...undone.state.visual }));
+    syncSpatialStates();
+    refreshHistoryStatus();
+    audioService.playChirp(1120);
+    appendMessage('JARVIS', `Reverted operation: ${undone.entry.label}.`, 'INFO');
+    return true;
+  }, [appendMessage, refreshHistoryStatus, syncSpatialStates]);
+
+  const handleRedo = useCallback((): boolean => {
+    if (!sceneManagerRef.current) return false;
+    const redone = historyRef.current.redo();
+    if (!redone) return false;
+
+    sceneManagerRef.current.spatialManager.restoreWorkspaceSnapshot(redone.state.spatial);
+    sceneManagerRef.current.syncVisualSettingsState(redone.state.visual);
+    setVisualSettings((v) => ({ ...v, ...redone.state.visual }));
+    syncSpatialStates();
+    refreshHistoryStatus();
+    audioService.playChirp(1280);
+    appendMessage('JARVIS', `Restored operation: ${redone.entry.label}.`, 'INFO');
+    return true;
+  }, [appendMessage, refreshHistoryStatus, syncSpatialStates]);
 
   // Wire up desktop bridge confirmation modal & speech status watcher
   useEffect(() => {
@@ -261,11 +386,13 @@ export const App: React.FC = () => {
   const handleResetTransform = useCallback(() => {
     audioService.playChirp(1100);
     if (sceneManagerRef.current) {
+      const before = captureUndoState();
       sceneManagerRef.current.resetTransform();
       syncSpatialStates();
+      recordHistoryTransition(before, 'Reset Transform');
     }
     appendMessage('JARVIS', 'Holographic anchor position re-centered.', 'INFO');
-  }, [appendMessage, syncSpatialStates]);
+  }, [appendMessage, captureUndoState, recordHistoryTransition, syncSpatialStates]);
 
   // Multi-Object Operations
   const handleAddSpatialObject = useCallback((modelId: HologramModelId) => {
@@ -274,21 +401,23 @@ export const App: React.FC = () => {
       const inst = sceneManagerRef.current.addSpatialObject(modelId);
       setCurrentModelId(modelId);
       syncSpatialStates();
+      syncVisualDisplayToSelected();
       appendMessage('JARVIS', `Spawned new ${inst.name} in spatial workspace.`, 'INFO');
     }
-  }, [appendMessage, syncSpatialStates]);
+  }, [appendMessage, syncSpatialStates, syncVisualDisplayToSelected]);
 
   const handleDuplicateObject = useCallback((id: string): boolean => {
     if (!sceneManagerRef.current) return false;
     audioService.playChirp(1500);
     const dup = sceneManagerRef.current.spatialManager.duplicate(id);
     syncSpatialStates();
+    syncVisualDisplayToSelected();
     if (dup) {
       appendMessage('JARVIS', `Cloned ${dup.name}. Both instances ready for independent spatial manipulation.`, 'INFO');
       return true;
     }
     return false;
-  }, [appendMessage, syncSpatialStates]);
+  }, [appendMessage, syncSpatialStates, syncVisualDisplayToSelected]);
 
   const handleDeleteObject = useCallback(async (id: string): Promise<boolean> => {
     const target = spatialObjects.find((o) => o.id === id);
@@ -304,28 +433,32 @@ export const App: React.FC = () => {
       audioService.playChirp(800);
       const deleted = sceneManagerRef.current.spatialManager.delete(id);
       syncSpatialStates();
+      syncVisualDisplayToSelected();
       if (deleted) {
         appendMessage('JARVIS', `${targetName} de-materialized from workspace.`, 'INFO');
       }
       return deleted;
     }
     return false;
-  }, [appendMessage, spatialObjects, syncSpatialStates]);
+  }, [appendMessage, spatialObjects, syncSpatialStates, syncVisualDisplayToSelected]);
 
   const handleSelectObject = useCallback((id: string) => {
     if (sceneManagerRef.current) {
       sceneManagerRef.current.selectObject(id);
       syncSpatialStates();
+      syncVisualDisplayToSelected();
     }
-  }, [syncSpatialStates]);
+  }, [syncSpatialStates, syncVisualDisplayToSelected]);
 
   const handleToggleLockObject = useCallback((id: string) => {
     if (sceneManagerRef.current) {
+      const before = captureUndoState();
       const locked = sceneManagerRef.current.toggleObjectLock(id);
       syncSpatialStates();
+      recordHistoryTransition(before, locked ? 'Lock Object' : 'Unlock Object');
       appendMessage('JARVIS', locked ? 'Object spatial transform locked.' : 'Object spatial transform unlocked.', 'INFO');
     }
-  }, [appendMessage, syncSpatialStates]);
+  }, [appendMessage, captureUndoState, recordHistoryTransition, syncSpatialStates]);
 
   const handleTransformObject = useCallback(
     (
@@ -336,39 +469,50 @@ export const App: React.FC = () => {
       }
     ) => {
       if (sceneManagerRef.current) {
+        const before = captureUndoState();
         sceneManagerRef.current.setObjectTransform(id, transform);
         syncSpatialStates();
+        recordHistoryTransition(before, 'Transform Object', `rig-transform-${id}`);
       }
     },
-    [syncSpatialStates]
+    [captureUndoState, recordHistoryTransition, syncSpatialStates]
   );
 
   const handleGroupAll = useCallback(() => {
     if (sceneManagerRef.current) {
       const ids = sceneManagerRef.current.spatialManager.getAll().map((i) => i.id);
       if (ids.length > 1) {
+        const before = captureUndoState();
         sceneManagerRef.current.spatialManager.groupObjects(ids);
         syncSpatialStates();
+        recordHistoryTransition(before, 'Group Objects');
         appendMessage('JARVIS', `Linked ${ids.length} spatial entities into a synchronized transform group.`, 'INFO');
       }
     }
-  }, [appendMessage, syncSpatialStates]);
+  }, [appendMessage, captureUndoState, recordHistoryTransition, syncSpatialStates]);
 
   const handleUngroupObject = useCallback((id: string) => {
     if (sceneManagerRef.current) {
+      const before = captureUndoState();
       sceneManagerRef.current.spatialManager.ungroupObject(id);
       syncSpatialStates();
+      recordHistoryTransition(before, 'Ungroup Object');
     }
-  }, [syncSpatialStates]);
+  }, [captureUndoState, recordHistoryTransition, syncSpatialStates]);
 
   const handleApplyFormation = useCallback((formation: LayoutFormation) => {
     if (sceneManagerRef.current) {
       audioService.playActivationWhoosh();
+      const before = captureUndoState();
       sceneManagerRef.current.applyFormation(formation);
+      setVisualSettings((v) => ({ ...v, spatialFormation: formation }));
       syncSpatialStates();
+      recordHistoryTransition(before, `Formation: ${formation}`, undefined, {
+        spatialFormation: formation
+      });
       appendMessage('JARVIS', `Applied ${formation} spatial layout formation.`, 'INFO');
     }
-  }, [appendMessage, syncSpatialStates]);
+  }, [appendMessage, captureUndoState, recordHistoryTransition, syncSpatialStates]);
 
   // Reconstruction Lab Operations
   const handleSynthesizePreset = useCallback((presetId: ReconstructionPresetId) => {
@@ -385,23 +529,112 @@ export const App: React.FC = () => {
     }
   }, [appendMessage, syncSpatialStates]);
 
-  const handleImportMeshFile = useCallback(async (file: File) => {
+  const handleImportMeshFiles = useCallback(async (files: File[]) => {
     if (!sceneManagerRef.current) return;
+    setLabError(null);
     try {
-      const inst = await sceneManagerRef.current.importMeshFromFile(file);
+      const inst = await sceneManagerRef.current.importMeshFromFiles(files);
       audioService.playActivationWhoosh();
       setCurrentModelId('reconstructed_object');
       syncSpatialStates();
       appendMessage(
         'JARVIS',
-        `Imported and reconstructed ${inst.name} (${inst.vertexCount} vertices, ${inst.faceCount} faces).`,
+        `Imported and reconstructed ${inst.name} (${inst.vertexCount} vertices, ${inst.faceCount} faces, ${inst.componentCount} parts).`,
         'RESPONSE'
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unable to parse 3D mesh file.';
+      setLabError(msg);
       appendMessage('JARVIS', msg, 'ALERT');
+      throw err;
     }
   }, [appendMessage, syncSpatialStates]);
+
+  const handleImportMeshFile = useCallback(async (file: File) => {
+    try {
+      await handleImportMeshFiles([file]);
+    } catch {
+      // handled cleanly inside handleImportMeshFiles & surfaced in labError/console
+    }
+  }, [handleImportMeshFiles]);
+
+  const handleFrameSelectedObject = useCallback(() => {
+    if (!sceneManagerRef.current) return;
+    audioService.playChirp(1400);
+    sceneManagerRef.current.frameObject(selectedObjectId || undefined);
+  }, [selectedObjectId]);
+
+  const handleResetCamera = useCallback(() => {
+    if (!sceneManagerRef.current) return;
+    audioService.playChirp(1100);
+    setCameraControlMode('OBJECT');
+    sceneManagerRef.current.resetCamera();
+  }, []);
+
+  const handleSelectComponent = useCallback((instanceId: string, componentId: string | null) => {
+    if (!sceneManagerRef.current) return;
+    const before = captureUndoState();
+    sceneManagerRef.current.selectComponent(instanceId, componentId);
+    syncSpatialStates();
+    recordHistoryTransition(before, componentId ? 'Select Component' : 'Clear Component Selection');
+  }, [captureUndoState, recordHistoryTransition, syncSpatialStates]);
+
+  const handleIsolateComponent = useCallback((instanceId: string, componentId: string | null) => {
+    if (!sceneManagerRef.current) return;
+    const before = captureUndoState();
+    sceneManagerRef.current.isolateComponent(instanceId, componentId);
+    syncSpatialStates();
+    recordHistoryTransition(before, componentId ? 'Isolate Component' : 'Show All Components');
+  }, [captureUndoState, recordHistoryTransition, syncSpatialStates]);
+
+  const handleHighlightComponent = useCallback((instanceId: string, componentId: string | null) => {
+    if (!sceneManagerRef.current) return;
+    sceneManagerRef.current.highlightComponent(instanceId, componentId);
+  }, []);
+
+  const handleUpdateVisualSettingsWithHistory = useCallback(
+    (patch: Partial<HologramVisualSettings>) => {
+      const before = captureUndoState();
+      let label = 'Update Visual Settings';
+      let mergeKey: string | undefined;
+
+      if (patch.explosionAmount !== undefined || patch.explodedView !== undefined) {
+        label = patch.explodedView === false || patch.explosionAmount === 0 ? 'Collapse Explosion' : 'Explode View';
+        mergeKey = 'visual-explosion';
+      } else if (patch.dispersionAmount !== undefined) {
+        label = 'Particle Dispersion';
+        mergeKey = 'visual-dispersion';
+      } else if (patch.renderMode !== undefined) {
+        label = `Render Mode: ${patch.renderMode}`;
+      }
+
+      setVisualSettings((prev) => ({ ...prev, ...patch }));
+
+      if (
+        sceneManagerRef.current &&
+        (patch.explosionAmount !== undefined ||
+          patch.explodedView !== undefined ||
+          patch.dispersionAmount !== undefined ||
+          patch.renderMode !== undefined)
+      ) {
+        if (patch.renderMode !== undefined) {
+          sceneManagerRef.current.spatialManager.setGlobalRenderMode(patch.renderMode);
+        }
+        if (patch.explosionAmount !== undefined) {
+          sceneManagerRef.current.spatialManager.setExplosionAmount(patch.explosionAmount);
+        } else if (patch.explodedView !== undefined) {
+          sceneManagerRef.current.spatialManager.setExplodedView(patch.explodedView);
+        }
+        if (patch.dispersionAmount !== undefined) {
+          sceneManagerRef.current.setDispersion(patch.dispersionAmount);
+        }
+        sceneManagerRef.current.syncVisualSettingsState(patch);
+        syncSpatialStates();
+        recordHistoryTransition(before, label, mergeKey, patch);
+      }
+    },
+    [captureUndoState, recordHistoryTransition, syncSpatialStates]
+  );
 
   const handleCaptureWebcamScan = useCallback((): boolean => {
     if (!isCameraActive || !videoRef.current || !sceneManagerRef.current) {
@@ -439,34 +672,43 @@ export const App: React.FC = () => {
   const handleRotate360 = useCallback((): boolean => {
     if (!sceneManagerRef.current) return false;
     audioService.playChirp(1450);
+    const before = captureUndoState();
     const ok = sceneManagerRef.current.rotate360(selectedObjectId || undefined);
     syncSpatialStates();
+    if (ok) {
+      recordHistoryTransition(before, 'Rotate 360°');
+    }
     return ok;
-  }, [selectedObjectId, syncSpatialStates]);
+  }, [captureUndoState, recordHistoryTransition, selectedObjectId, syncSpatialStates]);
 
   const handleDisintegrate = useCallback((): boolean => {
     if (!sceneManagerRef.current) return false;
     audioService.playShockwave();
+    const before = captureUndoState();
     const ok = sceneManagerRef.current.disintegrateObject(selectedObjectId || undefined);
     if (ok) {
       setVisualSettings((v) => ({ ...v, dispersionAmount: 1.0 }));
       syncSpatialStates();
+      recordHistoryTransition(before, 'Disintegrate', undefined, { dispersionAmount: 1.0 });
       appendMessage('JARVIS', 'Particle disintegration initiated. Original spatial state preserved.', 'ALERT');
     }
     return ok;
-  }, [appendMessage, selectedObjectId, syncSpatialStates]);
+  }, [appendMessage, captureUndoState, recordHistoryTransition, selectedObjectId, syncSpatialStates]);
 
   const handleReconstruct = useCallback((): boolean => {
     if (!sceneManagerRef.current) return false;
     audioService.playActivationWhoosh();
+    const before = captureUndoState();
     const ok = sceneManagerRef.current.reconstructObject(selectedObjectId || undefined);
     if (ok) {
-      setVisualSettings((v) => ({ ...v, explodedView: false, explosionAmount: 0, dispersionAmount: 0 }));
+      const visualReset = { explodedView: false, explosionAmount: 0, dispersionAmount: 0 };
+      setVisualSettings((v) => ({ ...v, ...visualReset }));
       syncSpatialStates();
+      recordHistoryTransition(before, 'Reconstruct', undefined, visualReset);
       appendMessage('JARVIS', 'Reassembling holographic structure to original state.', 'RESPONSE');
     }
     return ok;
-  }, [appendMessage, selectedObjectId, syncSpatialStates]);
+  }, [appendMessage, captureUndoState, recordHistoryTransition, selectedObjectId, syncSpatialStates]);
 
   const handleReconstructImages = useCallback(async (files: File[]) => {
     if (!sceneManagerRef.current) return;
@@ -980,6 +1222,26 @@ export const App: React.FC = () => {
         feedbackText: 'Contracting holographic dimensions.'
       },
       {
+        patterns: ['fit model', 'frame model', 'focus model', 'center camera'],
+        description: 'Adaptively frame selected 3D model in viewport',
+        category: 'MANIPULATION',
+        action: () => {
+          handleFrameSelectedObject();
+          return true;
+        },
+        feedbackText: 'Framing holographic specimen to optimal viewport bounds.'
+      },
+      {
+        patterns: ['reset camera', 'default camera', 'home camera'],
+        description: 'Reset camera viewpoint to default angle',
+        category: 'MANIPULATION',
+        action: () => {
+          handleResetCamera();
+          return true;
+        },
+        feedbackText: 'Restoring default camera viewpoint.'
+      },
+      {
         patterns: ['reset environment', 'reset hologram', 'reset object', 'reset', 'center object', 'recenter'],
         description: 'Reset environment, dispersion, and hologram anchor',
         category: 'MANIPULATION',
@@ -1123,6 +1385,22 @@ export const App: React.FC = () => {
         category: 'AI',
         action: () => {},
         feedbackText: `The current time is ${new Date().toLocaleTimeString()}.`
+      },
+      {
+        patterns: ['undo transformation', 'undo last action', 'undo action', 'undo'],
+        description: 'Undo last holographic transformation or operation',
+        category: 'MANIPULATION',
+        action: () => handleUndo(),
+        feedbackText: 'Reverting last workspace transformation.',
+        failureText: 'No earlier transformation state available to undo.'
+      },
+      {
+        patterns: ['redo transformation', 'redo last action', 'redo action', 'redo'],
+        description: 'Redo previously undone holographic transformation',
+        category: 'MANIPULATION',
+        action: () => handleRedo(),
+        feedbackText: 'Restoring undone workspace transformation.',
+        failureText: 'No undone transformation state available to redo.'
       }
     ];
 
@@ -1130,17 +1408,68 @@ export const App: React.FC = () => {
     speechService.setMessageCallback((msg) => {
       setMessages((prev) => [...prev, msg]);
     });
+    speechService.setUnmatchedTranscriptHandler(async (transcript) => {
+      const cfg = contextualAI.getConfig();
+      if (cfg.provider !== 'LOCAL' && contextualAI.hasApiKey()) {
+        setIsProcessingCommand(true);
+        try {
+          const extReply = await contextualAI.queryExternalAI(transcript);
+          if (extReply) return extReply;
+        } finally {
+          setIsProcessingCommand(false);
+        }
+      }
+
+      const activeName =
+        sceneManagerRef.current?.spatialManager.getSelected()?.name || currentModelId.replace(/_/g, ' ');
+      const intent = contextualAI.parseLocalIntent(transcript, activeName);
+
+      if (intent.action === 'RECONSTRUCT_SCAN') {
+        handleTriggerRescan();
+      } else if (intent.action === 'DUPLICATE' && selectedObjectId) {
+        handleDuplicateObject(selectedObjectId);
+      } else if (intent.action === 'DELETE' && selectedObjectId) {
+        void handleDeleteObject(selectedObjectId);
+      } else if (intent.action === 'FORMATION_ORBIT') {
+        handleApplyFormation('ORBIT');
+      } else if (intent.action === 'FORMATION_GRID') {
+        handleApplyFormation('GRID');
+      } else if (intent.action === 'FORMATION_LINE') {
+        handleApplyFormation('LINE');
+      } else if (intent.action === 'SAVE_FILE') {
+        void desktopBridge
+          .requestAuthorization(
+            'FILE_WRITE',
+            'stark_lab_notes.txt',
+            'Export mission memorandum notes to authorized local file system.'
+          )
+          .then((approved) => {
+            if (approved) {
+              return desktopBridge.saveAuthorizedFile('stark_lab_notes.txt', notes);
+            }
+          });
+      }
+
+      contextualAI.addHistory('user', transcript);
+      contextualAI.addHistory('assistant', intent.reply);
+      return intent.reply;
+    });
   }, [
+    currentModelId,
     handleApplyFormation,
     handleDeleteObject,
     handleDisintegrate,
     handleDuplicateObject,
+    handleFrameSelectedObject,
     handleReconstruct,
+    handleRedo,
+    handleResetCamera,
     handleResetTransform,
     handleRotate360,
     handleSelectModel,
     handleTriggerRescan,
     handleTriggerShockwave,
+    handleUndo,
     notes,
     selectedObjectId,
     syncSpatialStates
@@ -1167,27 +1496,10 @@ export const App: React.FC = () => {
     }
   }, [appendMessage, isVoiceActive]);
 
-  // Handle direct command string from console input with Contextual AI
-  const handleSendConsoleCommand = useCallback(async (text: string) => {
-    contextualAI.addHistory('user', text);
-
-    if (contextualAI.getConfig().provider !== 'LOCAL' && contextualAI.hasApiKey()) {
-      setIsProcessingCommand(true);
-      try {
-        const extReply = await contextualAI.queryExternalAI(text);
-        if (extReply) {
-          appendMessage('USER', text, 'COMMAND');
-          appendMessage('JARVIS', extReply, 'RESPONSE');
-          speechService.speak(extReply);
-          return;
-        }
-      } finally {
-        setIsProcessingCommand(false);
-      }
-    }
-
+  // Local voice commands always take priority over external LLM chat responses
+  const handleSendConsoleCommand = useCallback((text: string) => {
     speechService.handleTranscript(text);
-  }, [appendMessage]);
+  }, []);
 
   // Camera & Tracking toggle with clear permission feedback
   const handleToggleCamera = useCallback(async () => {
@@ -1432,9 +1744,31 @@ export const App: React.FC = () => {
     }
   }, [hudState.activeDrawer, taskSubTab]);
 
-  // Escape closes active drawer first, then exits Focus mode
+  // Global keyboard shortcuts: Escape (drawer/focus), Ctrl+Z (Undo), Ctrl+Y / Ctrl+Shift+Z (Redo)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const isEditable =
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable);
+
+      if ((e.ctrlKey || e.metaKey) && !isEditable && mode !== 'STANDBY' && !isAIConfigOpen) {
+        const key = e.key.toLowerCase();
+        if (key === 'z' && !e.shiftKey) {
+          e.preventDefault();
+          handleUndo();
+          return;
+        }
+        if (key === 'y' || (key === 'z' && e.shiftKey)) {
+          e.preventDefault();
+          handleRedo();
+          return;
+        }
+      }
+
       if (e.key !== 'Escape') return;
       if (isAIConfigOpen) {
         setIsAIConfigOpen(false);
@@ -1444,7 +1778,7 @@ export const App: React.FC = () => {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [isAIConfigOpen]);
+  }, [handleRedo, handleUndo, isAIConfigOpen, mode]);
 
   // Project 2D component callout labels smoothly when Exploded View or VISION 1.2 CORE is active (hidden in Focus/Standby)
   useEffect(() => {
@@ -1567,8 +1901,28 @@ export const App: React.FC = () => {
         onSelectObject={(id) => {
           setSelectedObjectId(id);
           syncSpatialStates();
+          syncVisualDisplayToSelected();
         }}
-        onTransformChange={syncSpatialStates}
+        onSelectComponent={handleSelectComponent}
+        onHighlightComponent={handleHighlightComponent}
+        onTransformStart={() => {
+          pendingCanvasBeforeRef.current = captureUndoState();
+        }}
+        onTransformChange={() => {
+          const before = pendingCanvasBeforeRef.current;
+          syncSpatialStates();
+          if (before) {
+            recordHistoryTransition(before, 'Interactive Viewport Transform', 'canvas-transform');
+            pendingCanvasBeforeRef.current = captureUndoState();
+          }
+        }}
+        onDropModelFiles={handleImportMeshFiles}
+        onDropImageFiles={handleReconstructImages}
+        onImportError={(msg) => {
+          setLabError(msg);
+          appendMessage('JARVIS', msg, 'ALERT');
+        }}
+        cameraControlMode={cameraControlMode}
         laserTarget={laserTarget}
         componentLabels={componentLabels}
         activeGestureFeedback={activeGestureFeedback}
@@ -1697,9 +2051,7 @@ export const App: React.FC = () => {
                     selectedObjectId={selectedObjectId}
                     visualSettings={visualSettings}
                     isCameraActive={isCameraActive}
-                    onUpdateVisualSettings={(settings) =>
-                      setVisualSettings((v) => ({ ...v, ...settings }))
-                    }
+                    onUpdateVisualSettings={handleUpdateVisualSettingsWithHistory}
                     onSelectObject={handleSelectObject}
                     onAddObject={handleAddSpatialObject}
                     onDuplicateObject={handleDuplicateObject}
@@ -1712,6 +2064,22 @@ export const App: React.FC = () => {
                     onApplyFormation={handleApplyFormation}
                     onSynthesizePreset={handleSynthesizePreset}
                     onImportMeshFile={handleImportMeshFile}
+                    onImportMeshFiles={handleImportMeshFiles}
+                    labError={labError}
+                    onClearLabError={() => setLabError(null)}
+                    cameraControlMode={cameraControlMode}
+                    onSetCameraControlMode={setCameraControlMode}
+                    onFrameSelectedObject={handleFrameSelectedObject}
+                    onResetCamera={handleResetCamera}
+                    onSelectComponent={handleSelectComponent}
+                    onIsolateComponent={handleIsolateComponent}
+                    onHighlightComponent={handleHighlightComponent}
+                    canUndo={historyStatus.canUndo}
+                    canRedo={historyStatus.canRedo}
+                    undoLabel={historyStatus.undoLabel}
+                    redoLabel={historyStatus.redoLabel}
+                    onUndo={handleUndo}
+                    onRedo={handleRedo}
                     onReconstructImages={handleReconstructImages}
                     onCaptureWebcamScan={handleCaptureWebcamScan}
                     onTriggerRescan={handleTriggerRescan}

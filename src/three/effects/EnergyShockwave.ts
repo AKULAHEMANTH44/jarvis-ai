@@ -177,4 +177,29 @@ export class EnergyShockwaveEffect {
     this.sparkParticles.geometry.attributes.position.needsUpdate = true;
     (this.sparkParticles.material as THREE.PointsMaterial).opacity = alpha * 0.95;
   }
+
+  public dispose() {
+    this.active = false;
+    this.group.visible = false;
+    this.pointLight.intensity = 0;
+
+    const meshes = [this.ringMesh1, this.ringMesh2, this.ringMesh3, this.sphereMesh];
+    for (const m of meshes) {
+      m.geometry.dispose();
+      if (Array.isArray(m.material)) {
+        m.material.forEach((mat) => mat.dispose());
+      } else {
+        m.material.dispose();
+      }
+    }
+
+    this.sparkParticles.geometry.dispose();
+    if (Array.isArray(this.sparkParticles.material)) {
+      this.sparkParticles.material.forEach((mat) => mat.dispose());
+    } else {
+      this.sparkParticles.material.dispose();
+    }
+
+    this.group.clear();
+  }
 }

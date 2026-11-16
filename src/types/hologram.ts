@@ -51,6 +51,15 @@ export interface ComponentLabel2D {
   y: number;
 }
 
+export interface SpatialComponentInfo {
+  id: string;
+  name: string;
+  isSelected: boolean;
+  isIsolated: boolean;
+}
+
+export type CameraControlMode = 'OBJECT' | 'CAMERA';
+
 export interface SpatialObjectState {
   id: string;
   modelId: HologramModelId;
@@ -72,6 +81,9 @@ export interface SpatialObjectState {
   reconstructionProgress?: number;
   renderMode?: HologramRenderMode;
   componentCount?: number;
+  components?: SpatialComponentInfo[];
+  selectedComponentId?: string | null;
+  isolatedComponentId?: string | null;
 }
 
 export type LayoutFormation = 'FREE' | 'GRID' | 'ORBIT' | 'LINE' | 'SINGLE';

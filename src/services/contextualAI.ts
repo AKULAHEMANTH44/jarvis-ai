@@ -245,6 +245,14 @@ export class ContextualAIService {
     };
   }
 
+  private recordUserAndAssistantTurn(prompt: string, reply: string) {
+    const last = this.conversationHistory[this.conversationHistory.length - 1];
+    if (!last || last.role !== 'user' || last.content !== prompt) {
+      this.addHistory('user', prompt);
+    }
+    this.addHistory('assistant', reply);
+  }
+
   // Connects to external LLM API if key is supplied by user in volatile memory
   public async queryExternalAI(prompt: string): Promise<string> {
     if (this.config.provider === 'LOCAL' || !this.volatileApiKey) {
@@ -276,8 +284,95 @@ export class ContextualAIService {
           return `External provider returned HTTP ${res.status}. Verify key and model configuration.`;
         }
         const data = await res.json();
-        return data.choices?.[0]?.message?.content || 'No response received from external provider.';
+        const reply = data.choices?.[0]?.message?.content?.trim() || 'No response received from external provider.';
+        this.recordUserAndAssistantTurn(prompt, reply);
+        return reply;
       }
+
+      if (this.config.provider === 'GEMINI') {
+        const model = (this.config.modelName || 'gemini-2.5-flash').trim();
+        const endpoint =
+          this.config.customEndpoint ||
+          `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+        if (!isValidExternalEndpoint(endpoint)) {
+          return 'Blocked external request: endpoint must use HTTPS (or localhost for local inference).';
+        }
+        const systemEntry = this.conversationHistory.find((m) => m.role === 'system');
+        const historyTurns = this.conversationHistory
+          .filter((m) => m.role !== 'system')
+          .map((m) => ({
+            role: m.role === 'assistant' ? 'model' : 'user',
+            parts: [{ text: m.content }]
+          }));
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': this.volatileApiKey
+          },
+          body: JSON.stringify({
+            ...(systemEntry ? { systemInstruction: { parts: [{ text: systemEntry.content }] } } : {}),
+            contents: [
+              ...historyTurns,
+              { role: 'user', parts: [{ text: prompt }] }
+            ],
+            generationConfig: {
+              temperature: this.config.temperature
+            }
+          })
+        });
+        if (!res.ok) {
+          return `External provider returned HTTP ${res.status}. Verify key and model configuration.`;
+        }
+        const data = await res.json();
+        const reply =
+          data.candidates?.[0]?.content?.parts
+            ?.map((p: { text?: string }) => p.text || '')
+            .join('')
+            .trim() || 'No response received from Gemini provider.';
+        this.recordUserAndAssistantTurn(prompt, reply);
+        return reply;
+      }
+
+      if (this.config.provider === 'ANTHROPIC') {
+        const endpoint = this.config.customEndpoint || 'https://api.anthropic.com/v1/messages';
+        if (!isValidExternalEndpoint(endpoint)) {
+          return 'Blocked external request: endpoint must use HTTPS (or localhost for local inference).';
+        }
+        const systemEntry = this.conversationHistory.find((m) => m.role === 'system');
+        const messages = this.conversationHistory
+          .filter((m) => m.role !== 'system')
+          .map((m) => ({ role: m.role, content: m.content }));
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': this.volatileApiKey,
+            'anthropic-version': '2023-06-01'
+          },
+          body: JSON.stringify({
+            model: this.config.modelName || 'claude-3-5-sonnet-latest',
+            max_tokens: 512,
+            temperature: this.config.temperature,
+            ...(systemEntry ? { system: systemEntry.content } : {}),
+            messages: [...messages, { role: 'user', content: prompt }]
+          })
+        });
+        if (!res.ok) {
+          return `External provider returned HTTP ${res.status}. Verify key and model configuration.`;
+        }
+        const data = await res.json();
+        const reply =
+          Array.isArray(data.content)
+            ? data.content
+                .map((block: { text?: string }) => block.text || '')
+                .join('')
+                .trim() || 'No response received from Anthropic provider.'
+            : 'No response received from Anthropic provider.';
+        this.recordUserAndAssistantTurn(prompt, reply);
+        return reply;
+      }
+
       return '';
     } catch {
       return 'External provider communication encountered a network or authentication error. Reverting to local protocol.';

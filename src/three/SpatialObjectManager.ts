@@ -5,6 +5,7 @@ import {
   HologramModelId,
   HologramRenderMode,
   LayoutFormation,
+  SpatialComponentInfo,
   SpatialObjectState
 } from '../types/hologram';
 import { VisionSphereObject } from './objects/VisionSphere';
@@ -15,7 +16,10 @@ import { HolographicGlobeObject } from './objects/HolographicGlobe';
 import { MolecularHelixObject } from './objects/MolecularHelix';
 import { CarbonBuckyballObject } from './objects/CarbonBuckyball';
 import { HolographicDataChartObject } from './objects/HolographicDataChart';
-import { ReconstructedHologramObject } from './objects/ReconstructedHologram';
+import {
+  ReconstructedHologramObject,
+  disposeObject3DResources
+} from './objects/ReconstructedHologram';
 import {
   RealWorldHologramObject,
   RealWorldModelId,
@@ -41,6 +45,13 @@ interface DisintegrationData {
   basePositions: Float32Array;
   burstVelocities: Float32Array;
   count: number;
+}
+
+interface SavedMeshVisual {
+  colorHex?: number;
+  emissiveHex?: number;
+  emissiveIntensity?: number;
+  opacity: number;
 }
 
 export interface SpatialInstance {
@@ -73,6 +84,10 @@ export interface SpatialInstance {
   faceCount: number;
   componentCount: number;
   renderMode: HologramRenderMode;
+  selectedComponentId: string | null;
+  isolatedComponentId: string | null;
+  highlightedComponentId: string | null;
+  explosionAmount: number;
   groupId?: string;
   reconstructedObj?: ReconstructedHologramObject;
   realWorldObj?: RealWorldHologramObject;
@@ -80,6 +95,28 @@ export interface SpatialInstance {
   update: (time: number, speedMultiplier: number, delta?: number) => void;
   setExplodedView: (exploded: boolean) => void;
   setColorTheme: (hex: number) => void;
+}
+
+export interface WorkspaceInstanceSnapshot {
+  id: string;
+  position: { x: number; y: number; z: number };
+  rotation: { x: number; y: number; z: number };
+  scale: number;
+  isLocked: boolean;
+  isFrozen: boolean;
+  targetDisintegration: number;
+  dispersionPhase: DispersionPhase;
+  explosionAmount: number;
+  renderMode: HologramRenderMode;
+  selectedComponentId: string | null;
+  isolatedComponentId: string | null;
+  highlightedComponentId: string | null;
+  groupId?: string;
+}
+
+export interface WorkspaceSnapshot {
+  selectedInstanceId: string | null;
+  instances: WorkspaceInstanceSnapshot[];
 }
 
 export class SpatialObjectManager {
@@ -167,7 +204,7 @@ export class SpatialObjectManager {
     let componentCount = 0;
 
     root.traverse((obj) => {
-      if (obj instanceof THREE.Mesh && obj.geometry) {
+      if (obj instanceof THREE.Mesh && obj.geometry && !obj.userData?.isHoloOverlay) {
         componentCount++;
         const pos = obj.geometry.getAttribute('position');
         if (pos) {
@@ -184,23 +221,41 @@ export class SpatialObjectManager {
   private buildDisintegrationCloud(inst: SpatialInstance): DisintegrationData {
     inst.modelGroup.updateMatrixWorld(true);
     const invRoot = inst.modelGroup.matrixWorld.clone().invert();
-    const sampled: number[] = [];
+    const maxParticles = 3200;
 
+    // Pass 1: collect primary meshes (excluding redundant holo overlays) and total vertex count
+    const sourceMeshes: THREE.Mesh[] = [];
+    let totalVertices = 0;
     inst.modelGroup.traverse((obj) => {
-      if (obj instanceof THREE.Mesh && obj.geometry) {
+      if (obj instanceof THREE.Mesh && obj.geometry && !obj.userData?.isHoloOverlay) {
         const pos = obj.geometry.getAttribute('position');
-        if (!pos || pos.count === 0) return;
-        const step = Math.max(1, Math.floor(pos.count / 450));
-        const localMat = new THREE.Matrix4().multiplyMatrices(invRoot, obj.matrixWorld);
-        const v = new THREE.Vector3();
-        for (let i = 0; i < pos.count; i += step) {
-          v.fromBufferAttribute(pos, i).applyMatrix4(localMat);
-          sampled.push(v.x, v.y, v.z);
+        if (pos && pos.count > 0) {
+          sourceMeshes.push(obj);
+          totalVertices += pos.count;
         }
       }
     });
 
-    // Fallback ring/sphere sample if a model has minimal mesh vertices
+    // Proportional global stride across all meshes so high-poly models fill the 3200-particle budget evenly
+    const globalStep = Math.max(1, Math.floor(totalVertices / maxParticles));
+    const sampled: number[] = [];
+    const localMat = new THREE.Matrix4();
+    const v = new THREE.Vector3();
+
+    for (const mesh of sourceMeshes) {
+      if (sampled.length / 3 >= maxParticles) break;
+      const pos = mesh.geometry.getAttribute('position');
+      localMat.multiplyMatrices(invRoot, mesh.matrixWorld);
+      for (let i = 0; i < pos.count; i += globalStep) {
+        v.fromBufferAttribute(pos, i).applyMatrix4(localMat);
+        if (Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.z)) {
+          sampled.push(v.x, v.y, v.z);
+          if (sampled.length / 3 >= maxParticles) break;
+        }
+      }
+    }
+
+    // Fallback shell sample if a model has minimal mesh vertices
     if (sampled.length < 300) {
       for (let i = sampled.length / 3; i < 600; i++) {
         const phi = Math.acos(2 * Math.random() - 1);
@@ -214,7 +269,6 @@ export class SpatialObjectManager {
       }
     }
 
-    const maxParticles = 3200;
     const rawCount = Math.min(maxParticles, Math.floor(sampled.length / 3));
     const basePositions = new Float32Array(rawCount * 3);
     const currentPositions = new Float32Array(rawCount * 3);
@@ -254,6 +308,145 @@ export class SpatialObjectManager {
     inst.group.add(points);
 
     return { points, basePositions, burstVelocities, count: rawCount };
+  }
+
+  private resolveComponentAnchors(inst: SpatialInstance): ComponentAnchor[] {
+    if (inst.visionSphereObj) {
+      return inst.visionSphereObj.getComponentAnchors();
+    }
+    if (inst.realWorldObj) {
+      return inst.realWorldObj.getComponentAnchors();
+    }
+    if (inst.reconstructedObj) {
+      return inst.reconstructedObj.getComponentAnchors();
+    }
+
+    const anchors: ComponentAnchor[] = [];
+    let idx = 0;
+    inst.modelGroup.children.forEach((child) => {
+      if (child instanceof THREE.Mesh || child instanceof THREE.Group) {
+        idx++;
+        anchors.push({
+          id: (child.userData.componentId as string) || `sub-${idx}`,
+          name: (child.userData.componentLabel as string) || child.name || `Sub-Assembly ${idx}`,
+          object: child
+        });
+      }
+    });
+    return anchors;
+  }
+
+  private applyComponentVisualState(inst: SpatialInstance) {
+    if (inst.reconstructedObj) {
+      inst.reconstructedObj.setSelectedComponent(inst.selectedComponentId);
+      inst.reconstructedObj.setHighlightedComponent(inst.highlightedComponentId);
+      inst.reconstructedObj.setIsolatedComponent(inst.isolatedComponentId);
+      return;
+    }
+
+    const anchors = this.resolveComponentAnchors(inst);
+    const hasIsolated = inst.isolatedComponentId !== null;
+
+    for (const anchor of anchors) {
+      const isIsolatedTarget = anchor.id === inst.isolatedComponentId;
+      anchor.object.visible = !hasIsolated || isIsolatedTarget;
+
+      const isHighlighted = anchor.id === inst.highlightedComponentId;
+      const isSelected = anchor.id === inst.selectedComponentId;
+
+      anchor.object.traverse((node) => {
+        if (!(node instanceof THREE.Mesh) || !node.material) return;
+        const mats = Array.isArray(node.material) ? node.material : [node.material];
+        for (const m of mats) {
+          const mat = m as THREE.MeshStandardMaterial;
+          if (!node.userData.__origVisual) {
+            node.userData.__origVisual = {
+              colorHex: 'color' in mat && mat.color ? mat.color.getHex() : undefined,
+              emissiveHex: 'emissive' in mat && mat.emissive ? mat.emissive.getHex() : undefined,
+              emissiveIntensity:
+                'emissiveIntensity' in mat ? mat.emissiveIntensity : undefined,
+              opacity: mat.opacity
+            } satisfies SavedMeshVisual;
+          }
+          const saved = node.userData.__origVisual as SavedMeshVisual;
+
+          if (isHighlighted || isSelected) {
+            const targetHex = isHighlighted ? 0xffffff : 0xffbb33;
+            if ('emissive' in mat && mat.emissive) {
+              mat.emissive.setHex(targetHex);
+              mat.emissiveIntensity = isHighlighted ? 1.4 : 1.0;
+            }
+            if ('color' in mat && mat.color) {
+              mat.color.setHex(targetHex);
+            }
+          } else {
+            if (saved.colorHex !== undefined && 'color' in mat && mat.color) {
+              mat.color.setHex(saved.colorHex);
+            }
+            if (saved.emissiveHex !== undefined && 'emissive' in mat && mat.emissive) {
+              mat.emissive.setHex(saved.emissiveHex);
+            }
+            if (saved.emissiveIntensity !== undefined && 'emissiveIntensity' in mat) {
+              mat.emissiveIntensity = saved.emissiveIntensity;
+            }
+            mat.opacity = saved.opacity;
+          }
+        }
+      });
+    }
+  }
+
+  public getComponents(instanceId?: string | null): SpatialComponentInfo[] {
+    const inst = instanceId ? this.instances.get(instanceId) : this.getSelected();
+    if (!inst) return [];
+    const anchors = this.resolveComponentAnchors(inst);
+    return anchors.map((a) => ({
+      id: a.id,
+      name: a.name,
+      isSelected: inst.selectedComponentId === a.id,
+      isIsolated: inst.isolatedComponentId === a.id
+    }));
+  }
+
+  public selectComponent(instanceId: string | null, componentId: string | null): boolean {
+    const inst = instanceId ? this.instances.get(instanceId) : this.getSelected();
+    if (!inst) return false;
+    if (componentId !== null) {
+      const exists = this.resolveComponentAnchors(inst).some((a) => a.id === componentId);
+      if (!exists) return false;
+    }
+    inst.selectedComponentId = componentId;
+    this.applyComponentVisualState(inst);
+    return true;
+  }
+
+  public isolateComponent(instanceId: string | null, componentId: string | null): boolean {
+    const inst = instanceId ? this.instances.get(instanceId) : this.getSelected();
+    if (!inst) return false;
+    if (componentId !== null) {
+      const exists = this.resolveComponentAnchors(inst).some((a) => a.id === componentId);
+      if (!exists) return false;
+      inst.selectedComponentId = componentId;
+    }
+    inst.isolatedComponentId = componentId;
+    this.applyComponentVisualState(inst);
+    return true;
+  }
+
+  public highlightComponent(instanceId: string | null, componentId: string | null): boolean {
+    const inst = instanceId ? this.instances.get(instanceId) : this.getSelected();
+    if (!inst) return false;
+    if (componentId !== null) {
+      const exists = this.resolveComponentAnchors(inst).some((a) => a.id === componentId);
+      if (!exists) return false;
+    }
+    inst.highlightedComponentId = componentId;
+    this.applyComponentVisualState(inst);
+    return true;
+  }
+
+  public clearComponentIsolation(instanceId?: string | null): boolean {
+    return this.isolateComponent(instanceId ?? null, null);
   }
 
   private registerInstance(
@@ -328,6 +521,10 @@ export class SpatialObjectManager {
         ? realWorldObj.getComponentAnchors().length
         : stats.componentCount,
       renderMode: this.activeRenderMode,
+      selectedComponentId: null,
+      isolatedComponentId: null,
+      highlightedComponentId: null,
+      explosionAmount: 0,
       reconstructedObj,
       realWorldObj,
       visionSphereObj,
@@ -522,8 +719,73 @@ export class SpatialObjectManager {
       faceCount: inst.faceCount,
       componentCount: inst.componentCount,
       reconstructionProgress: inst.isScanning ? inst.scanProgress : 1,
-      renderMode: inst.renderMode
+      renderMode: inst.renderMode,
+      components: this.getComponents(inst.id),
+      selectedComponentId: inst.selectedComponentId,
+      isolatedComponentId: inst.isolatedComponentId
     }));
+  }
+
+  public captureWorkspaceSnapshot(): WorkspaceSnapshot {
+    return {
+      selectedInstanceId: this.selectedInstanceId,
+      instances: Array.from(this.instances.values()).map((inst) => ({
+        id: inst.id,
+        position: {
+          x: inst.targetPosition.x,
+          y: inst.targetPosition.y,
+          z: inst.targetPosition.z
+        },
+        rotation: {
+          x: inst.targetRotation.x,
+          y: inst.targetRotation.y,
+          z: inst.targetRotation.z
+        },
+        scale: inst.targetScale,
+        isLocked: inst.isLocked,
+        isFrozen: inst.isFrozen,
+        targetDisintegration: inst.targetDisintegration,
+        dispersionPhase: inst.dispersionPhase,
+        explosionAmount: inst.explosionAmount,
+        renderMode: inst.renderMode,
+        selectedComponentId: inst.selectedComponentId,
+        isolatedComponentId: inst.isolatedComponentId,
+        highlightedComponentId: inst.highlightedComponentId,
+        groupId: inst.groupId
+      }))
+    };
+  }
+
+  public restoreWorkspaceSnapshot(snapshot: WorkspaceSnapshot): boolean {
+    if (!snapshot) return false;
+    for (const item of snapshot.instances) {
+      const inst = this.instances.get(item.id);
+      if (!inst) continue;
+
+      inst.targetPosition.set(item.position.x, item.position.y, item.position.z);
+      inst.targetRotation.set(item.rotation.x, item.rotation.y, item.rotation.z);
+      inst.targetScale = item.scale;
+      inst.isLocked = item.isLocked;
+      inst.isFrozen = item.isFrozen;
+      inst.groupId = item.groupId;
+
+      this.setExplosionAmountForInstance(inst, item.explosionAmount);
+      this.applyRenderModeToModel(inst, item.renderMode);
+      this.applyDispersionToInstance(inst, item.targetDisintegration, item.dispersionPhase);
+      if (item.targetDisintegration <= 0.02) {
+        inst.modelGroup.visible = true;
+      }
+
+      inst.selectedComponentId = item.selectedComponentId;
+      inst.isolatedComponentId = item.isolatedComponentId;
+      inst.highlightedComponentId = item.highlightedComponentId;
+      this.applyComponentVisualState(inst);
+    }
+
+    if (snapshot.selectedInstanceId && this.instances.has(snapshot.selectedInstanceId)) {
+      this.select(snapshot.selectedInstanceId);
+    }
+    return true;
   }
 
   public setLocked(id: string, locked: boolean): boolean {
@@ -587,24 +849,44 @@ export class SpatialObjectManager {
     return true;
   }
 
+  private applyDispersionToInstance(inst: SpatialInstance, clamped: number, explicitPhase?: DispersionPhase) {
+    if (inst.visionSphereObj) {
+      inst.visionSphereObj.setDispersion(clamped);
+      inst.targetDisintegration = clamped;
+      inst.isDisintegrated = clamped >= 0.85;
+      const pState = inst.visionSphereObj.getDispersionState();
+      inst.dispersionPhase =
+        explicitPhase ||
+        (pState === 'DISPERSED'
+          ? 'DISPERSED'
+          : pState === 'RECONSTRUCTING'
+          ? 'RECONSTRUCTING'
+          : pState === 'EXPANDING'
+          ? 'EXPANDING'
+          : 'COMPLETE');
+    } else {
+      if (clamped > 0.02 && !inst.disintegration) {
+        inst.disintegration = this.buildDisintegrationCloud(inst);
+      }
+      inst.targetDisintegration = clamped;
+      inst.isDisintegrated = clamped >= 0.85;
+      inst.dispersionPhase =
+        explicitPhase ||
+        (clamped <= 0.04
+          ? 'COMPLETE'
+          : clamped >= 0.85
+          ? 'DISPERSED'
+          : clamped < inst.currentDisintegration
+          ? 'RECONSTRUCTING'
+          : 'EXPANDING');
+    }
+  }
+
   public disintegrate(id?: string): boolean {
     const target = id ? this.instances.get(id) : this.getSelected();
     if (!target) return false;
 
-    if (target.visionSphereObj) {
-      target.visionSphereObj.setDispersion(1.0);
-      target.isDisintegrated = true;
-      target.targetDisintegration = 1.0;
-      target.dispersionPhase = 'DISPERSED';
-      return true;
-    }
-
-    if (!target.disintegration) {
-      target.disintegration = this.buildDisintegrationCloud(target);
-    }
-    target.isDisintegrated = true;
-    target.targetDisintegration = 1.0;
-    target.dispersionPhase = 'DISPERSED';
+    this.applyDispersionToInstance(target, 1.0, 'DISPERSED');
     return true;
   }
 
@@ -612,52 +894,27 @@ export class SpatialObjectManager {
     const target = id ? this.instances.get(id) : this.getSelected();
     if (!target) return false;
 
-    if (target.visionSphereObj) {
-      target.visionSphereObj.setDispersion(0.0);
-    }
-    target.isDisintegrated = false;
-    target.targetDisintegration = 0.0;
-    target.dispersionPhase = 'COMPLETE';
+    this.applyDispersionToInstance(target, 0.0, 'COMPLETE');
     target.modelGroup.visible = true;
     target.isFrozen = false;
-    this.setExplosionAmount(0);
+    // Reset explosion ONLY on the targeted instance so other scene objects preserve their states
+    this.setExplosionAmountForInstance(target, 0);
     this.triggerReconstructionScan(target.id);
+    return true;
+  }
+
+  public setInstanceDispersion(id: string | null, amount: number, explicitPhase?: DispersionPhase): boolean {
+    const target = id ? this.instances.get(id) : this.getSelected();
+    if (!target) return false;
+    const clamped = Math.max(0, Math.min(1, amount));
+    this.applyDispersionToInstance(target, clamped, explicitPhase);
     return true;
   }
 
   public setGlobalDispersion(amount: number, explicitPhase?: DispersionPhase) {
     const clamped = Math.max(0, Math.min(1, amount));
     this.instances.forEach((inst) => {
-      if (inst.visionSphereObj) {
-        inst.visionSphereObj.setDispersion(clamped);
-        inst.targetDisintegration = clamped;
-        inst.isDisintegrated = clamped >= 0.85;
-        const pState = inst.visionSphereObj.getDispersionState();
-        inst.dispersionPhase =
-          explicitPhase ||
-          (pState === 'DISPERSED'
-            ? 'DISPERSED'
-            : pState === 'RECONSTRUCTING'
-            ? 'RECONSTRUCTING'
-            : pState === 'EXPANDING'
-            ? 'EXPANDING'
-            : 'COMPLETE');
-      } else {
-        if (clamped > 0.02 && !inst.disintegration) {
-          inst.disintegration = this.buildDisintegrationCloud(inst);
-        }
-        inst.targetDisintegration = clamped;
-        inst.isDisintegrated = clamped >= 0.85;
-        inst.dispersionPhase =
-          explicitPhase ||
-          (clamped <= 0.04
-            ? 'COMPLETE'
-            : clamped >= 0.85
-            ? 'DISPERSED'
-            : clamped < inst.currentDisintegration
-            ? 'RECONSTRUCTING'
-            : 'EXPANDING');
-      }
+      this.applyDispersionToInstance(inst, clamped, explicitPhase);
     });
   }
 
@@ -680,26 +937,11 @@ export class SpatialObjectManager {
       return [];
     }
 
-    let anchors: ComponentAnchor[] = [];
-    if (selected.visionSphereObj) {
-      anchors = selected.visionSphereObj.getComponentAnchors();
-    } else if (selected.realWorldObj) {
-      anchors = selected.realWorldObj.getComponentAnchors();
-    } else if (selected.reconstructedObj) {
-      anchors = selected.reconstructedObj.getComponentAnchors();
-    } else {
-      let idx = 0;
-      selected.modelGroup.children.forEach((child) => {
-        if (idx < 6 && (child instanceof THREE.Mesh || child instanceof THREE.Group)) {
-          idx++;
-          anchors.push({
-            id: `sub-${idx}`,
-            name: (child.userData.componentLabel as string) || child.name || `Sub-Assembly ${idx}`,
-            object: child
-          });
-        }
-      });
-    }
+    const allAnchors = this.resolveComponentAnchors(selected);
+    const anchors =
+      selected.isolatedComponentId !== null
+        ? allAnchors.filter((a) => a.id === selected.isolatedComponentId)
+        : allAnchors.slice(0, 8);
 
     selected.group.updateMatrixWorld(true);
     const labels: ComponentLabel2D[] = [];
@@ -793,20 +1035,33 @@ export class SpatialObjectManager {
     });
   }
 
-  public setExplosionAmount(amount: number) {
+  private setExplosionAmountForInstance(inst: SpatialInstance, amount: number) {
     const clamped = Math.max(0, Math.min(1, amount));
     const exploded = clamped > 0.05;
-    this.instances.forEach((inst) => {
-      if (inst.visionSphereObj) {
-        inst.visionSphereObj.setExplosionAmount(clamped);
-      } else if (inst.reconstructedObj) {
-        inst.reconstructedObj.setExplosionAmount(clamped);
-      } else if (inst.realWorldObj) {
-        inst.realWorldObj.setExplosionAmount(clamped);
-      } else {
-        inst.setExplodedView(exploded);
-      }
-    });
+    inst.explosionAmount = clamped;
+    if (inst.visionSphereObj) {
+      inst.visionSphereObj.setExplosionAmount(clamped);
+    } else if (inst.reconstructedObj) {
+      inst.reconstructedObj.setExplosionAmount(clamped);
+    } else if (inst.realWorldObj) {
+      inst.realWorldObj.setExplosionAmount(clamped);
+    } else {
+      inst.setExplodedView(exploded);
+    }
+  }
+
+  public setExplosionAmount(amount: number, targetId?: string) {
+    if (targetId) {
+      const target = this.instances.get(targetId);
+      if (target) this.setExplosionAmountForInstance(target, amount);
+      return;
+    }
+    const selected = this.getSelected();
+    if (selected) {
+      this.setExplosionAmountForInstance(selected, amount);
+    } else {
+      this.instances.forEach((inst) => this.setExplosionAmountForInstance(inst, amount));
+    }
   }
 
   private applyClippingPlanesToInstance(inst: SpatialInstance, planes: THREE.Plane[]) {
@@ -835,22 +1090,28 @@ export class SpatialObjectManager {
     const newPos = source.targetPosition.clone().add(new THREE.Vector3(1.2, 0.4, 0));
 
     let newInst: SpatialInstance;
-    if (source.isReconstructed) {
-      let clonedGeo: THREE.BufferGeometry | null = null;
-      source.modelGroup.traverse((child) => {
-        if (!clonedGeo && child instanceof THREE.Mesh && child.geometry) {
-          clonedGeo = child.geometry.clone();
-        }
-      });
-      newInst = clonedGeo
-        ? this.createReconstructedInstance(`${source.name} Clone`, clonedGeo, newPos, source.reconstructionMethodLabel)
-        : this.createInstance(source.modelId, newPos);
+    if (source.isReconstructed && source.reconstructedObj) {
+      const clonedSource = source.reconstructedObj.cloneSourceGroup();
+      newInst = this.createReconstructedInstance(
+        `${source.name} Clone`,
+        clonedSource,
+        newPos,
+        source.reconstructionMethodLabel
+      );
     } else {
       newInst = this.createInstance(source.modelId, newPos);
     }
 
     newInst.targetScale = source.targetScale;
     newInst.targetRotation.copy(source.targetRotation);
+    this.applyRenderModeToModel(newInst, source.renderMode);
+    this.setExplosionAmountForInstance(newInst, source.explosionAmount);
+    if (source.selectedComponentId) {
+      this.selectComponent(newInst.id, source.selectedComponentId);
+    }
+    if (source.isolatedComponentId) {
+      this.isolateComponent(newInst.id, source.isolatedComponentId);
+    }
     return newInst;
   }
 
@@ -858,20 +1119,12 @@ export class SpatialObjectManager {
     const inst = this.instances.get(id);
     if (!inst) return false;
 
-    inst.group.traverse((obj) => {
-      if (obj instanceof THREE.Mesh || obj instanceof THREE.LineSegments || obj instanceof THREE.Points) {
-        if (obj.geometry) obj.geometry.dispose();
-        if (obj.material) {
-          if (Array.isArray(obj.material)) {
-            obj.material.forEach((m) => m.dispose());
-          } else {
-            obj.material.dispose();
-          }
-        }
-      }
-    });
+    inst.visionSphereObj?.dispose();
+    inst.reconstructedObj?.dispose();
+    disposeObject3DResources(inst.group);
 
     this.sceneRoot.remove(inst.group);
+    inst.group.clear();
     this.instances.delete(id);
 
     if (this.selectedInstanceId === id) {
@@ -950,21 +1203,38 @@ export class SpatialObjectManager {
   public setColorTheme(hex: number) {
     this.colorHex = hex;
     this.instances.forEach((inst) => {
+      inst.modelGroup.traverse((node) => {
+        if (node.userData?.__origVisual) {
+          delete node.userData.__origVisual;
+        }
+      });
       inst.setColorTheme(hex);
       (inst.scanRing.material as THREE.MeshBasicMaterial).color.setHex(hex);
       if (inst.disintegration) {
         (inst.disintegration.points.material as THREE.PointsMaterial).color.setHex(hex);
       }
+      this.applyComponentVisualState(inst);
     });
   }
 
   public setExplodedView(exploded: boolean) {
-    this.instances.forEach((inst) => inst.setExplodedView(exploded));
+    const amount = exploded ? 1.0 : 0.0;
+    const selected = this.getSelected();
+    if (selected) {
+      selected.explosionAmount = amount;
+      selected.setExplodedView(exploded);
+    } else {
+      this.instances.forEach((inst) => {
+        inst.explosionAmount = amount;
+        inst.setExplodedView(exploded);
+      });
+    }
   }
 
   public update(time: number, speedMultiplier: number = 1.0, delta: number = 0.016) {
     const clampedDt = Math.max(0.001, Math.min(0.1, delta));
     const lerpFactor = 1 - Math.exp(-8.5 * clampedDt);
+    const disintLerp = 1 - Math.exp(-5.5 * clampedDt);
 
     this.instances.forEach((inst) => {
       inst.currentPosition.lerp(inst.targetPosition, lerpFactor);
@@ -979,12 +1249,16 @@ export class SpatialObjectManager {
       inst.group.rotation.copy(inst.currentRotation);
 
       if (inst.selectionBox.visible) {
-        inst.selectionBox.rotation.y += inst.isFrozen ? 0.002 : 0.015;
+        inst.selectionBox.rotation.y += (inst.isFrozen ? 0.12 : 0.9) * clampedDt;
       }
 
-      // Particle Disintegration & Reversible Convergence Animation
+      // Delta-time normalized Particle Disintegration & Reversible Convergence Animation
       if (inst.disintegration) {
-        inst.currentDisintegration += (inst.targetDisintegration - inst.currentDisintegration) * 0.08;
+        inst.currentDisintegration +=
+          (inst.targetDisintegration - inst.currentDisintegration) * disintLerp;
+        if (inst.targetDisintegration === 0 && inst.currentDisintegration < 0.008) {
+          inst.currentDisintegration = 0;
+        }
         const d = inst.currentDisintegration;
 
         if (d > 0.015) {
@@ -1017,9 +1291,9 @@ export class SpatialObjectManager {
         }
       }
 
-      // Holographic Laser Reconstruction Sweep Ring
+      // Holographic Laser Reconstruction Sweep Ring (delta-time normalized)
       if (inst.isScanning) {
-        inst.scanProgress += 0.024;
+        inst.scanProgress += clampedDt * 1.45;
         inst.scanRing.visible = true;
         inst.scanRing.position.y = -1.7 + inst.scanProgress * 3.4;
         const mat = inst.scanRing.material as THREE.MeshBasicMaterial;
@@ -1031,7 +1305,7 @@ export class SpatialObjectManager {
       }
 
       if (inst.visionSphereObj) {
-        inst.visionSphereObj.update(time, inst.isFrozen ? 0.12 : speedMultiplier, delta);
+        inst.visionSphereObj.update(time, inst.isFrozen ? 0.12 : speedMultiplier, clampedDt);
         inst.currentDisintegration = inst.visionSphereObj.getDispersion();
         const st = inst.visionSphereObj.getDispersionState();
         if (st === 'DISPERSED') inst.dispersionPhase = 'DISPERSED';
@@ -1039,7 +1313,7 @@ export class SpatialObjectManager {
         else if (st === 'EXPANDING') inst.dispersionPhase = 'EXPANDING';
         else inst.dispersionPhase = 'COMPLETE';
       } else {
-        inst.update(time, inst.isFrozen ? 0.15 : speedMultiplier);
+        inst.update(time, inst.isFrozen ? 0.15 : speedMultiplier, clampedDt);
       }
     });
   }
