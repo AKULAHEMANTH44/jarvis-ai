@@ -21,7 +21,7 @@ apiRouter.post('/llm/chat', async (req: Request, res: Response) => {
       abortController.abort();
     }
   };
-  req.on('close', onClose);
+  req.on('aborted', onClose);
   res.on('close', onClose);
 
   try {
@@ -44,7 +44,7 @@ apiRouter.post('/llm/chat', async (req: Request, res: Response) => {
       durationMs: 0
     });
   } finally {
-    req.off('close', onClose);
+    req.off('aborted', onClose);
     res.off('close', onClose);
   }
 });
@@ -58,7 +58,7 @@ apiRouter.post('/llm/chat/stream', async (req: Request, res: Response) => {
       abortController.abort();
     }
   };
-  req.on('close', onClose);
+  req.on('aborted', onClose);
   res.on('close', onClose);
 
   res.status(200);
@@ -91,7 +91,7 @@ apiRouter.post('/llm/chat/stream', async (req: Request, res: Response) => {
       });
     }
   } finally {
-    req.off('close', onClose);
+    req.off('aborted', onClose);
     res.off('close', onClose);
     if (!res.writableEnded) {
       res.end();
