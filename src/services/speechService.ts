@@ -1,5 +1,6 @@
 import { AssistantMessage, VoiceCommand } from '../types/assistant';
 import { audioService } from './soundFx';
+import { permissionPolicy } from './permissionPolicy';
 
 interface SpeechRecognitionEvent {
   resultIndex: number;
@@ -60,6 +61,7 @@ class SpeechService {
   private onCancelCallback: (() => void) | null = null;
   private selectedVoice: SpeechSynthesisVoice | null = null;
   private isSpeaking: boolean = false;
+  private lastSpeakEndedAt: number = 0;
   private restartTimeout: number | null = null;
   private lastError: string | null = null;
   private lastVoiceTranscript: string = '';
@@ -120,13 +122,22 @@ class SpeechService {
 
   public findMatchingCommand(rawTranscript: string): VoiceCommand | null {
     if (!rawTranscript) return null;
-    const clean = rawTranscript.toLowerCase().replace(/[.,!?;:]/g, '');
+    const clean = rawTranscript.toLowerCase().replace(/[.,!?;:]/g, '').trim();
+    const wakeOnlyPatterns = new Set(['jarvis', 'hey jarvis', 'hello jarvis']);
+    const afterWake = clean.replace(/^(?:hello\s+|hey\s+)?jarvis\b\s*/i, '').trim();
+    const hasTrailingRequestAfterWake =
+      /^(?:hello\s+|hey\s+)?jarvis\b/i.test(clean) && afterWake.length > 0;
+
     let bestCmd: VoiceCommand | null = null;
     let bestPatternLen = 0;
 
     for (const cmd of this.commands) {
       for (const pattern of cmd.patterns) {
         const lowerPat = pattern.toLowerCase();
+        // If user spoke "JARVIS, <actual request>", do not consume the request with a bare wake greeting
+        if (hasTrailingRequestAfterWake && wakeOnlyPatterns.has(lowerPat)) {
+          continue;
+        }
         if (clean.includes(lowerPat) && lowerPat.length > bestPatternLen) {
           bestCmd = cmd;
           bestPatternLen = lowerPat.length;
@@ -138,6 +149,15 @@ class SpeechService {
 
   public getLastError(): string | null {
     return this.lastError;
+  }
+
+  public getSpeechStateSnapshot() {
+    return {
+      isListening: this.isListening,
+      isSpeaking: this.isSpeaking,
+      lastError: this.lastError,
+      lastTranscript: this.lastVoiceTranscript
+    };
   }
 
   public isSpeechRecognitionSupported(): boolean {
@@ -167,10 +187,12 @@ class SpeechService {
       };
       utterance.onend = () => {
         this.isSpeaking = false;
+        this.lastSpeakEndedAt = Date.now();
         if (onEnd) onEnd();
       };
       utterance.onerror = () => {
         this.isSpeaking = false;
+        this.lastSpeakEndedAt = Date.now();
         if (onEnd) onEnd();
       };
 
@@ -178,6 +200,7 @@ class SpeechService {
     } catch (e) {
       console.warn('Speech synthesis error:', e);
       this.isSpeaking = false;
+      this.lastSpeakEndedAt = Date.now();
       if (onEnd) onEnd();
     }
   }
@@ -185,8 +208,11 @@ class SpeechService {
   public stopSpeaking() {
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       window.speechSynthesis.cancel();
-      this.isSpeaking = false;
     }
+    if (this.isSpeaking) {
+      this.lastSpeakEndedAt = Date.now();
+    }
+    this.isSpeaking = false;
   }
 
   public isCurrentlySpeaking(): boolean {
@@ -217,6 +243,20 @@ class SpeechService {
   // Requests real microphone permission via getUserMedia, connects live waveform analyser, and starts SpeechRecognition
   public async startListeningWithPermission(): Promise<VoiceStartResult> {
     this.lastError = null;
+
+    if (permissionPolicy.getCapabilityDecision('MICROPHONE_ACCESS') === 'DENIED') {
+      const msg =
+        'Microphone Access is disabled in JARVIS Permissions. Enable it in the Permissions tab or Setup Wizard to activate voice recognition.';
+      this.lastError = msg;
+      this.isListening = false;
+      this.onStatusChangeCallback?.(false, msg);
+      return {
+        started: false,
+        micGranted: false,
+        recognitionSupported: this.isSpeechRecognitionSupported(),
+        error: msg
+      };
+    }
 
     if (typeof window === 'undefined') {
       return { started: false, micGranted: false, recognitionSupported: false, error: 'Browser window unavailable.' };
@@ -310,7 +350,7 @@ class SpeechService {
       this.recognition.lang = 'en-US';
 
       this.recognition.onresult = (event: SpeechRecognitionEvent) => {
-        if (this.isSpeaking) return;
+        if (this.isSpeaking || Date.now() - this.lastSpeakEndedAt < 350) return;
 
         const lastResult = event.results[event.results.length - 1];
         if (lastResult.isFinal) {

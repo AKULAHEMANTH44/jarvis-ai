@@ -8,7 +8,11 @@ import {
   MemoryCategory,
   MemoryConsentCandidate,
   MemoryEntry,
+  PendingAttachment,
   PermissionAuditEntry,
+  PermissionCapabilityId,
+  PermissionDisplayState,
+  PersistentPermissionConfig,
   ToolActivityRecord,
   ToolDefinition,
   WorkspaceContextSnapshot
@@ -21,8 +25,13 @@ import { planningEngine } from '../../services/planningEngine';
 import { toolRegistry } from '../../services/toolRegistry';
 import { contextualAI } from '../../services/contextualAI';
 import { permissionManager } from '../../services/permissionManager';
+import {
+  ALL_CAPABILITY_IDS,
+  PERMISSION_CAPABILITY_METADATA,
+  permissionPolicy
+} from '../../services/permissionPolicy';
 import { fileAccessService } from '../../services/fileAccessService';
-import { desktopBridge } from '../../services/desktopBridge';
+import { ApprovedAppInfo, desktopBridge } from '../../services/desktopBridge';
 import { musicService } from '../../services/musicService';
 import { audioService } from '../../services/soundFx';
 import {
@@ -32,7 +41,9 @@ import {
   Lightbulb,
   ListChecks,
   Plus,
+  RefreshCw,
   Send,
+  Shield,
   ShieldAlert,
   ShieldCheck,
   Sparkles,
@@ -50,7 +61,10 @@ import {
   FolderOpen,
   ExternalLink,
   Search,
-  Music
+  Music,
+  Paperclip,
+  FileText,
+  Image as ImageIcon
 } from 'lucide-react';
 
 export type IntelligenceTabId = 'CHAT' | 'PERMISSIONS' | 'PLAN' | 'SUGGESTIONS' | 'MEMORY' | 'TOOLS';
@@ -59,10 +73,11 @@ interface IntelligenceHUDProps {
   intelligenceState: IntelligenceStateSnapshot;
   workspaceSnapshot: WorkspaceContextSnapshot;
   requestedTab?: { tab: IntelligenceTabId; nonce: number } | null;
-  onSubmitPrompt: (prompt: string) => void;
+  onSubmitPrompt: (prompt: string, attachments?: PendingAttachment[]) => void;
   onCancelRequest: () => void;
   onOpenAIConfig: () => void;
   onOpenTasksDrawer: () => void;
+  onOpenSetupWizard?: () => void;
   onClose: () => void;
 }
 
@@ -96,6 +111,24 @@ function getStatusBadgeStyle(status: IntelligenceStatus): string {
   }
 }
 
+function formatPermissionDisplayState(state: PermissionDisplayState): {
+  label: string;
+  className: string;
+} {
+  switch (state) {
+    case 'GRANTED_BY_USER':
+      return { label: 'Granted by user', className: 'text-emerald-300' };
+    case 'DENIED_BY_USER':
+      return { label: 'Denied by user', className: 'text-red-300' };
+    case 'BLOCKED_BY_OS_OR_BROWSER':
+      return { label: 'Blocked by OS / Browser', className: 'text-amber-300' };
+    case 'TEMPORARILY_UNAVAILABLE':
+      return { label: 'Temporarily unavailable', className: 'text-amber-200' };
+    default:
+      return { label: 'Not yet requested', className: 'text-cyan-300/80' };
+  }
+}
+
 export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
   intelligenceState,
   workspaceSnapshot,
@@ -104,6 +137,7 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
   onCancelRequest,
   onOpenAIConfig,
   onOpenTasksDrawer,
+  onOpenSetupWizard,
   onClose
 }) => {
   const [activeTab, setActiveTab] = useState<IntelligenceTabId>('CHAT');
@@ -137,12 +171,20 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
   const [permissionHistory, setPermissionHistory] = useState<PermissionAuditEntry[]>(() =>
     permissionManager.getAuditHistory(40)
   );
+  const [policyConfig, setPolicyConfig] = useState<PersistentPermissionConfig>(() =>
+    permissionPolicy.getConfig()
+  );
+  const [approvedApps, setApprovedApps] = useState<ApprovedAppInfo[]>([]);
   const [registeredTools] = useState<ToolDefinition[]>(() => toolRegistry.listTools());
   const [filePickBusy, setFilePickBusy] = useState(false);
   const [folderPathInput, setFolderPathInput] = useState('');
   const [folderPickNotice, setFolderPickNotice] = useState<string | null>(null);
+  const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [memSearchQuery, setMemSearchQuery] = useState('');
 
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  const attachmentInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (requestedTab) {
@@ -161,6 +203,9 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
   }, [intelligenceState]);
 
   useEffect(() => {
+    void desktopBridge.getApprovedApplications().then((apps) => {
+      setApprovedApps(apps);
+    });
     const unsubMem = memoryManager.subscribe(() => {
       setMemories(memoryManager.getMemories());
       setMemoryEnabled(memoryManager.isEnabled());
@@ -178,14 +223,24 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
     const unsubPerm = permissionManager.subscribe(() => {
       setPermissionHistory(permissionManager.getAuditHistory(40));
     });
+    const unsubPolicy = permissionPolicy.subscribe(() => {
+      setPolicyConfig(permissionPolicy.getConfig());
+    });
     return () => {
       unsubMem();
       unsubSug();
       unsubPlan();
       unsubTool();
       unsubPerm();
+      unsubPolicy();
     };
   }, []);
+
+  useEffect(() => {
+    if (activeTab === 'PERMISSIONS') {
+      void permissionPolicy.refreshHardwarePermissionStates();
+    }
+  }, [activeTab]);
 
   useEffect(() => {
     if (chatScrollRef.current && activeTab === 'CHAT') {
@@ -209,13 +264,45 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
   const pendingPerm = intelligenceState.pendingPermission;
   const musicState = intelligenceState.musicState;
 
+  const activeAgentRun = intelligenceState.activeAgentRun;
+  const streamingText = intelligenceState.streamingText;
+  const planHistory = planningEngine.getExecutionHistory();
+  const visibleMemories = memSearchQuery.trim()
+    ? memoryManager.searchMemories(memSearchQuery.trim())
+    : memories;
+
+  const handleAttachmentFilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files ? Array.from(e.target.files) : [];
+    e.target.value = '';
+    if (files.length === 0) return;
+
+    setAttachmentError(null);
+    const nextList = [...pendingAttachments];
+    for (const file of files) {
+      if (nextList.length >= 3) {
+        setAttachmentError('Maximum 3 attachments per prompt allowed.');
+        break;
+      }
+      const res = await fileAccessService.prepareMultimodalAttachment(file);
+      if (!res.ok || !res.attachment) {
+        setAttachmentError(res.error || `Could not attach "${file.name}".`);
+        continue;
+      }
+      nextList.push(res.attachment);
+    }
+    setPendingAttachments(nextList);
+  };
+
   const handleChatSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = promptInput.trim();
-    if (!trimmed) return;
+    if (!trimmed && pendingAttachments.length === 0) return;
     audioService.playChirp(1350);
+    const toSend = pendingAttachments.length > 0 ? [...pendingAttachments] : undefined;
     setPromptInput('');
-    onSubmitPrompt(trimmed);
+    setPendingAttachments([]);
+    setAttachmentError(null);
+    onSubmitPrompt(trimmed, toSend);
   };
 
   const handleTriggerFilePicker = async (accept?: string) => {
@@ -439,7 +526,13 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
                 <span>PERMISSION REQUEST</span>
               </div>
               <span className="tabular-nums text-[9.5px] text-amber-200/85">
-                {pendingPerm.category} · RISK {pendingPerm.riskLevel} · {pendingPerm.status}
+                {pendingPerm.category} · RISK {pendingPerm.riskLevel} ·{' '}
+                {pendingPerm.securityLevel === 'LEVEL_3_ALWAYS_CONFIRM'
+                  ? 'LEVEL 3 ALWAYS CONFIRM'
+                  : pendingPerm.securityLevel === 'LEVEL_2_SESSION_CONFIRMATION'
+                  ? 'LEVEL 2 SESSION'
+                  : 'LEVEL 1 PRE-APPROVED'}{' '}
+                · {pendingPerm.status}
               </span>
             </div>
 
@@ -478,6 +571,26 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
                 <Check className="w-3 h-3" />
                 <span>APPROVE ONCE</span>
               </button>
+              {pendingPerm.securityLevel !== 'LEVEL_3_ALWAYS_CONFIRM' &&
+                (pendingPerm.category === 'APPLICATION_LAUNCH' ||
+                  pendingPerm.category === 'BROWSER_ACCESS' ||
+                  pendingPerm.category === 'WEB_SEARCH' ||
+                  pendingPerm.category === 'MUSIC_CONTROL' ||
+                  pendingPerm.category === 'MUSIC_PLAYBACK' ||
+                  pendingPerm.category === 'FOLDER_ACCESS') && (
+                  <button
+                    type="button"
+                    data-testid="permission-always-allow-btn"
+                    onClick={() => {
+                      audioService.playChirp(1520);
+                      void intelligenceEngine.grantAndApprovePendingPermission(pendingPerm.id);
+                    }}
+                    className="flex items-center gap-1 px-3 py-1.5 rounded border border-cyan-400/75 bg-cyan-950/65 hover:bg-cyan-900/75 text-cyan-100 text-[10px] font-orbitron whitespace-nowrap"
+                  >
+                    <ShieldCheck className="w-3 h-3" />
+                    <span>APPROVE & ALWAYS ALLOW</span>
+                  </button>
+                )}
               <button
                 type="button"
                 data-testid="permission-deny-btn"
@@ -889,7 +1002,37 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
                   </div>
                 ))
               )}
+
+              {streamingText && (
+                <div
+                  data-testid="streaming-assistant-bubble"
+                  className="p-2 rounded border border-amber-400/50 bg-cyan-950/40 text-cyan-100 mr-2"
+                >
+                  <div className="flex items-center justify-between gap-2 text-[9px] text-amber-300 mb-1">
+                    <span className="font-orbitron font-bold">J.A.R.V.I.S. // STREAMING</span>
+                    <span>LIVE TOKENS</span>
+                  </div>
+                  <p className="leading-snug whitespace-pre-wrap">{streamingText}</p>
+                </div>
+              )}
             </div>
+
+            {activeAgentRun && (
+              <div
+                data-testid="active-agent-progress-bar"
+                className="p-2 rounded border border-amber-400/50 bg-amber-950/30 flex items-center justify-between gap-2 text-[10px]"
+              >
+                <div className="min-w-0">
+                  <span className="font-orbitron font-bold text-amber-200 mr-2">
+                    [{activeAgentRun.role}]
+                  </span>
+                  <span className="text-cyan-100 truncate">{activeAgentRun.currentStep}</span>
+                </div>
+                <span className="text-amber-300 font-orbitron tabular-nums shrink-0">
+                  {activeAgentRun.progressPercent}%
+                </span>
+              </div>
+            )}
 
             {/* Opened File Preview */}
             {intelligenceState.lastOpenedFile?.ok && (
@@ -1002,19 +1145,77 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
               </div>
             )}
 
+            {attachmentError && (
+              <div className="p-1.5 rounded border border-red-500/45 bg-red-950/35 text-red-200 text-[10px]">
+                {attachmentError}
+              </div>
+            )}
+
+            {pendingAttachments.length > 0 && (
+              <div className="flex flex-wrap gap-1.5" data-testid="pending-attachments-bar">
+                {pendingAttachments.map((att) => (
+                  <div
+                    key={att.id}
+                    className="flex items-center gap-1.5 px-2 py-1 rounded border border-cyan-400/50 bg-cyan-950/45 text-[10px] text-white max-w-[220px]"
+                  >
+                    {att.kind === 'IMAGE' && att.previewUrl ? (
+                      <img
+                        src={att.previewUrl}
+                        alt={att.name}
+                        className="w-5 h-5 rounded object-cover shrink-0 border border-cyan-400/40"
+                      />
+                    ) : att.kind === 'IMAGE' ? (
+                      <ImageIcon className="w-3.5 h-3.5 text-cyan-300 shrink-0" />
+                    ) : (
+                      <FileText className="w-3.5 h-3.5 text-cyan-300 shrink-0" />
+                    )}
+                    <span className="truncate">{att.name}</span>
+                    <span className="text-[9px] text-cyan-300/80 shrink-0">{att.sizeFormatted}</span>
+                    <button
+                      type="button"
+                      aria-label={`Remove ${att.name}`}
+                      onClick={() =>
+                        setPendingAttachments((prev) => prev.filter((item) => item.id !== att.id))
+                      }
+                      className="text-cyan-300 hover:text-white shrink-0"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
             {/* Prompt Input */}
-            <form onSubmit={handleChatSubmit} className="flex gap-1.5">
+            <form onSubmit={handleChatSubmit} className="flex gap-1.5 items-center">
+              <input
+                ref={attachmentInputRef}
+                type="file"
+                multiple
+                accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml,.pdf,.txt,.md,.json,.csv,.ts,.tsx,.js,.jsx,.py,.html,.css,.yml,.yaml"
+                onChange={(e) => void handleAttachmentFilesSelected(e)}
+                className="hidden"
+              />
+              <button
+                type="button"
+                aria-label="Attach image, PDF, or code file"
+                title="Attach up to 3 files (image, PDF, code/text)"
+                onClick={() => attachmentInputRef.current?.click()}
+                className="px-2 py-1.5 rounded border border-cyan-500/40 bg-black/60 hover:border-cyan-400 text-cyan-300 hover:text-white shrink-0"
+              >
+                <Paperclip className="w-3.5 h-3.5" />
+              </button>
               <input
                 type="text"
                 value={promptInput}
                 onChange={(e) => setPromptInput(e.target.value)}
-                placeholder="Ask JARVIS to open a file, open a website, search, or play music..."
+                placeholder="Ask JARVIS or attach an image, PDF, or code file..."
                 className="flex-1 bg-black/75 border border-cyan-500/40 rounded px-2.5 py-1.5 text-xs text-white placeholder-cyan-500/50 focus:outline-none focus:border-cyan-400"
               />
               <button
                 type="submit"
                 aria-label="Send to AI Brain"
-                className="px-3 py-1.5 rounded border border-cyan-400 bg-cyan-500/20 hover:bg-cyan-500/35 text-white flex items-center gap-1 text-[10px] font-orbitron"
+                className="px-3 py-1.5 rounded border border-cyan-400 bg-cyan-500/20 hover:bg-cyan-500/35 text-white flex items-center gap-1 text-[10px] font-orbitron shrink-0"
               >
                 <Send className="w-3.5 h-3.5" />
                 <span>ASK</span>
@@ -1023,23 +1224,49 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
           </div>
         )}
 
-        {/* TAB 2: PERMISSION GUARD & ACTIVITY HISTORY */}
+        {/* TAB 2: PERMISSION GUARD & PERSISTENT POLICY */}
         {activeTab === 'PERMISSIONS' && (
-          <div className="space-y-2.5">
+          <div className="space-y-3" data-testid="permissions-management-panel">
             <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded border border-cyan-500/25 bg-black/45">
               <div>
                 <div className="font-orbitron text-[10px] text-white">
                   EXPLICIT PERMISSION GOVERNANCE
                 </div>
                 <p className="text-[9.5px] text-cyan-300/80">
-                  Every file read, browser tab, web search, or music action requires single-use approval. Silence is never treated as approval.
+                  Manage persistent capability grants, individual app toggles, and saved folders. Level 3 destructive actions always require once-per-action confirmation.
                 </p>
               </div>
-              <div className="flex items-center gap-1.5 shrink-0">
+              <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                {onOpenSetupWizard && (
+                  <button
+                    type="button"
+                    data-testid="launch-setup-wizard-btn"
+                    onClick={() => {
+                      audioService.playChirp(1300);
+                      onOpenSetupWizard();
+                    }}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded border border-cyan-400/65 bg-cyan-500/20 hover:bg-cyan-500/35 text-white text-[9.5px] font-orbitron whitespace-nowrap"
+                  >
+                    <Shield className="w-3 h-3" />
+                    <span>Setup Wizard</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  data-testid="reset-all-permissions-btn"
+                  onClick={() => {
+                    audioService.playChirp(850);
+                    void permissionPolicy.resetAllPermissions(false);
+                  }}
+                  className="flex items-center gap-1 px-2.5 py-1 rounded border border-red-400/55 bg-red-950/40 hover:bg-red-900/55 text-red-100 text-[9.5px] font-orbitron whitespace-nowrap"
+                >
+                  <Trash2 className="w-3 h-3" />
+                  <span>Reset All Permissions</span>
+                </button>
                 <button
                   type="button"
                   onClick={() => void handleTriggerFilePicker()}
-                  className="flex items-center gap-1 px-2.5 py-1 rounded border border-cyan-400/60 bg-cyan-500/15 hover:bg-cyan-500/30 text-white text-[9.5px] font-orbitron"
+                  className="flex items-center gap-1 px-2.5 py-1 rounded border border-cyan-400/50 bg-cyan-500/10 hover:bg-cyan-500/25 text-white text-[9.5px] font-orbitron whitespace-nowrap"
                 >
                   <FolderOpen className="w-3 h-3" />
                   <span>SELECT FILE</span>
@@ -1047,11 +1274,167 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
                 <button
                   type="button"
                   onClick={() => void handleTriggerFolderPicker()}
-                  className="flex items-center gap-1 px-2.5 py-1 rounded border border-emerald-400/60 bg-emerald-500/15 hover:bg-emerald-500/30 text-emerald-100 text-[9.5px] font-orbitron"
+                  className="flex items-center gap-1 px-2.5 py-1 rounded border border-emerald-400/55 bg-emerald-500/15 hover:bg-emerald-500/30 text-emerald-100 text-[9.5px] font-orbitron whitespace-nowrap"
                 >
                   <FolderOpen className="w-3 h-3" />
-                  <span>SELECT FOLDER</span>
+                  <span>Add Folder</span>
                 </button>
+              </div>
+            </div>
+
+            {/* Persistent Capability Controls */}
+            <div className="space-y-2">
+              <div className="font-orbitron text-[9.5px] text-cyan-300">
+                PERSISTENT CAPABILITY PERMISSIONS ({ALL_CAPABILITY_IDS.length})
+              </div>
+              <div className="space-y-1.5">
+                {ALL_CAPABILITY_IDS.map((capId: PermissionCapabilityId) => {
+                  const meta = PERMISSION_CAPABILITY_METADATA[capId];
+                  const rec = policyConfig.capabilities[capId];
+                  const displayState = formatPermissionDisplayState(
+                    permissionPolicy.getDisplayState(capId)
+                  );
+                  const isGranted = rec?.decision === 'GRANTED';
+                  const isDenied = rec?.decision === 'DENIED';
+
+                  return (
+                    <div
+                      key={capId}
+                      data-testid={`policy-card-${capId}`}
+                      className="p-2.5 rounded border border-cyan-500/25 bg-black/45 space-y-2"
+                    >
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div className="min-w-0 flex-1 space-y-0.5">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-orbitron font-bold text-white text-[10px]">
+                              {meta.name}
+                            </span>
+                            <span className={`text-[9.5px] font-semibold ${displayState.className}`}>
+                              {displayState.label}
+                            </span>
+                            <span className="text-[9px] text-cyan-400/75 tabular-nums">
+                              {rec?.updatedAt
+                                ? `Updated ${new Date(rec.updatedAt).toLocaleString()}`
+                                : 'Never configured'}
+                            </span>
+                          </div>
+                          <p className="text-[9.5px] text-cyan-200/80 leading-snug">
+                            {meta.description}
+                          </p>
+                        </div>
+
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            data-testid={`cap-${capId}-enable`}
+                            onClick={() => {
+                              audioService.playChirp(1400);
+                              permissionPolicy.setCapabilityDecision(capId, 'GRANTED');
+                            }}
+                            className={`px-2 py-1 rounded border text-[9.5px] font-orbitron whitespace-nowrap ${
+                              isGranted
+                                ? 'border-emerald-400 bg-emerald-950/75 text-emerald-100 font-bold'
+                                : 'border-cyan-500/35 bg-black/40 text-cyan-200 hover:text-white'
+                            }`}
+                          >
+                            Enable
+                          </button>
+                          <button
+                            type="button"
+                            data-testid={`cap-${capId}-revoke`}
+                            onClick={() => {
+                              audioService.playChirp(880);
+                              permissionPolicy.setCapabilityDecision(capId, 'DENIED');
+                            }}
+                            className={`px-2 py-1 rounded border text-[9.5px] font-orbitron whitespace-nowrap ${
+                              isDenied
+                                ? 'border-red-400 bg-red-950/75 text-red-100 font-bold'
+                                : 'border-cyan-500/35 bg-black/40 text-cyan-200 hover:text-white'
+                            }`}
+                          >
+                            Revoke
+                          </button>
+                          {(capId === 'CAMERA_ACCESS' || capId === 'MICROPHONE_ACCESS') && (
+                            <button
+                              type="button"
+                              aria-label={`Refresh ${meta.name} OS status`}
+                              onClick={() => void permissionPolicy.refreshHardwarePermissionStates()}
+                              className="p-1 rounded border border-cyan-500/30 text-cyan-300 hover:text-white"
+                            >
+                              <RefreshCw className="w-3 h-3" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Per-App Toggles under Application Access */}
+                      {capId === 'APPLICATION_ACCESS' && approvedApps.length > 0 && (
+                        <div className="pt-1.5 border-t border-cyan-500/20 flex flex-wrap gap-1.5">
+                          {approvedApps.map((app) => {
+                            const appAllowed = policyConfig.allowedAppIds[app.id] !== false;
+                            return (
+                              <button
+                                key={app.id}
+                                type="button"
+                                data-testid={`policy-app-${app.id}`}
+                                onClick={() => {
+                                  audioService.playChirp(appAllowed ? 900 : 1320);
+                                  permissionPolicy.setAppAllowed(app.id, !appAllowed);
+                                }}
+                                className={`flex items-center gap-1 px-2 py-0.5 rounded border text-[9.5px] whitespace-nowrap ${
+                                  appAllowed
+                                    ? 'border-emerald-400/55 bg-emerald-950/45 text-emerald-100'
+                                    : 'border-red-400/45 bg-red-950/35 text-red-200/80'
+                                }`}
+                              >
+                                {appAllowed ? (
+                                  <Check className="w-2.5 h-2.5 shrink-0" />
+                                ) : (
+                                  <X className="w-2.5 h-2.5 shrink-0" />
+                                )}
+                                <span>{app.displayName}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {/* Saved Approved Folders List under Folder Access */}
+                      {capId === 'FOLDER_ACCESS' && (
+                        <div className="pt-1.5 border-t border-cyan-500/20 space-y-1">
+                          {policyConfig.approvedFolders.length === 0 ? (
+                            <p className="text-[9.5px] text-cyan-400/75">
+                              No persistently approved folders yet. Use Add Folder to select one.
+                            </p>
+                          ) : (
+                            policyConfig.approvedFolders.map((folder) => (
+                              <div
+                                key={folder.path}
+                                data-testid={`approved-folder-row`}
+                                className="flex items-center justify-between gap-2 px-2 py-1 rounded border border-cyan-500/20 bg-black/55 text-[9.5px]"
+                              >
+                                <div className="min-w-0 truncate">
+                                  <span className="text-white font-semibold">{folder.name}</span>
+                                  <span className="text-cyan-400/75 ml-2">{folder.path}</span>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    audioService.playChirp(860);
+                                    void desktopBridge.revokeFolderPath(folder.path);
+                                  }}
+                                  className="px-2 py-0.5 rounded border border-red-400/50 text-red-200 hover:bg-red-950/50 text-[9px] whitespace-nowrap shrink-0"
+                                >
+                                  Revoke
+                                </button>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
 
@@ -1180,6 +1563,17 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
                         </span>
                       </div>
                       <p className="text-[9.5px] text-cyan-300/80">{s.description}</p>
+                      {(s.dependsOn?.length || (s.retryCount || 0) > 0 || s.agentRole) && (
+                        <div className="flex flex-wrap gap-2 text-[9px] text-cyan-400/75">
+                          {s.agentRole && <span>Agent: {s.agentRole}</span>}
+                          {s.dependsOn && s.dependsOn.length > 0 && (
+                            <span>Depends on: {s.dependsOn.join(', ')}</span>
+                          )}
+                          {(s.retryCount || 0) > 0 && (
+                            <span className="text-amber-300 tabular-nums">Retries: {s.retryCount}</span>
+                          )}
+                        </div>
+                      )}
                       {s.verificationNote && (
                         <p className="text-[9.5px] text-emerald-300/90">{s.verificationNote}</p>
                       )}
@@ -1226,6 +1620,25 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
                     </button>
                   )}
                 </div>
+              </div>
+            )}
+
+            {planHistory.length > 0 && (
+              <div className="space-y-1 pt-1">
+                <div className="font-orbitron text-[9.5px] text-cyan-300">
+                  EXECUTION HISTORY ({planHistory.length})
+                </div>
+                {planHistory.slice(0, 5).map((hist) => (
+                  <div
+                    key={hist.id}
+                    className="p-2 rounded border border-cyan-500/20 bg-black/35 flex items-center justify-between gap-2 text-[9.5px]"
+                  >
+                    <span className="text-cyan-100 truncate">{hist.objective}</span>
+                    <span className="text-cyan-300/80 shrink-0 tabular-nums">
+                      {hist.steps.filter((st) => st.status === 'COMPLETED').length}/{hist.steps.length} · {hist.status}
+                    </span>
+                  </div>
+                ))}
               </div>
             )}
           </div>
@@ -1407,13 +1820,26 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
               </div>
             </form>
 
+            <div className="flex items-center gap-1.5">
+              <Search className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+              <input
+                type="text"
+                value={memSearchQuery}
+                onChange={(e) => setMemSearchQuery(e.target.value)}
+                placeholder="Search saved memories by keyword or category..."
+                className="flex-1 bg-black/75 border border-cyan-500/35 rounded px-2 py-1 text-[10px] text-white placeholder-cyan-500/50"
+              />
+            </div>
+
             <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
-              {memories.length === 0 ? (
+              {visibleMemories.length === 0 ? (
                 <p className="text-[10px] text-cyan-400/75 p-2">
-                  No user-approved memories stored yet.
+                  {memSearchQuery.trim()
+                    ? `No saved memories match "${memSearchQuery.trim()}".`
+                    : 'No user-approved memories stored yet.'}
                 </p>
               ) : (
-                memories.map((m) => (
+                visibleMemories.map((m) => (
                   <div
                     key={m.id}
                     className="p-2 rounded border border-cyan-500/25 bg-black/45 flex items-start justify-between gap-2"

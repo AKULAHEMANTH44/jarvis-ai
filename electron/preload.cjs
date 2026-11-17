@@ -47,5 +47,21 @@ contextBridge.exposeInMainWorld('jarvisDesktop', {
 
   getSystemStatus: async () => {
     return ipcRenderer.invoke('jarvis:getSystemStatus');
+  },
+
+  getPermissionConfig: async () => {
+    return ipcRenderer.invoke('jarvis:getPermissionConfig');
+  },
+
+  savePermissionConfig: async (config) => {
+    return ipcRenderer.invoke('jarvis:savePermissionConfig', config);
+  },
+
+  resetPermissionConfig: async (clearSetupCompleted = false) => {
+    return ipcRenderer.invoke('jarvis:resetPermissionConfig', { clearSetupCompleted });
+  },
+
+  revokeFolderPath: async (folderPath) => {
+    return ipcRenderer.invoke('jarvis:revokeFolderPath', { folderPath });
   }
 });

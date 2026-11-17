@@ -1,5 +1,6 @@
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import { spawn } from 'child_process';
 
 export interface AllowedApplicationEntry {
@@ -145,6 +146,131 @@ export interface DesktopAuditEntry {
   timestamp: number;
 }
 
+export type ServerCapabilityId =
+  | 'APPLICATION_ACCESS'
+  | 'BROWSER_ACCESS'
+  | 'FOLDER_ACCESS'
+  | 'MUSIC_ACCESS'
+  | 'CAMERA_ACCESS'
+  | 'MICROPHONE_ACCESS';
+
+export type ServerPermissionDecision = 'NOT_REQUESTED' | 'GRANTED' | 'DENIED';
+
+export interface ServerPermissionPolicy {
+  version: number;
+  setupCompleted: boolean;
+  setupCompletedAt: number | null;
+  capabilities: Record<
+    ServerCapabilityId,
+    { id: ServerCapabilityId; decision: ServerPermissionDecision; updatedAt: number | null }
+  >;
+  allowedAppIds: Record<string, boolean>;
+  approvedFolders: { path: string; name: string; grantedAt: number }[];
+}
+
+const SERVER_CAPABILITY_IDS: ServerCapabilityId[] = [
+  'APPLICATION_ACCESS',
+  'BROWSER_ACCESS',
+  'FOLDER_ACCESS',
+  'MUSIC_ACCESS',
+  'CAMERA_ACCESS',
+  'MICROPHONE_ACCESS'
+];
+
+function createDefaultServerPolicy(): ServerPermissionPolicy {
+  return {
+    version: 1,
+    setupCompleted: false,
+    setupCompletedAt: null,
+    capabilities: {
+      APPLICATION_ACCESS: { id: 'APPLICATION_ACCESS', decision: 'NOT_REQUESTED', updatedAt: null },
+      BROWSER_ACCESS: { id: 'BROWSER_ACCESS', decision: 'NOT_REQUESTED', updatedAt: null },
+      FOLDER_ACCESS: { id: 'FOLDER_ACCESS', decision: 'NOT_REQUESTED', updatedAt: null },
+      MUSIC_ACCESS: { id: 'MUSIC_ACCESS', decision: 'NOT_REQUESTED', updatedAt: null },
+      CAMERA_ACCESS: { id: 'CAMERA_ACCESS', decision: 'NOT_REQUESTED', updatedAt: null },
+      MICROPHONE_ACCESS: { id: 'MICROPHONE_ACCESS', decision: 'NOT_REQUESTED', updatedAt: null }
+    },
+    allowedAppIds: {
+      VS_CODE: true,
+      NOTEPAD: true,
+      CALCULATOR: true,
+      EXPLORER: true,
+      BROWSER: true,
+      CHROME: true,
+      SPOTIFY: true
+    },
+    approvedFolders: []
+  };
+}
+
+function sanitizeServerPolicy(raw: unknown): ServerPermissionPolicy {
+  const def = createDefaultServerPolicy();
+  if (!raw || typeof raw !== 'object') return def;
+
+  const obj = raw as Record<string, unknown>;
+  const capabilities = { ...def.capabilities };
+  if (obj.capabilities && typeof obj.capabilities === 'object') {
+    const rawCaps = obj.capabilities as Record<string, unknown>;
+    for (const id of SERVER_CAPABILITY_IDS) {
+      const entry = rawCaps[id] as Record<string, unknown> | undefined;
+      if (
+        entry &&
+        (entry.decision === 'NOT_REQUESTED' || entry.decision === 'GRANTED' || entry.decision === 'DENIED')
+      ) {
+        capabilities[id] = {
+          id,
+          decision: entry.decision,
+          updatedAt:
+            typeof entry.updatedAt === 'number' && Number.isFinite(entry.updatedAt) ? entry.updatedAt : null
+        };
+      }
+    }
+  }
+
+  const allowedAppIds: Record<string, boolean> = { ...def.allowedAppIds };
+  if (obj.allowedAppIds && typeof obj.allowedAppIds === 'object') {
+    for (const [k, v] of Object.entries(obj.allowedAppIds as Record<string, unknown>)) {
+      if (typeof v === 'boolean') {
+        allowedAppIds[String(k).toUpperCase().replace(/[\s-]+/g, '_')] = v;
+      }
+    }
+  }
+
+  const approvedFolders: { path: string; name: string; grantedAt: number }[] = [];
+  const seen = new Set<string>();
+  if (Array.isArray(obj.approvedFolders)) {
+    for (const item of obj.approvedFolders) {
+      if (!item || typeof item !== 'object') continue;
+      const rec = item as Record<string, unknown>;
+      const cleanPath = typeof rec.path === 'string' ? rec.path.trim() : '';
+      if (!cleanPath || /(^|[\\/])\.\.([\\/]|$)|%2e%2e/i.test(cleanPath) || cleanPath.includes('\0')) {
+        continue;
+      }
+      if (seen.has(cleanPath)) continue;
+      seen.add(cleanPath);
+      const inferredName = cleanPath.split(/[\\/]/).filter(Boolean).pop() || cleanPath;
+      approvedFolders.push({
+        path: cleanPath,
+        name: typeof rec.name === 'string' && rec.name.trim() ? rec.name.trim() : inferredName,
+        grantedAt:
+          typeof rec.grantedAt === 'number' && Number.isFinite(rec.grantedAt) ? rec.grantedAt : Date.now()
+      });
+    }
+  }
+
+  return {
+    version: 1,
+    setupCompleted: Boolean(obj.setupCompleted),
+    setupCompletedAt:
+      typeof obj.setupCompletedAt === 'number' && Number.isFinite(obj.setupCompletedAt)
+        ? obj.setupCompletedAt
+        : null,
+    capabilities,
+    allowedAppIds,
+    approvedFolders
+  };
+}
+
 export class DesktopAutomationService {
   private allowedApplications: Map<string, AllowedApplicationEntry> = new Map(
     Object.entries(DEFAULT_ALLOWED_APPLICATIONS)
@@ -152,6 +278,68 @@ export class DesktopAutomationService {
   private approvedRoots: Set<string> = new Set();
   private requireApprovedRoot = false;
   private auditLog: DesktopAuditEntry[] = [];
+  private policy: ServerPermissionPolicy = createDefaultServerPolicy();
+  private policyFilePath: string | null = null;
+
+  constructor(options?: { policyFilePath?: string }) {
+    if (options?.policyFilePath) {
+      this.policyFilePath = options.policyFilePath;
+      this.loadPolicyFromDisk();
+    }
+  }
+
+  private loadPolicyFromDisk(): void {
+    if (!this.policyFilePath) return;
+    try {
+      if (fs.existsSync(this.policyFilePath)) {
+        const parsed = JSON.parse(fs.readFileSync(this.policyFilePath, 'utf8'));
+        this.policy = sanitizeServerPolicy(parsed);
+        for (const f of this.policy.approvedFolders) {
+          this.approvePath(f.path);
+        }
+      }
+    } catch {
+      this.policy = createDefaultServerPolicy();
+    }
+  }
+
+  private savePolicyToDisk(): void {
+    if (!this.policyFilePath) return;
+    try {
+      fs.mkdirSync(path.dirname(this.policyFilePath), { recursive: true });
+      fs.writeFileSync(this.policyFilePath, JSON.stringify(this.policy, null, 2), {
+        encoding: 'utf8',
+        mode: 0o600
+      });
+    } catch {
+      // Ignore filesystem write errors cleanly
+    }
+  }
+
+  public getPermissionPolicy(): ServerPermissionPolicy {
+    return sanitizeServerPolicy(this.policy);
+  }
+
+  public updatePermissionPolicy(rawPolicy: unknown): ServerPermissionPolicy {
+    this.policy = sanitizeServerPolicy(rawPolicy);
+    this.approvedRoots.clear();
+    for (const f of this.policy.approvedFolders) {
+      this.approvePath(f.path);
+    }
+    this.savePolicyToDisk();
+    return this.getPermissionPolicy();
+  }
+
+  public resetPermissionPolicy(clearSetupCompleted = false): ServerPermissionPolicy {
+    this.policy = createDefaultServerPolicy();
+    if (!clearSetupCompleted) {
+      this.policy.setupCompleted = true;
+      this.policy.setupCompletedAt = Date.now();
+    }
+    this.approvedRoots.clear();
+    this.savePolicyToDisk();
+    return this.getPermissionPolicy();
+  }
 
   public getAllowedApplications(): AllowedApplicationEntry[] {
     return Array.from(this.allowedApplications.values());
@@ -202,6 +390,19 @@ export class DesktopAutomationService {
 
   public clearApprovedPaths(): void {
     this.approvedRoots.clear();
+  }
+
+  public revokeApprovedPath(rawPath: string): { ok: boolean } {
+    const clean = String(rawPath || '').trim();
+    if (!clean) return { ok: false };
+    const resolved = path.resolve(clean);
+    this.approvedRoots.delete(resolved);
+    this.approvedRoots.delete(clean);
+    this.policy.approvedFolders = this.policy.approvedFolders.filter(
+      (f) => f.path !== clean && path.resolve(f.path) !== resolved
+    );
+    this.savePolicyToDisk();
+    return { ok: true };
   }
 
   public isPathWithinApprovedRoots(resolvedPath: string): boolean {
@@ -394,6 +595,32 @@ export class DesktopAutomationService {
       return disallowedRes;
     }
 
+    if (this.policy.capabilities.APPLICATION_ACCESS.decision === 'DENIED') {
+      const deniedRes: DesktopExecutionResult = {
+        ok: false,
+        action: 'APPLICATION_LAUNCH',
+        target: appEntry.displayName,
+        verified: false,
+        summary: 'Application Access is disabled in JARVIS persistent permissions.',
+        error: 'PERMISSION_DENIED_BY_POLICY'
+      };
+      this.recordAudit({ action: 'APPLICATION_LAUNCH', target: appEntry.displayName, ok: false, error: deniedRes.error });
+      return deniedRes;
+    }
+
+    if (this.policy.allowedAppIds[appEntry.id] === false) {
+      const appDisabledRes: DesktopExecutionResult = {
+        ok: false,
+        action: 'APPLICATION_LAUNCH',
+        target: appEntry.displayName,
+        verified: false,
+        summary: `Application "${appEntry.displayName}" is disabled in JARVIS Application Access settings.`,
+        error: 'PERMISSION_DENIED_BY_POLICY'
+      };
+      this.recordAudit({ action: 'APPLICATION_LAUNCH', target: appEntry.displayName, ok: false, error: appDisabledRes.error });
+      return appDisabledRes;
+    }
+
     const sanitizedArgs = Array.isArray(customArgs)
       ? customArgs.filter((arg) => typeof arg === 'string' && !DANGEROUS_ARG_PATTERN.test(arg.trim()))
       : [];
@@ -438,6 +665,18 @@ export class DesktopAutomationService {
    * Open an approved file with its default system application.
    */
   public async openApprovedFile(filePath: string): Promise<DesktopExecutionResult> {
+    if (this.policy.capabilities.FOLDER_ACCESS.decision === 'DENIED') {
+      const deniedRes: DesktopExecutionResult = {
+        ok: false,
+        action: 'FILE_ACCESS',
+        target: filePath,
+        verified: false,
+        summary: 'Folder & file system access is disabled in JARVIS persistent permissions.',
+        error: 'PERMISSION_DENIED_BY_POLICY'
+      };
+      this.recordAudit({ action: 'FILE_ACCESS', target: filePath, ok: false, error: deniedRes.error });
+      return deniedRes;
+    }
     const val = this.validatePath(filePath);
     if (!val.valid || !val.normalizedPath) {
       const errRes: DesktopExecutionResult = {
@@ -514,6 +753,18 @@ export class DesktopAutomationService {
    * Open an approved folder in the system file manager (Windows Explorer / Finder / File Manager).
    */
   public async openApprovedFolder(folderPath: string): Promise<DesktopExecutionResult> {
+    if (this.policy.capabilities.FOLDER_ACCESS.decision === 'DENIED') {
+      const deniedRes: DesktopExecutionResult = {
+        ok: false,
+        action: 'FOLDER_ACCESS',
+        target: folderPath,
+        verified: false,
+        summary: 'Folder Access is disabled in JARVIS persistent permissions.',
+        error: 'PERMISSION_DENIED_BY_POLICY'
+      };
+      this.recordAudit({ action: 'FOLDER_ACCESS', target: folderPath, ok: false, error: deniedRes.error });
+      return deniedRes;
+    }
     const val = this.validatePath(folderPath);
     if (!val.valid || !val.normalizedPath) {
       const errRes: DesktopExecutionResult = {
@@ -589,6 +840,18 @@ export class DesktopAutomationService {
    * Open default web browser with a validated URL (no embedded credentials, HTTP/HTTPS only).
    */
   public async openApprovedBrowser(url?: string): Promise<DesktopExecutionResult> {
+    if (this.policy.capabilities.BROWSER_ACCESS.decision === 'DENIED') {
+      const deniedRes: DesktopExecutionResult = {
+        ok: false,
+        action: 'BROWSER_ACCESS',
+        target: url || 'https://www.google.com',
+        verified: false,
+        summary: 'Browser Access is disabled in JARVIS persistent permissions.',
+        error: 'PERMISSION_DENIED_BY_POLICY'
+      };
+      this.recordAudit({ action: 'BROWSER_ACCESS', target: deniedRes.target, ok: false, error: deniedRes.error });
+      return deniedRes;
+    }
     const targetUrl = url ? url.trim() : 'https://www.google.com';
 
     let parsed: URL;
@@ -666,6 +929,18 @@ export class DesktopAutomationService {
    * Perform an approved web search in default browser.
    */
   public async searchWeb(query: string, engine = 'google'): Promise<DesktopExecutionResult> {
+    if (this.policy.capabilities.BROWSER_ACCESS.decision === 'DENIED') {
+      const deniedRes: DesktopExecutionResult = {
+        ok: false,
+        action: 'WEB_SEARCH',
+        target: String(query || '').trim(),
+        verified: false,
+        summary: 'Browser & Web Search Access is disabled in JARVIS persistent permissions.',
+        error: 'PERMISSION_DENIED_BY_POLICY'
+      };
+      this.recordAudit({ action: 'WEB_SEARCH', target: deniedRes.target, ok: false, error: deniedRes.error });
+      return deniedRes;
+    }
     const cleanQuery = String(query || '').trim();
     if (!cleanQuery) {
       return {
@@ -707,6 +982,18 @@ export class DesktopAutomationService {
    * Launch an approved music application or open approved audio file.
    */
   public async launchMusicApp(musicTarget = 'SPOTIFY'): Promise<DesktopExecutionResult> {
+    if (this.policy.capabilities.MUSIC_ACCESS.decision === 'DENIED') {
+      const deniedRes: DesktopExecutionResult = {
+        ok: false,
+        action: 'MUSIC_CONTROL',
+        target: String(musicTarget || 'SPOTIFY').trim(),
+        verified: false,
+        summary: 'Music Access is disabled in JARVIS persistent permissions.',
+        error: 'PERMISSION_DENIED_BY_POLICY'
+      };
+      this.recordAudit({ action: 'MUSIC_CONTROL', target: deniedRes.target, ok: false, error: deniedRes.error });
+      return deniedRes;
+    }
     const trimmed = String(musicTarget || 'SPOTIFY').trim();
     const norm = trimmed.toUpperCase().replace(/[\s-]+/g, '_');
 
@@ -777,4 +1064,6 @@ export class DesktopAutomationService {
   }
 }
 
-export const desktopAutomationService = new DesktopAutomationService();
+export const desktopAutomationService = new DesktopAutomationService(
+  process.env.VITEST ? undefined : { policyFilePath: path.join(os.tmpdir(), 'jarvis-desktop-permissions.json') }
+);

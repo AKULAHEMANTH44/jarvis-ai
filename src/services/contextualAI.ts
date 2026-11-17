@@ -1,4 +1,9 @@
-import { AIProviderConfig, BackendLLMStatusResponse, LLMMode } from '../types/assistant';
+import {
+  AIProviderConfig,
+  BackendLLMStatusResponse,
+  LLMMode,
+  PendingAttachment
+} from '../types/assistant';
 
 const AI_CONFIG_KEY = 'jarvis_ai_provider_config';
 
@@ -24,6 +29,19 @@ function isValidExternalEndpoint(url: string): boolean {
   } catch {
     return false;
   }
+}
+
+function serializeAttachments(attachments?: PendingAttachment[]) {
+  if (!attachments || attachments.length === 0) return undefined;
+  return attachments.slice(0, 3).map((att) => ({
+    id: att.id,
+    name: att.name,
+    mimeType: att.mimeType,
+    kind: att.kind,
+    sizeBytes: att.sizeBytes,
+    ...(att.base64Data ? { base64Data: att.base64Data } : {}),
+    ...(att.textContent ? { textContent: att.textContent } : {})
+  }));
 }
 
 export class ContextualAIService {
@@ -295,6 +313,7 @@ export class ContextualAIService {
 
   public async queryStructuredCompletion(options: {
     messages: { role: 'system' | 'user' | 'assistant'; content: string }[];
+    attachments?: PendingAttachment[];
     signal?: AbortSignal;
     timeoutMs?: number;
     mode?: LLMMode;
@@ -346,6 +365,7 @@ export class ContextualAIService {
           this.config.backendMode ||
           (provider === 'GROQ' ? 'GROQ_ONLY' : provider === 'GEMINI' ? 'GEMINI_ONLY' : 'AUTO');
 
+        const serializedAttachments = serializeAttachments(options.attachments);
         const res = await fetch('/api/llm/chat', {
           method: 'POST',
           signal: timeoutController.signal,
@@ -356,7 +376,8 @@ export class ContextualAIService {
             temperature: this.config.temperature,
             model: this.config.modelName && !this.config.modelName.includes('Core')
               ? this.config.modelName
-              : undefined
+              : undefined,
+            ...(serializedAttachments ? { attachments: serializedAttachments } : {})
           })
         });
 
@@ -602,6 +623,259 @@ export class ContextualAIService {
         text: '',
         error: 'External provider communication encountered a network or authentication error.',
         provider
+      };
+    } finally {
+      clearTimeout(timer);
+      options.signal?.removeEventListener('abort', onExternalAbort);
+    }
+  }
+
+  public async queryStreamingCompletion(options: {
+    messages: { role: 'system' | 'user' | 'assistant'; content: string }[];
+    attachments?: PendingAttachment[];
+    signal?: AbortSignal;
+    timeoutMs?: number;
+    mode?: LLMMode;
+    onChunk?: (
+      delta: string,
+      accumulated: string,
+      meta?: { provider?: AIProviderConfig['provider']; model?: string; fallbackTriggered?: boolean }
+    ) => void;
+  }): Promise<{
+    ok: boolean;
+    text: string;
+    error?: string;
+    aborted?: boolean;
+    provider: AIProviderConfig['provider'];
+    fallbackTriggered?: boolean;
+    model?: string;
+    streamed: boolean;
+  }> {
+    const provider = this.config.provider;
+
+    if (provider === 'LOCAL') {
+      return {
+        ok: false,
+        text: '',
+        error: 'Provider is set to LOCAL mode.',
+        provider: 'LOCAL',
+        streamed: false
+      };
+    }
+
+    if (options.signal?.aborted) {
+      return {
+        ok: false,
+        text: '',
+        error: 'Request cancelled by user.',
+        aborted: true,
+        provider,
+        streamed: false
+      };
+    }
+
+    const isServerBacked =
+      provider === 'BACKEND' ||
+      ((provider === 'GEMINI' || provider === 'GROQ') && !this.volatileApiKey);
+
+    // Client volatile API key paths delegate cleanly to structured completion & emit once
+    if (!isServerBacked) {
+      const res = await this.queryStructuredCompletion(options);
+      if (res.ok && res.text && options.onChunk) {
+        options.onChunk(res.text, res.text, {
+          provider: res.provider,
+          model: res.model,
+          fallbackTriggered: res.fallbackTriggered
+        });
+      }
+      return { ...res, streamed: false };
+    }
+
+    const timeoutMs = options.timeoutMs ?? 30000;
+    const timeoutController = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      timeoutController.abort();
+    }, timeoutMs);
+
+    const onExternalAbort = () => timeoutController.abort();
+    options.signal?.addEventListener('abort', onExternalAbort, { once: true });
+
+    try {
+      const mode: LLMMode =
+        options.mode ||
+        this.config.backendMode ||
+        (provider === 'GROQ' ? 'GROQ_ONLY' : provider === 'GEMINI' ? 'GEMINI_ONLY' : 'AUTO');
+
+      const serializedAttachments = serializeAttachments(options.attachments);
+      const res = await fetch('/api/llm/chat/stream', {
+        method: 'POST',
+        signal: timeoutController.signal,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: options.messages,
+          mode,
+          temperature: this.config.temperature,
+          model: this.config.modelName && !this.config.modelName.includes('Core')
+            ? this.config.modelName
+            : undefined,
+          ...(serializedAttachments ? { attachments: serializedAttachments } : {})
+        })
+      });
+
+      const contentType = res.headers?.get?.('content-type') || '';
+
+      // Graceful compatibility if a mock fetch or proxy responds with plain JSON
+      if (!contentType.includes('text/event-stream') || !res.body?.getReader) {
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data?.ok) {
+          return {
+            ok: false,
+            text: '',
+            error: data?.error || `Server backend returned HTTP ${res.status}`,
+            provider: (data?.provider as AIProviderConfig['provider']) || 'BACKEND',
+            fallbackTriggered: Boolean(data?.fallbackTriggered),
+            model: data?.model,
+            streamed: false
+          };
+        }
+        const fullText = data.text || '';
+        if (fullText && options.onChunk) {
+          options.onChunk(fullText, fullText, {
+            provider: (data.provider as AIProviderConfig['provider']) || 'BACKEND',
+            model: data.model,
+            fallbackTriggered: Boolean(data.fallbackTriggered)
+          });
+        }
+        return {
+          ok: true,
+          text: fullText,
+          provider: (data.provider as AIProviderConfig['provider']) || 'BACKEND',
+          fallbackTriggered: Boolean(data.fallbackTriggered),
+          model: data.model,
+          streamed: false
+        };
+      }
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        return {
+          ok: false,
+          text: '',
+          error: data?.error || `Streaming backend returned HTTP ${res.status}`,
+          provider: (data?.provider as AIProviderConfig['provider']) || 'BACKEND',
+          streamed: false
+        };
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let accumulated = '';
+      let activeProvider: AIProviderConfig['provider'] = 'BACKEND';
+      let activeModel: string | undefined;
+      let fallbackTriggered = false;
+      let streamError: string | undefined;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+
+        for (const rawLine of lines) {
+          const line = rawLine.trim();
+          if (!line.startsWith('data:')) continue;
+          const payloadStr = line.slice(5).trim();
+          if (!payloadStr || payloadStr === '[DONE]') continue;
+
+          try {
+            const ev = JSON.parse(payloadStr) as {
+              type: 'meta' | 'chunk' | 'done' | 'error';
+              provider?: 'GEMINI' | 'GROQ' | 'NONE';
+              model?: string;
+              fallbackTriggered?: boolean;
+              text?: string;
+              error?: string;
+            };
+
+            if (ev.type === 'meta') {
+              if (ev.provider && ev.provider !== 'NONE') activeProvider = ev.provider;
+              if (ev.model) activeModel = ev.model;
+              if (ev.fallbackTriggered !== undefined) fallbackTriggered = ev.fallbackTriggered;
+            } else if (ev.type === 'chunk' && ev.text) {
+              accumulated += ev.text;
+              options.onChunk?.(ev.text, accumulated, {
+                provider: activeProvider,
+                model: activeModel,
+                fallbackTriggered
+              });
+            } else if (ev.type === 'done') {
+              if (ev.provider && ev.provider !== 'NONE') activeProvider = ev.provider;
+              if (ev.model) activeModel = ev.model;
+              if (ev.fallbackTriggered !== undefined) fallbackTriggered = ev.fallbackTriggered;
+              if (ev.text && !accumulated) {
+                accumulated = ev.text;
+              }
+            } else if (ev.type === 'error') {
+              streamError = ev.error || 'Streaming error returned by backend.';
+            }
+          } catch {
+            // Skip malformed SSE frame
+          }
+        }
+      }
+
+      if (streamError && !accumulated) {
+        return {
+          ok: false,
+          text: '',
+          error: streamError,
+          provider: activeProvider,
+          fallbackTriggered,
+          model: activeModel,
+          streamed: true
+        };
+      }
+
+      return {
+        ok: Boolean(accumulated),
+        text: accumulated,
+        error: accumulated ? undefined : streamError || 'Empty stream response from backend.',
+        provider: activeProvider,
+        fallbackTriggered,
+        model: activeModel,
+        streamed: true
+      };
+    } catch (err: unknown) {
+      if (options.signal?.aborted) {
+        return {
+          ok: false,
+          text: '',
+          error: 'Request cancelled by user.',
+          aborted: true,
+          provider,
+          streamed: false
+        };
+      }
+      if (timedOut || (err instanceof Error && err.name === 'AbortError')) {
+        return {
+          ok: false,
+          text: '',
+          error: `Streaming request timed out after ${Math.round(timeoutMs / 1000)}s.`,
+          provider,
+          streamed: false
+        };
+      }
+      return {
+        ok: false,
+        text: '',
+        error: 'Backend streaming encountered a network or connection error.',
+        provider,
+        streamed: false
       };
     } finally {
       clearTimeout(timer);

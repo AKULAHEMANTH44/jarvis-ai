@@ -26,12 +26,24 @@ export class PlanningEngine {
       constraints: [...p.constraints],
       missingInfo: [...p.missingInfo],
       approaches: p.approaches.map((a) => ({ ...a })),
-      steps: p.steps.map((s) => ({ ...s }))
+      steps: p.steps.map((s) => ({
+        ...s,
+        dependsOn: s.dependsOn ? [...s.dependsOn] : undefined
+      }))
     }));
   }
 
   public getLatestPlan(): ExecutionPlan | null {
     return this.plans.length > 0 ? this.getPlans()[0] : null;
+  }
+
+  public getExecutionHistory(): ExecutionPlan[] {
+    return this.getPlans().filter((p) =>
+      p.status === 'COMPLETED' ||
+      p.status === 'PARTIAL' ||
+      p.status === 'FAILED' ||
+      p.status === 'CANCELLED'
+    );
   }
 
   public createPlanFromRequest(
@@ -51,9 +63,9 @@ export class PlanningEngine {
     if (selectedLocked) {
       constraints.push(`Selected object "${snapshot.selectedObjectName}" is locked against spatial transforms.`);
     }
-    if (snapshot.provider !== 'LOCAL' && !snapshot.hasProviderKey) {
+    if (snapshot.provider !== 'LOCAL' && snapshot.provider !== 'BACKEND' && !snapshot.hasProviderKey) {
       constraints.push(
-        `Provider ${snapshot.provider} has no volatile session API key; external LLM synthesis unavailable until key is provided or LOCAL mode is selected.`
+        `Provider ${snapshot.provider} has no volatile session API key; external LLM synthesis unavailable until key is provided or BACKEND/LOCAL mode is selected.`
       );
     }
 
@@ -81,7 +93,8 @@ export class PlanningEngine {
           toolName: 'inspect_workspace',
           toolArgs: { includeComponents: true },
           requiresConfirmation: false,
-          status: 'PENDING'
+          status: 'PENDING',
+          agentRole: 'ANALYSIS'
         },
         {
           id: 'step-2',
@@ -90,7 +103,10 @@ export class PlanningEngine {
           toolName: 'network_and_hardware_diagnostics',
           toolArgs: {},
           requiresConfirmation: false,
-          status: 'PENDING'
+          dependsOn: ['step-1'],
+          maxRetries: 1,
+          status: 'PENDING',
+          agentRole: 'WORKFLOW'
         },
         {
           id: 'step-3',
@@ -102,7 +118,9 @@ export class PlanningEngine {
           toolName: 'control_hologram_transform',
           toolArgs: { action: snapshot.dispersionAmount >= 0.85 ? 'reconstruct' : 'frame_model' },
           requiresConfirmation: true,
-          status: 'PENDING'
+          dependsOn: ['step-2'],
+          status: 'PENDING',
+          agentRole: 'WORKFLOW'
         },
         {
           id: 'step-4',
@@ -113,7 +131,9 @@ export class PlanningEngine {
             text: `[Demo Prep] Verified workspace (${snapshot.objectCount} objects). Manual check reminder: run tsc/vitest/build & test camera/mic.`
           },
           requiresConfirmation: true,
-          status: 'PENDING'
+          dependsOn: ['step-1'],
+          status: 'PENDING',
+          agentRole: 'WORKFLOW'
         }
       );
     } else if (/\b(inspect|analyze|audit|explain).*(model|assembly|component|parts)\b/i.test(lower)) {
@@ -140,7 +160,9 @@ export class PlanningEngine {
           toolName: 'inspect_selected_model',
           toolArgs: { preferImported: lower.includes('import') },
           requiresConfirmation: false,
-          status: 'PENDING'
+          maxRetries: 1,
+          status: 'PENDING',
+          agentRole: 'ANALYSIS'
         },
         {
           id: 'step-2',
@@ -149,7 +171,9 @@ export class PlanningEngine {
           toolName: 'control_hologram_transform',
           toolArgs: { action: 'explode', explosionAmount: 0.9 },
           requiresConfirmation: true,
-          status: 'PENDING'
+          dependsOn: ['step-1'],
+          status: 'PENDING',
+          agentRole: 'WORKFLOW'
         },
         {
           id: 'step-3',
@@ -158,7 +182,61 @@ export class PlanningEngine {
           toolName: 'control_hologram_transform',
           toolArgs: { action: 'frame_model' },
           requiresConfirmation: false,
-          status: 'PENDING'
+          dependsOn: ['step-2'],
+          status: 'PENDING',
+          agentRole: 'WORKFLOW'
+        }
+      );
+    } else if (/\b(research|investigate|deep dive|code|debug|refactor|review|compare)\b/i.test(lower)) {
+      const isCoding = /\b(code|debug|refactor|review|test|typescript|vitest)\b/i.test(lower);
+      approaches.push(
+        {
+          id: 'grounded-agent-pipeline',
+          label: `${isCoding ? 'Coding & Verification' : 'Research & Synthesis'} Pipeline (Recommended)`,
+          tradeoff: 'Inspects context, retrieves session memory, and checks runtime telemetry before synthesis.',
+          recommended: true
+        },
+        {
+          id: 'memory-only-check',
+          label: 'Session Context Recall Only',
+          tradeoff: 'Faster read-only recall of prior notes and approved memories without external lookups.',
+          recommended: false
+        }
+      );
+
+      steps.push(
+        {
+          id: 'step-1',
+          title: 'Retrieve Relevant Session Context & Memory',
+          description: 'Pull approved memories and recent turns linked to the current objective.',
+          toolName: 'retrieve_context_and_memory',
+          toolArgs: { query: cleanObjective },
+          requiresConfirmation: false,
+          maxRetries: 1,
+          status: 'PENDING',
+          agentRole: isCoding ? 'CODING' : 'RESEARCH'
+        },
+        {
+          id: 'step-2',
+          title: 'Gather Workspace & Component Telemetry',
+          description: 'Read current workspace models, render state, and active constraints.',
+          toolName: 'inspect_workspace',
+          toolArgs: { includeComponents: true },
+          requiresConfirmation: false,
+          dependsOn: ['step-1'],
+          status: 'PENDING',
+          agentRole: 'ANALYSIS'
+        },
+        {
+          id: 'step-3',
+          title: 'Check Provider & Runtime Diagnostics',
+          description: 'Confirm provider health and runtime readiness for grounded synthesis.',
+          toolName: 'network_and_hardware_diagnostics',
+          toolArgs: {},
+          requiresConfirmation: false,
+          dependsOn: ['step-1'],
+          status: 'PENDING',
+          agentRole: 'WORKFLOW'
         }
       );
     } else {
@@ -186,7 +264,9 @@ export class PlanningEngine {
           toolName: 'inspect_workspace',
           toolArgs: { includeComponents: true },
           requiresConfirmation: false,
-          status: 'PENDING'
+          maxRetries: 1,
+          status: 'PENDING',
+          agentRole: 'ANALYSIS'
         },
         {
           id: 'step-2',
@@ -195,7 +275,9 @@ export class PlanningEngine {
           toolName: 'retrieve_context_and_memory',
           toolArgs: { query: cleanObjective },
           requiresConfirmation: false,
-          status: 'PENDING'
+          dependsOn: ['step-1'],
+          status: 'PENDING',
+          agentRole: 'RESEARCH'
         }
       );
 
@@ -207,7 +289,9 @@ export class PlanningEngine {
           toolName: 'control_hologram_transform',
           toolArgs: { action: 'explode', explosionAmount: 1.0 },
           requiresConfirmation: true,
-          status: 'PENDING'
+          dependsOn: ['step-1'],
+          status: 'PENDING',
+          agentRole: 'WORKFLOW'
         });
       }
       if (/\b(reconstruct|reassemble)\b/i.test(lower)) {
@@ -218,7 +302,9 @@ export class PlanningEngine {
           toolName: 'control_hologram_transform',
           toolArgs: { action: 'reconstruct' },
           requiresConfirmation: true,
-          status: 'PENDING'
+          dependsOn: ['step-1'],
+          status: 'PENDING',
+          agentRole: 'WORKFLOW'
         });
       }
       if (/\b(export|save note)\b/i.test(lower)) {
@@ -229,7 +315,9 @@ export class PlanningEngine {
           toolName: 'export_workspace_notes',
           toolArgs: {},
           requiresConfirmation: true,
-          status: 'PENDING'
+          dependsOn: ['step-2'],
+          status: 'PENDING',
+          agentRole: 'WORKFLOW'
         });
       }
       if (/\b(diagnostic|health|check)\b/i.test(lower)) {
@@ -240,7 +328,9 @@ export class PlanningEngine {
           toolName: 'network_and_hardware_diagnostics',
           toolArgs: {},
           requiresConfirmation: false,
-          status: 'PENDING'
+          dependsOn: ['step-1'],
+          status: 'PENDING',
+          agentRole: 'WORKFLOW'
         });
       }
 
@@ -288,7 +378,6 @@ export class PlanningEngine {
     plan.status = 'EXECUTING';
     this.notify();
 
-    // Mirror active plan into AutomationEngine task list for unified telemetry when executable tools exist
     let completedCount = 0;
     let failedCount = 0;
 
@@ -307,6 +396,20 @@ export class PlanningEngine {
         return this.getPlans().find((p) => p.id === plan.id)!;
       }
 
+      // Enforce prerequisite step dependency graph
+      if (step.dependsOn && step.dependsOn.length > 0) {
+        const failedDeps = step.dependsOn.filter((depId) => {
+          const dep = plan.steps.find((s) => s.id === depId);
+          return dep && (dep.status === 'FAILED' || dep.status === 'SKIPPED');
+        });
+        if (failedDeps.length > 0) {
+          step.status = 'SKIPPED';
+          step.verificationNote = `Skipped: prerequisite step(s) incomplete (${failedDeps.join(', ')}).`;
+          this.notify();
+          continue;
+        }
+      }
+
       if (!step.toolName) {
         step.status = 'SKIPPED';
         step.verificationNote = 'Manual verification step; requires user execution.';
@@ -314,15 +417,39 @@ export class PlanningEngine {
       }
 
       step.status = 'RUNNING';
+      step.retryCount = 0;
       this.notify();
 
-      const { result } = await toolRegistry.executeTool(step.toolName, step.toolArgs || {}, {
+      const toolDef = toolRegistry.getTool(step.toolName);
+      const maxRetries = !toolDef?.requiresConfirmation
+        ? Math.min(2, Math.max(0, step.maxRetries ?? 1))
+        : 0;
+
+      let attempt = 0;
+      let execOutcome = await toolRegistry.executeTool(step.toolName, step.toolArgs || {}, {
         approvedByUser: Boolean(options.approved)
       });
 
+      while (
+        !(execOutcome.result.ok && execOutcome.result.verified) &&
+        attempt < maxRetries &&
+        !options.signal?.aborted &&
+        execOutcome.result.error !== 'USER_CONFIRMATION_REQUIRED' &&
+        execOutcome.record.status !== 'DENIED'
+      ) {
+        attempt++;
+        step.retryCount = attempt;
+        this.notify();
+        execOutcome = await toolRegistry.executeTool(step.toolName, step.toolArgs || {}, {
+          approvedByUser: Boolean(options.approved)
+        });
+      }
+
+      const { result } = execOutcome;
       if (result.ok && result.verified) {
         step.status = 'COMPLETED';
-        step.verificationNote = `${result.summary} (${result.verificationDetail || 'Verified'})`;
+        const retrySuffix = attempt > 0 ? ` [Recovered after ${attempt} retry]` : '';
+        step.verificationNote = `${result.summary} (${result.verificationDetail || 'Verified'})${retrySuffix}`;
         completedCount++;
       } else {
         step.status = 'FAILED';
@@ -343,7 +470,6 @@ export class PlanningEngine {
     }
     this.notify();
 
-    // Register a record in automationEngine only if requested via task conversion; avoid silent duplicate execution
     return this.getPlans().find((p) => p.id === plan.id)!;
   }
 

@@ -12,10 +12,15 @@ const MAX_MEMORY_ENTRIES = 100;
 const SENSITIVE_PATTERNS: RegExp[] = [
   /\bsk-[A-Za-z0-9_-]{12,}/i,
   /\bsk-ant-[A-Za-z0-9_-]{12,}/i,
+  /\bgsk_[A-Za-z0-9]{16,}/,
   /\bAIza[0-9A-Za-z_-]{16,}/,
   /\bghp_[A-Za-z0-9]{16,}/,
+  /\bxox[baprs]-[A-Za-z0-9-]{10,}/,
+  /\bAKIA[0-9A-Z]{16}\b/,
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/,
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/i,
   /\bBearer\s+[A-Za-z0-9._-]{16,}/i,
-  /\b(?:password|passcode|secret key|private key|api[ _-]?key|access[ _-]?token)\s*(?:is|=|:)\s*\S+/i,
+  /\b(?:password|passcode|secret key|private key|api[ _-]?key|access[ _-]?token|groq[ _-]?key|gemini[ _-]?key)\s*(?:is|=|:)\s*\S+/i,
   /\b\d{3}-\d{2}-\d{4}\b/,
   /\b(?:\d[ -]*?){13,16}\b/
 ];
@@ -133,6 +138,28 @@ export class MemoryManager {
   public getMemories(category?: MemoryCategory): MemoryEntry[] {
     const list = category ? this.entries.filter((e) => e.category === category) : this.entries;
     return list.map((e) => ({ ...e }));
+  }
+
+  public searchMemories(query: string, category?: MemoryCategory): MemoryEntry[] {
+    const base = category ? this.entries.filter((e) => e.category === category) : this.entries;
+    const clean = query.trim().toLowerCase();
+    if (!clean) {
+      return base.map((e) => ({ ...e }));
+    }
+    const tokens = clean.split(/[^a-z0-9_]+/).filter((t) => t.length >= 2);
+    return base
+      .map((entry) => {
+        const hay = `${entry.category} ${entry.key} ${entry.value}`.toLowerCase();
+        let score = 0;
+        if (hay.includes(clean)) score += 6;
+        for (const tok of tokens) {
+          if (hay.includes(tok)) score += 2;
+        }
+        return { entry, score };
+      })
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score || b.entry.updatedAt - a.entry.updatedAt)
+      .map((item) => ({ ...item.entry }));
   }
 
   public getPendingCandidates(): MemoryConsentCandidate[] {

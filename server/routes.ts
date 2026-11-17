@@ -15,12 +15,23 @@ apiRouter.get('/health', (_req: Request, res: Response) => {
 });
 
 apiRouter.post('/llm/chat', async (req: Request, res: Response) => {
+  const abortController = new AbortController();
+  const onClose = () => {
+    if (!res.writableEnded) {
+      abortController.abort();
+    }
+  };
+  req.on('close', onClose);
+  res.on('close', onClose);
+
   try {
     const chatRequest: LLMChatRequest = req.body || {};
-    const result = await llmService.chat(chatRequest);
+    const result = await llmService.chat(chatRequest, abortController.signal);
+    if (res.writableEnded) return;
     const statusCode = result.ok ? 200 : result.error?.includes('Neither') ? 503 : 502;
     res.status(statusCode).json(result);
   } catch (err: unknown) {
+    if (res.writableEnded) return;
     const message = err instanceof Error ? err.message : String(err);
     res.status(500).json({
       ok: false,
@@ -32,6 +43,59 @@ apiRouter.post('/llm/chat', async (req: Request, res: Response) => {
       error: `Server internal LLM routing exception: ${message}`,
       durationMs: 0
     });
+  } finally {
+    req.off('close', onClose);
+    res.off('close', onClose);
+  }
+});
+
+apiRouter.post('/llm/chat/stream', async (req: Request, res: Response) => {
+  const abortController = new AbortController();
+  let clientClosed = false;
+  const onClose = () => {
+    if (!res.writableEnded) {
+      clientClosed = true;
+      abortController.abort();
+    }
+  };
+  req.on('close', onClose);
+  res.on('close', onClose);
+
+  res.status(200);
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  const writeEvent = (ev: unknown) => {
+    if (clientClosed || res.writableEnded) return;
+    try {
+      res.write(`data: ${JSON.stringify(ev)}\n\n`);
+    } catch {
+      clientClosed = true;
+      abortController.abort();
+    }
+  };
+
+  try {
+    const chatRequest: LLMChatRequest = req.body || {};
+    await llmService.chatStream(chatRequest, writeEvent, abortController.signal);
+  } catch (err: unknown) {
+    if (!clientClosed && !res.writableEnded) {
+      const message = err instanceof Error ? err.message : String(err);
+      writeEvent({
+        type: 'error',
+        provider: 'NONE',
+        mode: req.body?.mode || 'AUTO',
+        error: `Server internal LLM streaming exception: ${message}`
+      });
+    }
+  } finally {
+    req.off('close', onClose);
+    res.off('close', onClose);
+    if (!res.writableEnded) {
+      res.end();
+    }
   }
 });
 
@@ -92,6 +156,31 @@ apiRouter.post('/desktop/paths/approve', (req: Request, res: Response) => {
 
 apiRouter.get('/desktop/paths', (_req: Request, res: Response) => {
   res.json({ ok: true, approvedPaths: desktopAutomationService.getApprovedPaths() });
+});
+
+apiRouter.post('/desktop/paths/revoke', (req: Request, res: Response) => {
+  const { path: rawPath } = req.body || {};
+  if (!rawPath || typeof rawPath !== 'string') {
+    res.status(400).json({ ok: false, error: 'MISSING_PATH' });
+    return;
+  }
+  const revoked = desktopAutomationService.revokeApprovedPath(rawPath);
+  res.json(revoked);
+});
+
+apiRouter.get('/desktop/permissions', (_req: Request, res: Response) => {
+  res.json({ ok: true, config: desktopAutomationService.getPermissionPolicy() });
+});
+
+apiRouter.post('/desktop/permissions', (req: Request, res: Response) => {
+  const updated = desktopAutomationService.updatePermissionPolicy(req.body);
+  res.json({ ok: true, config: updated });
+});
+
+apiRouter.post('/desktop/permissions/reset', (req: Request, res: Response) => {
+  const clearSetupCompleted = Boolean(req.body?.clearSetupCompleted);
+  const reset = desktopAutomationService.resetPermissionPolicy(clearSetupCompleted);
+  res.json({ ok: true, config: reset });
 });
 
 apiRouter.get('/desktop/audit', (_req: Request, res: Response) => {

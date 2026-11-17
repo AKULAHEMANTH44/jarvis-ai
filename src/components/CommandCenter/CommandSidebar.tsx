@@ -30,6 +30,7 @@ export type CommandCenterNavId =
   | 'CONVERSATIONS'
   | 'KNOWLEDGE'
   | 'TOOLS'
+  | 'PERMISSIONS'
   | 'WORKFLOWS'
   | 'VOICE'
   | 'FOCUS';
@@ -57,6 +58,7 @@ const NAV_ITEMS: { id: CommandCenterNavId; label: string; icon: React.ReactNode;
   { id: 'CONVERSATIONS', label: 'Conversations', icon: <MessageSquare className="w-4 h-4" /> },
   { id: 'KNOWLEDGE', label: 'Knowledge Base', icon: <BookOpen className="w-4 h-4" /> },
   { id: 'TOOLS', label: 'Tools & Skills', icon: <Wrench className="w-4 h-4" /> },
+  { id: 'PERMISSIONS', label: 'Permissions', icon: <Shield className="w-4 h-4" /> },
   { id: 'WORKFLOWS', label: 'Workflows', icon: <Workflow className="w-4 h-4" /> }
 ];
 
@@ -111,7 +113,7 @@ export const CommandSidebar: React.FC<CommandSidebarProps> = ({
                 <span className={isActive ? 'text-cyan-400' : 'text-cyan-400/70'}>{item.icon}</span>
                 <span className="truncate">{item.label}</span>
               </div>
-              {item.id === 'TOOLS' && pendingPermissionCount > 0 && (
+              {item.id === 'PERMISSIONS' && pendingPermissionCount > 0 && (
                 <span className="px-1.5 py-0.5 rounded bg-amber-500/25 border border-amber-400/50 text-amber-200 text-[9px] font-mono tabular-nums">
                   {pendingPermissionCount}
                 </span>

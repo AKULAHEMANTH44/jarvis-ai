@@ -1,6 +1,7 @@
 import { DesktopPermissionRequest, SelectedFolderMetadata, SystemStatusTelemetry } from '../types/assistant';
 import { audioService } from './soundFx';
 import { permissionManager } from './permissionManager';
+import { permissionPolicy } from './permissionPolicy';
 
 export interface DesktopExecutionResult {
   ok: boolean;
@@ -48,6 +49,7 @@ export class DesktopBridgeService {
   private onPermissionPrompt?: (req: DesktopPermissionRequest) => void;
   private selectedFolder: SelectedFolderMetadata | null = null;
   private approvedPaths: Set<string> = new Set();
+  private revokedPaths: Set<string> = new Set();
   private requireApprovedPath = false;
   private actionAuditLog: DesktopActionAuditEntry[] = [];
 
@@ -73,6 +75,7 @@ export class DesktopBridgeService {
       selectedAt: Date.now()
     };
     this.selectedFolder = meta;
+    this.revokedPaths.delete(cleanPath);
     this.approvedPaths.add(cleanPath);
     return { ...meta };
   }
@@ -92,6 +95,7 @@ export class DesktopBridgeService {
   public registerApprovedPath(rawPath: string): void {
     const clean = rawPath.trim();
     if (clean) {
+      this.revokedPaths.delete(clean);
       this.approvedPaths.add(clean);
     }
   }
@@ -102,17 +106,46 @@ export class DesktopBridgeService {
 
   public clearApprovedPaths(): void {
     this.approvedPaths.clear();
+    this.revokedPaths.clear();
     this.selectedFolder = null;
     this.requireApprovedPath = false;
   }
 
+  public async revokeFolderPath(folderPath: string): Promise<void> {
+    const clean = folderPath.trim();
+    if (!clean) return;
+    this.approvedPaths.delete(clean);
+    this.revokedPaths.add(clean);
+    if (this.selectedFolder && this.selectedFolder.path === clean) {
+      this.selectedFolder = null;
+    }
+    await permissionPolicy.revokeApprovedFolder(clean);
+    if (!this.isElectron() && typeof fetch === 'function') {
+      try {
+        await fetch('/api/desktop/paths/revoke', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: clean })
+        });
+      } catch {
+        // Offline / unit test safe
+      }
+    }
+  }
+
   public isPathApproved(rawPath: string): boolean {
-    if (!this.requireApprovedPath && this.approvedPaths.size === 0) return true;
     const clean = rawPath.trim();
+    if (this.revokedPaths.has(clean)) return false;
+    if (!this.requireApprovedPath && this.approvedPaths.size === 0 && permissionPolicy.getApprovedFolders().length === 0) {
+      return true;
+    }
     for (const root of this.approvedPaths) {
       if (clean === root || clean.startsWith(`${root}/`) || clean.startsWith(`${root}\\`)) {
         return true;
       }
+    }
+    if (permissionPolicy.isPathWithinApprovedFolders(clean)) {
+      return true;
     }
     return false;
   }

@@ -22,7 +22,154 @@ const BLOCKED_BINARIES = new Set([
   'reg', 'reg.exe', 'regedit', 'regedit.exe', 'rundll32', 'rundll32.exe'
 ]);
 
-const DANGEROUS_ARG_PATTERN = /[;&|`$<>\r\n\0]|^(?:\/c|-c|-e|--eval|-enc|-encodedcommand|-command)$/i;
+const DANGEROUS_ARG_PATTERN = /[;&|`$<>\r\n\0]|^(?:\/c|-c|-e|--eval|-enc|-encodedcommand|-command)(?:$|[=\s:])/i;
+
+const CAPABILITY_IDS = [
+  'APPLICATION_ACCESS',
+  'BROWSER_ACCESS',
+  'FOLDER_ACCESS',
+  'MUSIC_ACCESS',
+  'CAMERA_ACCESS',
+  'MICROPHONE_ACCESS'
+];
+
+function createDefaultPermissionConfig() {
+  return {
+    version: 1,
+    setupCompleted: false,
+    setupCompletedAt: null,
+    capabilities: {
+      APPLICATION_ACCESS: { id: 'APPLICATION_ACCESS', decision: 'NOT_REQUESTED', updatedAt: null },
+      BROWSER_ACCESS: { id: 'BROWSER_ACCESS', decision: 'NOT_REQUESTED', updatedAt: null },
+      FOLDER_ACCESS: { id: 'FOLDER_ACCESS', decision: 'NOT_REQUESTED', updatedAt: null },
+      MUSIC_ACCESS: { id: 'MUSIC_ACCESS', decision: 'NOT_REQUESTED', updatedAt: null },
+      CAMERA_ACCESS: { id: 'CAMERA_ACCESS', decision: 'NOT_REQUESTED', updatedAt: null },
+      MICROPHONE_ACCESS: { id: 'MICROPHONE_ACCESS', decision: 'NOT_REQUESTED', updatedAt: null }
+    },
+    allowedAppIds: {
+      VS_CODE: true,
+      NOTEPAD: true,
+      CALCULATOR: true,
+      EXPLORER: true,
+      BROWSER: true,
+      CHROME: true,
+      SPOTIFY: true
+    },
+    approvedFolders: []
+  };
+}
+
+let permissionConfig = createDefaultPermissionConfig();
+
+function getPermissionStorePath() {
+  try {
+    return path.join(app.getPath('userData'), 'jarvis-permissions.json');
+  } catch {
+    return null;
+  }
+}
+
+function sanitizePermissionConfig(raw) {
+  const def = createDefaultPermissionConfig();
+  if (!raw || typeof raw !== 'object') return def;
+
+  const capabilities = { ...def.capabilities };
+  if (raw.capabilities && typeof raw.capabilities === 'object') {
+    for (const id of CAPABILITY_IDS) {
+      const entry = raw.capabilities[id];
+      if (
+        entry &&
+        typeof entry === 'object' &&
+        (entry.decision === 'NOT_REQUESTED' || entry.decision === 'GRANTED' || entry.decision === 'DENIED')
+      ) {
+        capabilities[id] = {
+          id,
+          decision: entry.decision,
+          updatedAt:
+            typeof entry.updatedAt === 'number' && Number.isFinite(entry.updatedAt) ? entry.updatedAt : null
+        };
+      }
+    }
+  }
+
+  const allowedAppIds = { ...def.allowedAppIds };
+  if (raw.allowedAppIds && typeof raw.allowedAppIds === 'object') {
+    for (const [k, v] of Object.entries(raw.allowedAppIds)) {
+      if (typeof v === 'boolean') {
+        allowedAppIds[String(k).toUpperCase().replace(/[\s-]+/g, '_')] = v;
+      }
+    }
+  }
+
+  const approvedFolders = [];
+  const seen = new Set();
+  if (Array.isArray(raw.approvedFolders)) {
+    for (const item of raw.approvedFolders) {
+      if (!item || typeof item !== 'object') continue;
+      const cleanPath = typeof item.path === 'string' ? item.path.trim() : '';
+      if (!cleanPath || /(^|[\\/])\.\.([\\/]|$)|%2e%2e/i.test(cleanPath) || cleanPath.includes('\0')) {
+        continue;
+      }
+      const resolved = path.resolve(cleanPath);
+      if (seen.has(resolved)) continue;
+      seen.add(resolved);
+      approvedFolders.push({
+        path: resolved,
+        name: typeof item.name === 'string' && item.name.trim() ? item.name.trim() : path.basename(resolved) || resolved,
+        grantedAt:
+          typeof item.grantedAt === 'number' && Number.isFinite(item.grantedAt)
+            ? item.grantedAt
+            : Date.now()
+      });
+    }
+  }
+
+  return {
+    version: 1,
+    setupCompleted: Boolean(raw.setupCompleted),
+    setupCompletedAt:
+      typeof raw.setupCompletedAt === 'number' && Number.isFinite(raw.setupCompletedAt)
+        ? raw.setupCompletedAt
+        : null,
+    capabilities,
+    allowedAppIds,
+    approvedFolders
+  };
+}
+
+function syncApprovedPathsFromPolicy() {
+  for (const folder of permissionConfig.approvedFolders) {
+    approvedPaths.add(path.resolve(folder.path));
+  }
+}
+
+function loadPermissionConfigFromDisk() {
+  const storePath = getPermissionStorePath();
+  if (!storePath) return;
+  try {
+    if (fs.existsSync(storePath)) {
+      const raw = JSON.parse(fs.readFileSync(storePath, 'utf8'));
+      permissionConfig = sanitizePermissionConfig(raw);
+      syncApprovedPathsFromPolicy();
+    }
+  } catch {
+    permissionConfig = createDefaultPermissionConfig();
+  }
+}
+
+function savePermissionConfigToDisk() {
+  const storePath = getPermissionStorePath();
+  if (!storePath) return;
+  try {
+    fs.mkdirSync(path.dirname(storePath), { recursive: true });
+    fs.writeFileSync(storePath, JSON.stringify(permissionConfig, null, 2), {
+      encoding: 'utf8',
+      mode: 0o600
+    });
+  } catch {
+    // Non-fatal fallback
+  }
+}
 
 function isTrustedSender(event) {
   try {
@@ -97,6 +244,27 @@ async function handleLaunchApplication(applicationId, args = []) {
   }
 
   const norm = String(applicationId).trim().toUpperCase().replace(/[\s-]+/g, '_');
+  if (permissionConfig.capabilities?.APPLICATION_ACCESS?.decision === 'DENIED') {
+    return {
+      ok: false,
+      action: 'APPLICATION_LAUNCH',
+      target: norm,
+      verified: false,
+      error: 'PERMISSION_DENIED_BY_POLICY',
+      summary: 'Application Access is disabled in JARVIS persistent permissions.'
+    };
+  }
+  if (permissionConfig.allowedAppIds && permissionConfig.allowedAppIds[norm] === false) {
+    return {
+      ok: false,
+      action: 'APPLICATION_LAUNCH',
+      target: norm,
+      verified: false,
+      error: 'PERMISSION_DENIED_BY_POLICY',
+      summary: `Application "${norm}" is disabled in JARVIS Application Access settings.`
+    };
+  }
+
   const entry = ALLOWED_APPLICATIONS[norm];
   if (!entry) {
     return {
@@ -236,6 +404,16 @@ ipcMain.handle('jarvis:openFile', async (event, { filePath }) => {
 
 ipcMain.handle('jarvis:openFolder', async (event, { folderPath }) => {
   if (!isTrustedSender(event)) return { ok: false, verified: false, error: 'UNTRUSTED_IPC_SENDER', summary: 'Untrusted IPC sender.' };
+  if (permissionConfig.capabilities?.FOLDER_ACCESS?.decision === 'DENIED') {
+    return {
+      ok: false,
+      action: 'FOLDER_ACCESS',
+      target: String(folderPath || ''),
+      verified: false,
+      error: 'PERMISSION_DENIED_BY_POLICY',
+      summary: 'Folder Access is disabled in JARVIS persistent permissions.'
+    };
+  }
   const val = validatePath(folderPath);
   if (!val.valid) return { ok: false, verified: false, error: val.error, summary: val.error };
   if (!fs.existsSync(val.resolved)) return { ok: false, verified: false, error: 'FOLDER_NOT_FOUND', summary: 'Folder does not exist on disk.' };
@@ -254,6 +432,16 @@ ipcMain.handle('jarvis:openFolder', async (event, { folderPath }) => {
 
 ipcMain.handle('jarvis:openBrowser', async (event, { url }) => {
   if (!isTrustedSender(event)) return { ok: false, verified: false, error: 'UNTRUSTED_IPC_SENDER', summary: 'Untrusted IPC sender.' };
+  if (permissionConfig.capabilities?.BROWSER_ACCESS?.decision === 'DENIED') {
+    return {
+      ok: false,
+      action: 'BROWSER_ACCESS',
+      target: String(url || ''),
+      verified: false,
+      error: 'PERMISSION_DENIED_BY_POLICY',
+      summary: 'Browser Access is disabled in JARVIS persistent permissions.'
+    };
+  }
   const val = validateExternalUrl(url || 'https://www.google.com');
   if (!val.valid) return { ok: false, verified: false, error: val.error, summary: val.error };
 
@@ -267,6 +455,16 @@ ipcMain.handle('jarvis:openBrowser', async (event, { url }) => {
 
 ipcMain.handle('jarvis:searchWeb', async (event, { query, engine }) => {
   if (!isTrustedSender(event)) return { ok: false, verified: false, error: 'UNTRUSTED_IPC_SENDER', summary: 'Untrusted IPC sender.' };
+  if (permissionConfig.capabilities?.BROWSER_ACCESS?.decision === 'DENIED') {
+    return {
+      ok: false,
+      action: 'WEB_SEARCH',
+      target: String(query || ''),
+      verified: false,
+      error: 'PERMISSION_DENIED_BY_POLICY',
+      summary: 'Browser & Web Search Access is disabled in JARVIS persistent permissions.'
+    };
+  }
   const clean = String(query || '').trim();
   if (!clean) return { ok: false, verified: false, error: 'EMPTY_QUERY', summary: 'Empty search query.' };
   const encoded = encodeURIComponent(clean);
@@ -287,6 +485,16 @@ ipcMain.handle('jarvis:searchWeb', async (event, { query, engine }) => {
 
 ipcMain.handle('jarvis:launchMusic', async (event, { musicTarget }) => {
   if (!isTrustedSender(event)) return { ok: false, verified: false, error: 'UNTRUSTED_IPC_SENDER', summary: 'Untrusted IPC sender.' };
+  if (permissionConfig.capabilities?.MUSIC_ACCESS?.decision === 'DENIED') {
+    return {
+      ok: false,
+      action: 'MUSIC_CONTROL',
+      target: String(musicTarget || 'SPOTIFY'),
+      verified: false,
+      error: 'PERMISSION_DENIED_BY_POLICY',
+      summary: 'Music Access is disabled in JARVIS persistent permissions.'
+    };
+  }
   const target = String(musicTarget || 'SPOTIFY').trim().toUpperCase().replace(/[\s-]+/g, '_');
   if (target !== 'SPOTIFY') {
     return {
@@ -321,6 +529,47 @@ ipcMain.handle('jarvis:findFilesInFolder', async (event, { folderPath, filterPat
   }
 });
 
+ipcMain.handle('jarvis:getPermissionConfig', async (event) => {
+  if (!isTrustedSender(event)) return { ok: false, error: 'UNTRUSTED_IPC_SENDER' };
+  return { ok: true, config: permissionConfig };
+});
+
+ipcMain.handle('jarvis:savePermissionConfig', async (event, rawConfig) => {
+  if (!isTrustedSender(event)) return { ok: false, error: 'UNTRUSTED_IPC_SENDER' };
+  permissionConfig = sanitizePermissionConfig(rawConfig);
+  approvedPaths.clear();
+  syncApprovedPathsFromPolicy();
+  savePermissionConfigToDisk();
+  return { ok: true, config: permissionConfig };
+});
+
+ipcMain.handle('jarvis:resetPermissionConfig', async (event, payload) => {
+  if (!isTrustedSender(event)) return { ok: false, error: 'UNTRUSTED_IPC_SENDER' };
+  const clearSetup = Boolean(payload?.clearSetupCompleted);
+  permissionConfig = createDefaultPermissionConfig();
+  if (!clearSetup) {
+    permissionConfig.setupCompleted = true;
+    permissionConfig.setupCompletedAt = Date.now();
+  }
+  approvedPaths.clear();
+  savePermissionConfigToDisk();
+  return { ok: true, config: permissionConfig };
+});
+
+ipcMain.handle('jarvis:revokeFolderPath', async (event, payload) => {
+  if (!isTrustedSender(event)) return { ok: false, error: 'UNTRUSTED_IPC_SENDER' };
+  const rawPath = typeof payload?.folderPath === 'string' ? payload.folderPath.trim() : '';
+  if (!rawPath) return { ok: false, error: 'MISSING_PATH' };
+  const resolved = path.resolve(rawPath);
+  approvedPaths.delete(resolved);
+  approvedPaths.delete(rawPath);
+  permissionConfig.approvedFolders = permissionConfig.approvedFolders.filter(
+    (f) => path.resolve(f.path) !== resolved && f.path !== rawPath
+  );
+  savePermissionConfigToDisk();
+  return { ok: true, config: permissionConfig };
+});
+
 ipcMain.handle('jarvis:getSystemStatus', async (event) => {
   if (!isTrustedSender(event)) return { ok: false, error: 'UNTRUSTED_IPC_SENDER' };
   return {
@@ -329,11 +578,15 @@ ipcMain.handle('jarvis:getSystemStatus', async (event) => {
     arch: process.arch,
     electronVersion: process.versions.electron,
     approvedApps: Object.keys(ALLOWED_APPLICATIONS),
-    approvedPathCount: approvedPaths.size
+    approvedPathCount: approvedPaths.size,
+    setupCompleted: permissionConfig.setupCompleted
   };
 });
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  loadPermissionConfigFromDisk();
+  createWindow();
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

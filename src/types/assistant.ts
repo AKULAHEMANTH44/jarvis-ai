@@ -126,6 +126,9 @@ export type IntentCategory =
   | 'OBJECT_INSPECTION'
   | 'MULTI_STEP_PLAN'
   | 'CONVERSATIONAL_QA'
+  | 'RESEARCH_REQUEST'
+  | 'CODING_ASSISTANCE'
+  | 'ANALYSIS_REQUEST'
   | 'CALCULATION'
   | 'DIAGNOSTICS'
   | 'DOCUMENTATION'
@@ -137,6 +140,38 @@ export type IntentCategory =
   | 'WEB_SEARCH'
   | 'MUSIC_ACTION'
   | 'CLARIFICATION_NEEDED';
+
+export type AttachmentKind = 'IMAGE' | 'PDF' | 'TEXT';
+
+export interface PendingAttachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  kind: AttachmentKind;
+  sizeBytes: number;
+  sizeFormatted: string;
+  base64Data?: string;
+  textContent?: string;
+  previewUrl?: string;
+}
+
+export type AgentRole = 'RESEARCH' | 'CODING' | 'ANALYSIS' | 'WORKFLOW';
+export type AgentExecutionStatus = 'IDLE' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
+
+export interface AgentRunSnapshot {
+  id: string;
+  role: AgentRole;
+  title: string;
+  objective: string;
+  status: AgentExecutionStatus;
+  progressPercent: number;
+  currentStep: string;
+  startedAt: number;
+  completedAt?: number;
+  findings?: string[];
+  uncertaintyNotes?: string[];
+  error?: string;
+}
 
 export interface IntentClassification {
   category: IntentCategory;
@@ -274,6 +309,10 @@ export interface PlanStep {
   toolArgs?: Record<string, unknown>;
   requiresConfirmation: boolean;
   status: 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'SKIPPED';
+  dependsOn?: string[];
+  maxRetries?: number;
+  retryCount?: number;
+  agentRole?: AgentRole;
   verificationNote?: string;
   error?: string;
 }
@@ -369,6 +408,49 @@ export type PermissionStatus =
 
 export type PermissionRiskLevel = 'LOW' | 'MEDIUM' | 'HIGH';
 
+export type PermissionSecurityLevel =
+  | 'LEVEL_1_PREAPPROVED'
+  | 'LEVEL_2_SESSION_CONFIRMATION'
+  | 'LEVEL_3_ALWAYS_CONFIRM';
+
+export type PermissionCapabilityId =
+  | 'APPLICATION_ACCESS'
+  | 'BROWSER_ACCESS'
+  | 'FOLDER_ACCESS'
+  | 'MUSIC_ACCESS'
+  | 'CAMERA_ACCESS'
+  | 'MICROPHONE_ACCESS';
+
+export type PermissionGrantDecision = 'NOT_REQUESTED' | 'GRANTED' | 'DENIED';
+
+export type PermissionDisplayState =
+  | 'GRANTED_BY_USER'
+  | 'DENIED_BY_USER'
+  | 'NOT_YET_REQUESTED'
+  | 'TEMPORARILY_UNAVAILABLE'
+  | 'BLOCKED_BY_OS_OR_BROWSER';
+
+export interface ApprovedFolderEntry {
+  path: string;
+  name: string;
+  grantedAt: number;
+}
+
+export interface PersistentCapabilityRecord {
+  id: PermissionCapabilityId;
+  decision: PermissionGrantDecision;
+  updatedAt: number | null;
+}
+
+export interface PersistentPermissionConfig {
+  version: number;
+  setupCompleted: boolean;
+  setupCompletedAt: number | null;
+  capabilities: Record<PermissionCapabilityId, PersistentCapabilityRecord>;
+  allowedAppIds: Record<string, boolean>;
+  approvedFolders: ApprovedFolderEntry[];
+}
+
 export interface PermissionRequest {
   id: string;
   category: PermissionCategory;
@@ -377,6 +459,8 @@ export interface PermissionRequest {
   targetFingerprint: string;
   reason: string;
   riskLevel: PermissionRiskLevel;
+  securityLevel?: PermissionSecurityLevel;
+  capabilityId?: PermissionCapabilityId;
   requestedScope: string;
   createdAt: number;
   expiresAt: number;
@@ -392,6 +476,8 @@ export interface PermissionRequest {
 export type PermissionAuditDecision =
   | 'REQUESTED'
   | 'APPROVED_ONCE'
+  | 'POLICY_PREAPPROVED'
+  | 'POLICY_BLOCKED'
   | 'DENIED'
   | 'CANCELLED'
   | 'EXPIRED'
@@ -545,6 +631,10 @@ export interface IntelligenceRequestResult {
   isExternalModel: boolean;
   toolRecords: ToolActivityRecord[];
   plan?: ExecutionPlan;
+  agentRun?: AgentRunSnapshot;
+  attachments?: Pick<PendingAttachment, 'id' | 'name' | 'kind' | 'mimeType' | 'sizeFormatted'>[];
+  streamed?: boolean;
+  fallbackUsed?: boolean;
   pendingApproval?: PendingToolApproval;
   pendingPermission?: PermissionRequest;
   interactivePrompt?: PendingInteractivePrompt;

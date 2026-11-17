@@ -1,10 +1,13 @@
 import {
   FileInspectionResult,
+  PendingAttachment,
   PermissionRequest,
   SelectedFileMetadata,
   SupportedFileKind
 } from '../types/assistant';
 import { PermissionManager, permissionManager as defaultPermissionManager } from './permissionManager';
+
+const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 
 const BLOCKED_EXTENSIONS = new Set([
   'exe',
@@ -210,6 +213,20 @@ function extractReadablePdfText(buffer: ArrayBuffer): string {
   } catch {
     return '';
   }
+}
+
+export function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  if (typeof Buffer !== 'undefined') {
+    return Buffer.from(bytes).toString('base64');
+  }
+  const chunkSize = 0x8000;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const slice = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...slice);
+  }
+  return btoa(binary);
 }
 
 export interface FileAccessHostCallbacks {
@@ -608,6 +625,151 @@ export class FileAccessService {
     const sentences = clean.split(/(?<=[.!?])\s+/).filter(Boolean);
     const preview = sentences.slice(0, 3).join(' ');
     return preview.length > 360 ? `${preview.slice(0, 357)}...` : preview;
+  }
+
+  public async prepareMultimodalAttachment(file: File): Promise<{
+    ok: boolean;
+    attachment?: PendingAttachment;
+    error?: string;
+  }> {
+    const meta = classifyFile(file);
+    if (meta.kind === 'BLOCKED') {
+      return {
+        ok: false,
+        error: meta.reasonIfUnsupported || `Executable/script format "${file.name}" is blocked.`
+      };
+    }
+
+    if (file.size > MAX_ATTACHMENT_BYTES) {
+      return {
+        ok: false,
+        error: `Attachment "${file.name}" (${meta.sizeFormatted}) exceeds the 8 MB multimodal upload limit.`
+      };
+    }
+
+    const id = `att-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`;
+
+    if (meta.kind === 'TEXT') {
+      try {
+        const text = typeof file.text === 'function' ? await file.text() : new TextDecoder().decode(await file.arrayBuffer());
+        return {
+          ok: true,
+          attachment: {
+            id,
+            name: file.name,
+            mimeType: meta.mimeType === 'application/octet-stream' ? 'text/plain' : meta.mimeType,
+            kind: 'TEXT',
+            sizeBytes: file.size,
+            sizeFormatted: meta.sizeFormatted,
+            textContent: text.slice(0, 24000)
+          }
+        };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : `Failed reading text attachment "${file.name}".`
+        };
+      }
+    }
+
+    if (meta.kind === 'IMAGE') {
+      // Treat SVG strictly as sanitized plain-text source so scripts never execute
+      if (meta.extension === 'svg') {
+        try {
+          const svgText = typeof file.text === 'function' ? await file.text() : new TextDecoder().decode(await file.arrayBuffer());
+          return {
+            ok: true,
+            attachment: {
+              id,
+              name: file.name,
+              mimeType: 'text/plain',
+              kind: 'TEXT',
+              sizeBytes: file.size,
+              sizeFormatted: meta.sizeFormatted,
+              textContent: svgText.slice(0, 24000)
+            }
+          };
+        } catch (err) {
+          return {
+            ok: false,
+            error: err instanceof Error ? err.message : `Failed reading SVG "${file.name}".`
+          };
+        }
+      }
+
+      const validImageMimes: Record<string, string> = {
+        png: 'image/png',
+        jpg: 'image/jpeg',
+        jpeg: 'image/jpeg',
+        webp: 'image/webp',
+        gif: 'image/gif'
+      };
+      const resolvedMime = validImageMimes[meta.extension] || (file.type && file.type.startsWith('image/') ? file.type : 'image/png');
+      try {
+        const buffer = await file.arrayBuffer();
+        const base64Data = arrayBufferToBase64(buffer);
+        let previewUrl: string | undefined;
+        try {
+          if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function' && typeof Blob !== 'undefined' && file instanceof Blob) {
+            previewUrl = URL.createObjectURL(file);
+            if (previewUrl) this.createdObjectUrls.push(previewUrl);
+          }
+        } catch {
+          previewUrl = undefined;
+        }
+        return {
+          ok: true,
+          attachment: {
+            id,
+            name: file.name,
+            mimeType: resolvedMime,
+            kind: 'IMAGE',
+            sizeBytes: file.size,
+            sizeFormatted: meta.sizeFormatted,
+            base64Data,
+            previewUrl
+          }
+        };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : `Failed reading image "${file.name}".`
+        };
+      }
+    }
+
+    if (meta.kind === 'DOCUMENT' && meta.extension === 'pdf') {
+      try {
+        const buffer = await file.arrayBuffer();
+        const base64Data = arrayBufferToBase64(buffer);
+        const extractedText = extractReadablePdfText(buffer);
+        return {
+          ok: true,
+          attachment: {
+            id,
+            name: file.name,
+            mimeType: 'application/pdf',
+            kind: 'PDF',
+            sizeBytes: file.size,
+            sizeFormatted: meta.sizeFormatted,
+            base64Data,
+            textContent: extractedText ? extractedText.slice(0, 24000) : undefined
+          }
+        };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : `Failed reading PDF "${file.name}".`
+        };
+      }
+    }
+
+    return {
+      ok: false,
+      error:
+        meta.reasonIfUnsupported ||
+        `File "${file.name}" (.${meta.extension || 'unknown'}) is not supported for AI multimodal analysis. Supported: images (PNG/JPG/WebP/GIF/SVG), PDF, and text/code files.`
+    };
   }
 
   public disposeAllPreviewUrls() {

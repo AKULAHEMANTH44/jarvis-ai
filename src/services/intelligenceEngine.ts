@@ -1,6 +1,7 @@
 import {
   AIProviderConfig,
   AISuggestion,
+  AgentRunSnapshot,
   BrowserNavigationResult,
   ExecutionPlan,
   FileInspectionResult,
@@ -9,9 +10,13 @@ import {
   IntentClassification,
   MusicPlaybackState,
   MusicSourceType,
+  PendingAttachment,
   PendingInteractivePrompt,
   PendingToolApproval,
+  PermissionCapabilityId,
+  PermissionCategory,
   PermissionRequest,
+  PermissionSecurityLevel,
   SelectedFileMetadata,
   SelectedFolderMetadata,
   ToolActivityRecord,
@@ -25,11 +30,13 @@ import { planningEngine } from './planningEngine';
 import { suggestionEngine } from './suggestionEngine';
 import { toolRegistry } from './toolRegistry';
 import { permissionManager } from './permissionManager';
+import { permissionPolicy } from './permissionPolicy';
 import { fileAccessService } from './fileAccessService';
 import { browserActionService } from './browserActionService';
 import { webSearchService, extractSearchIntent } from './webSearchService';
 import { musicService, MUSIC_SOURCE_CHOICES } from './musicService';
 import { desktopBridge, DesktopExecutionResult } from './desktopBridge';
+import { agentOrchestrator } from './agentOrchestrator';
 
 export interface IntelligenceStateSnapshot {
   status: IntelligenceStatus;
@@ -49,6 +56,8 @@ export interface IntelligenceStateSnapshot {
   musicState: MusicPlaybackState;
   latestPlan: ExecutionPlan | null;
   activeSuggestions: AISuggestion[];
+  streamingText: string;
+  activeAgentRun: AgentRunSnapshot | null;
 }
 
 type PermissionExecutor = (
@@ -121,10 +130,16 @@ export class IntelligenceEngine {
   private lastOpenedFile: FileInspectionResult | null = null;
   private lastBrowserAction: BrowserNavigationResult | null = null;
   private lastSearchResult: WebSearchResponse | null = null;
+  private streamingText: string = '';
   private listeners: Set<(snapshot: IntelligenceStateSnapshot) => void> = new Set();
 
   constructor() {
     musicService.subscribe(() => {
+      if (this.listeners.size > 0) {
+        this.emit();
+      }
+    });
+    agentOrchestrator.subscribe(() => {
       if (this.listeners.size > 0) {
         this.emit();
       }
@@ -183,7 +198,9 @@ export class IntelligenceEngine {
       lastSearchResult: this.lastSearchResult ? { ...this.lastSearchResult } : null,
       musicState: musicService.getState(),
       latestPlan: planningEngine.getLatestPlan(),
-      activeSuggestions: suggestionEngine.getActiveSuggestions()
+      activeSuggestions: suggestionEngine.getActiveSuggestions(),
+      streamingText: this.streamingText,
+      activeAgentRun: agentOrchestrator.getSnapshot().activeRun
     };
   }
 
@@ -219,6 +236,9 @@ export class IntelligenceEngine {
       this.activeRequestFingerprint = null;
       cancelled = true;
     }
+    if (agentOrchestrator.cancelActiveRun()) {
+      cancelled = true;
+    }
     if (webSearchService.cancelActiveSearch()) {
       cancelled = true;
     }
@@ -231,6 +251,7 @@ export class IntelligenceEngine {
       cancelled = true;
     }
     if (cancelled) {
+      this.streamingText = '';
       this.setStatus('STANDBY', 'Active request cancelled by user.', 'Action cancelled.');
     }
     return cancelled;
@@ -244,11 +265,13 @@ export class IntelligenceEngine {
   public classifyIntent(
     rawInput: string,
     snapshot: WorkspaceContextSnapshot,
-    followUp: FollowUpResolution
+    followUp: FollowUpResolution,
+    attachments: PendingAttachment[] = []
   ): IntentClassification {
     const text = rawInput.trim();
     const lower = text.toLowerCase();
     const missingInformation: string[] = [];
+    const hasAttachments = attachments.length > 0;
 
     // 1. Calculation detection
     const mathCandidate = this.extractMathExpression(text);
@@ -303,7 +326,7 @@ export class IntelligenceEngine {
 
     // 4. Web Search Intent (check BEFORE internal documentation so "Find documentation for Three.js" searches the web!)
     if (
-      /\b(search\s+(?:the\s+web|online|google|duckduckgo|wikipedia)?\s*(?:for|about)?|find\s+information\s+(?:about|on)|find\s+(?:info|details)\s+(?:about|on)|find\s+documentation\s+for|look\s+up|research\b|web\s+search)\b/i.test(
+      /\b(search\s+(?:the\s+web|online|google|duckduckgo|wikipedia)?\s*(?:for|about)?|find\s+information\s+(?:about|on)|find\s+(?:info|details)\s+(?:about|on)|find\s+documentation\s+for|look\s+up|web\s+search)\b/i.test(
         lower
       )
     ) {
@@ -312,6 +335,21 @@ export class IntelligenceEngine {
         confidence: 0.91,
         summary: 'Permission-gated external web search query.',
         requiresTool: true,
+        requiresPlan: false,
+        missingInformation,
+        resolvedReferences: followUp.resolvedReferences
+      };
+    }
+
+    // 4a. Controlled Research Synthesis Agent (distinct from raw web search)
+    if (
+      /\b(research|investigate|deep\s+dive(?:\s+into)?|summarize\s+research)\b/i.test(lower)
+    ) {
+      return {
+        category: 'RESEARCH_REQUEST',
+        confidence: 0.9,
+        summary: 'Controlled Research & Synthesis Agent task.',
+        requiresTool: false,
         requiresPlan: false,
         missingInformation,
         resolvedReferences: followUp.resolvedReferences
@@ -335,10 +373,12 @@ export class IntelligenceEngine {
       };
     }
 
-    // 4c. Folder Access Intent (when an explicit folder path exists or user references a selected folder)
+    // 4c. Folder Access Intent (when an explicit path exists, selected folder exists, or saved approved folders exist)
     if (
       /\b(open|show|browse|reveal)\b.*\bfolder\b/i.test(lower) &&
-      (this.extractLocalFilesystemPath(text) !== null || desktopBridge.getSelectedFolder() !== null)
+      (this.extractLocalFilesystemPath(text) !== null ||
+        desktopBridge.getSelectedFolder() !== null ||
+        permissionPolicy.getApprovedFolders().length > 0)
     ) {
       return {
         category: 'FOLDER_ACTION',
@@ -441,17 +481,60 @@ export class IntelligenceEngine {
       };
     }
 
-    // 10. Workspace or Model inspection
+    // 10. Workspace or Model inspection (preserve Phase 4 exact matching)
     if (
-      /\b(inspect|explain|describe|analyze|how many vertices|what model|imported model|components|current workspace|what is loaded)\b/i.test(
+      /\b(inspect|how many vertices|what model|imported model|components|current workspace|what is loaded)\b/i.test(
         lower
-      )
+      ) ||
+      (/\b(explain|describe|analyze)\b/i.test(lower) &&
+        /\b(model|object|mesh|geometry|workspace|reactor|thruster|dna|lattice)\b/i.test(lower))
     ) {
       return {
         category: 'OBJECT_INSPECTION',
         confidence: 0.9,
         summary: 'Inspect workspace or selected/imported 3D model state.',
         requiresTool: true,
+        requiresPlan: false,
+        missingInformation,
+        resolvedReferences: followUp.resolvedReferences
+      };
+    }
+
+    // 10b. Coding Assistance Intent
+    const hasCodeAttachment = attachments.some((a) =>
+      /\.(ts|tsx|js|jsx|py|json|css|html|yml|yaml|md)$/i.test(a.name)
+    );
+    if (
+      /\b(debug|fix\s+(?:this|the)\s+bug|review\s+(?:this|the)\s+code|write\s+(?:unit\s+)?tests|refactor|stack\s*trace|typescript\s+error|lint\s+error)\b/i.test(
+        lower
+      ) ||
+      (hasCodeAttachment && /\b(explain|review|analyze|check|debug|audit|fix)\b/i.test(lower))
+    ) {
+      return {
+        category: 'CODING_ASSISTANCE',
+        confidence: 0.9,
+        summary: 'Controlled Coding & Verification Agent assistance.',
+        requiresTool: false,
+        requiresPlan: false,
+        missingInformation,
+        resolvedReferences: followUp.resolvedReferences
+      };
+    }
+
+    // 10c. Analysis & Project/Session/Multimodal Recall Intent
+    if (
+      hasAttachments ||
+      /\b(what were we working on|summarize\s+(?:our|this)\s+(?:session|conversation)|session\s+recap|explain\s+this\s+project|compare|trade[- ]?offs|analyze)\b/i.test(
+        lower
+      )
+    ) {
+      return {
+        category: 'ANALYSIS_REQUEST',
+        confidence: 0.89,
+        summary: hasAttachments
+          ? `Multimodal analysis across ${attachments.length} attachment(s).`
+          : 'Contextual session, project, or trade-off analysis.',
+        requiresTool: false,
         requiresPlan: false,
         missingInformation,
         resolvedReferences: followUp.resolvedReferences
@@ -693,6 +776,7 @@ export class IntelligenceEngine {
     folder: SelectedFolderMetadata | null;
     permissionRequest?: PermissionRequest;
     reply: string;
+    error?: string;
   } {
     this.interactivePrompt = null;
     if (!folder || !folder.path) {
@@ -704,12 +788,35 @@ export class IntelligenceEngine {
     }
 
     const cleanFolder = desktopBridge.setSelectedFolder(folder.path, folder.name);
+    const isAlreadySaved = permissionPolicy.isPathWithinApprovedFolders(cleanFolder.path);
+    const evalRes = permissionPolicy.evaluateActionPolicy({
+      capability: 'FOLDER_ACCESS',
+      targetPath: cleanFolder.path,
+      isNewlyPickedOrUnrecognized: !isAlreadySaved
+    });
+
+    if (evalRes.outcome === 'BLOCKED') {
+      permissionManager.recordPolicyBlock({
+        category: 'FOLDER_ACCESS',
+        requestedAction: 'Open folder in File Explorer',
+        target: cleanFolder.path,
+        reason: evalRes.reason,
+        securityLevel: evalRes.level,
+        capabilityId: 'FOLDER_ACCESS'
+      });
+      this.lastError = evalRes.reason;
+      this.setStatus('ERROR', evalRes.reason, 'Folder Access is disabled in Permissions.');
+      return { folder: cleanFolder, reply: evalRes.reason, error: 'PERMISSION_DENIED_BY_POLICY' };
+    }
+
     const perm = permissionManager.createRequest({
       category: 'FOLDER_ACCESS',
       requestedAction: 'Open selected folder in File Explorer',
       target: cleanFolder.path,
       reason: `User selected folder "${cleanFolder.name}" (${cleanFolder.path}) to open.`,
       riskLevel: 'MEDIUM',
+      securityLevel: 'LEVEL_2_SESSION_CONFIRMATION',
+      capabilityId: 'FOLDER_ACCESS',
       requestedScope: `Single-use open access to folder "${cleanFolder.path}"`
     });
 
@@ -956,12 +1063,145 @@ export class IntelligenceEngine {
     }
   }
 
+  public async grantAndApprovePendingPermission(permissionId?: string): Promise<IntelligenceRequestResult | null> {
+    const targetId = permissionId || this.pendingPermission?.id;
+    if (!targetId) return null;
+
+    const existing = permissionManager.getRequest(targetId);
+    if (!existing) {
+      return this.resolvePendingPermission('APPROVE_ONCE', targetId);
+    }
+
+    // Level 3 operations must never grant persistent auto-approval
+    if (existing.securityLevel !== 'LEVEL_3_ALWAYS_CONFIRM') {
+      if (existing.category === 'APPLICATION_LAUNCH') {
+        permissionPolicy.setCapabilityDecision('APPLICATION_ACCESS', 'GRANTED');
+      } else if (existing.category === 'BROWSER_ACCESS' || existing.category === 'WEB_SEARCH') {
+        permissionPolicy.setCapabilityDecision('BROWSER_ACCESS', 'GRANTED');
+      } else if (existing.category === 'MUSIC_CONTROL' || existing.category === 'MUSIC_PLAYBACK') {
+        permissionPolicy.setCapabilityDecision('MUSIC_ACCESS', 'GRANTED');
+      } else if (existing.category === 'FOLDER_ACCESS') {
+        permissionPolicy.setCapabilityDecision('FOLDER_ACCESS', 'GRANTED');
+        permissionPolicy.addApprovedFolder(existing.target);
+      }
+    }
+
+    return this.resolvePendingPermission('APPROVE_ONCE', targetId);
+  }
+
+  private blockByPolicy(params: {
+    reqId: string;
+    rawInput: string;
+    intentCategory: IntentClassification['category'];
+    classification: IntentClassification;
+    permCategory: PermissionCategory;
+    requestedAction: string;
+    target: string;
+    reason: string;
+    securityLevel: PermissionSecurityLevel;
+    capabilityId: PermissionCapabilityId;
+    memoryCandidate?: IntelligenceRequestResult['memoryCandidate'];
+    snapshot: WorkspaceContextSnapshot;
+  }): IntelligenceRequestResult {
+    permissionManager.recordPolicyBlock({
+      category: params.permCategory,
+      requestedAction: params.requestedAction,
+      target: params.target,
+      reason: params.reason,
+      securityLevel: params.securityLevel,
+      capabilityId: params.capabilityId
+    });
+    this.lastError = params.reason;
+    conversationManager.addTurn({ role: 'assistant', text: params.reason, intent: params.intentCategory });
+    this.setStatus('ERROR', params.reason, 'Blocked by persistent permissions policy.');
+    return this.finishResult({
+      id: params.reqId,
+      input: params.rawInput,
+      reply: params.reason,
+      status: 'ERROR',
+      classification: params.classification,
+      providerUsed: 'LOCAL',
+      isExternalModel: false,
+      toolRecords: [],
+      memoryCandidate: params.memoryCandidate,
+      snapshot: params.snapshot,
+      error: 'PERMISSION_DENIED_BY_POLICY',
+      preserveStatus: true
+    });
+  }
+
+  private async executePreapprovedAction(params: {
+    reqId: string;
+    rawInput: string;
+    intentCategory: IntentClassification['category'];
+    classification: IntentClassification;
+    permCategory: PermissionCategory;
+    capabilityId: PermissionCapabilityId;
+    requestedAction: string;
+    target: string;
+    reason: string;
+    requestedScope: string;
+    executor: PermissionExecutor;
+    signal?: AbortSignal;
+    memoryCandidate?: IntelligenceRequestResult['memoryCandidate'];
+    snapshot: WorkspaceContextSnapshot;
+  }): Promise<IntelligenceRequestResult> {
+    const prePerm = permissionManager.authorizePreapprovedExecution({
+      category: params.permCategory,
+      requestedAction: params.requestedAction,
+      target: params.target,
+      reason: params.reason,
+      riskLevel: 'LOW',
+      securityLevel: 'LEVEL_1_PREAPPROVED',
+      capabilityId: params.capabilityId,
+      requestedScope: params.requestedScope
+    });
+
+    this.setStatus('EXECUTING', `Executing pre-approved action: ${params.requestedAction}...`, 'Executing authorized action.');
+    const execOut = await params.executor(prePerm.id, params.signal);
+    const toolRecords = execOut.toolRecord ? [execOut.toolRecord] : [];
+    this.setStatus('VERIFYING', execOut.ok ? 'Verifying completed action result...' : 'Verifying failed outcome...');
+
+    conversationManager.addTurn({
+      role: 'assistant',
+      text: execOut.reply,
+      intent: params.intentCategory,
+      toolNames: execOut.toolRecord ? [execOut.toolRecord.toolName] : undefined
+    });
+
+    if (!execOut.ok) {
+      this.lastError = execOut.error || execOut.reply;
+    }
+
+    return this.finishResult({
+      id: params.reqId,
+      input: params.rawInput,
+      reply: execOut.reply,
+      status: execOut.ok ? 'RESPONDING' : 'ERROR',
+      classification: params.classification,
+      providerUsed: contextualAI.getConfig().provider,
+      isExternalModel: false,
+      toolRecords,
+      openedFile: execOut.openedFile,
+      browserAction: execOut.browserAction,
+      searchResult: execOut.searchResult,
+      musicState: execOut.musicState,
+      memoryCandidate: params.memoryCandidate,
+      snapshot: params.snapshot,
+      error: execOut.ok ? undefined : execOut.error
+    });
+  }
+
   public async processRequest(params: {
     input: string;
     snapshot: WorkspaceContextSnapshot;
     source?: 'VOICE' | 'CONSOLE';
+    attachments?: PendingAttachment[];
   }): Promise<IntelligenceRequestResult> {
-    const rawInput = params.input.trim();
+    const attachments = params.attachments || [];
+    const rawInput =
+      params.input.trim() ||
+      (attachments.length > 0 ? 'Analyze the attached file(s).' : '');
     const source = params.source || 'CONSOLE';
     const cfg = contextualAI.getConfig();
 
@@ -988,7 +1228,31 @@ export class IntelligenceEngine {
       };
     }
 
-    const fingerprint = rawInput.toLowerCase();
+    if (attachments.length > 3) {
+      return {
+        id: `req-${Date.now()}`,
+        input: rawInput,
+        reply: 'Maximum 3 attachments per request are supported.',
+        status: 'ERROR',
+        classification: {
+          category: 'CLARIFICATION_NEEDED',
+          confidence: 1,
+          summary: 'Attachment count exceeded.',
+          requiresTool: false,
+          requiresPlan: false,
+          missingInformation: ['Attach 3 or fewer files per turn.'],
+          resolvedReferences: []
+        },
+        providerUsed: cfg.provider,
+        isExternalModel: false,
+        toolRecords: [],
+        activitySummary: 'Attachment limit exceeded.',
+        error: 'Too many attachments.'
+      };
+    }
+
+    const attachmentSig = attachments.map((a) => `${a.name}:${a.sizeBytes}`).join(',');
+    const fingerprint = `${rawInput.toLowerCase()}|${attachmentSig}`;
     if (
       (this.activeRequestId && this.activeRequestFingerprint === fingerprint) ||
       (this.pendingPermission &&
@@ -1030,8 +1294,16 @@ export class IntelligenceEngine {
     this.activeRequestId = reqId;
     this.activeRequestFingerprint = fingerprint;
     this.lastError = null;
+    this.streamingText = '';
 
     const toolRecords: ToolActivityRecord[] = [];
+    const attachmentRefs = attachments.map((a) => ({
+      id: a.id,
+      name: a.name,
+      kind: a.kind,
+      mimeType: a.mimeType,
+      sizeFormatted: a.sizeFormatted
+    }));
 
     try {
       this.setStatus(
@@ -1041,7 +1313,7 @@ export class IntelligenceEngine {
       );
 
       const followUp = conversationManager.resolveFollowUp(rawInput, params.snapshot);
-      const classification = this.classifyIntent(rawInput, params.snapshot, followUp);
+      const classification = this.classifyIntent(rawInput, params.snapshot, followUp, attachments);
 
       conversationManager.addTurn({
         role: 'user',
@@ -1101,10 +1373,27 @@ export class IntelligenceEngine {
 
         const appTarget = this.detectApplicationTarget(lower);
         if (!appTarget) {
+          if (permissionPolicy.getCapabilityDecision('APPLICATION_ACCESS') === 'DENIED') {
+            const evalDenied = permissionPolicy.evaluateActionPolicy({ capability: 'APPLICATION_ACCESS' });
+            return this.blockByPolicy({
+              reqId,
+              rawInput,
+              intentCategory: 'APPLICATION_LAUNCH',
+              classification,
+              permCategory: 'APPLICATION_LAUNCH',
+              requestedAction: 'Launch desktop application',
+              target: 'APPLICATION_ACCESS',
+              reason: evalDenied.reason,
+              securityLevel: evalDenied.level,
+              capabilityId: 'APPLICATION_ACCESS',
+              memoryCandidate,
+              snapshot: params.snapshot
+            });
+          }
           const prompt: PendingInteractivePrompt = {
             kind: 'AMBIGUOUS_CLARIFICATION',
             message:
-              'Which approved application would you like me to launch? (Visual Studio Code, Notepad, Calculator, File Explorer, Google Chrome, Web Browser, or Spotify)'
+              'Which approved desktop application should I open (Visual Studio Code, Notepad, Calculator, File Explorer, or Chrome)?'
           };
           this.interactivePrompt = prompt;
           conversationManager.addTurn({ role: 'assistant', text: prompt.message, intent: 'APPLICATION_LAUNCH' });
@@ -1123,18 +1412,29 @@ export class IntelligenceEngine {
           });
         }
 
-        const perm = permissionManager.createRequest({
-          category: 'APPLICATION_LAUNCH',
-          requestedAction: `Launch ${appTarget.displayName}`,
-          target: appTarget.id,
-          reason: `User requested launching approved desktop application "${appTarget.displayName}"`,
-          riskLevel: 'MEDIUM',
-          requestedScope: `Single-use launch of allowlisted application ${appTarget.displayName} (${appTarget.id})`
+        const evalRes = permissionPolicy.evaluateActionPolicy({
+          capability: 'APPLICATION_ACCESS',
+          appId: appTarget.id
         });
 
-        this.pendingPermission = perm;
-        this.pendingPermissionInputFingerprint = fingerprint;
-        this.permissionExecutors.set(perm.id, async (permissionId) => {
+        if (evalRes.outcome === 'BLOCKED') {
+          return this.blockByPolicy({
+            reqId,
+            rawInput,
+            intentCategory: 'APPLICATION_LAUNCH',
+            classification,
+            permCategory: 'APPLICATION_LAUNCH',
+            requestedAction: `Launch ${appTarget.displayName}`,
+            target: appTarget.id,
+            reason: evalRes.reason,
+            securityLevel: evalRes.level,
+            capabilityId: 'APPLICATION_ACCESS',
+            memoryCandidate,
+            snapshot: params.snapshot
+          });
+        }
+
+        const appExecutor: PermissionExecutor = async (permissionId) => {
           const res = await toolRegistry.executeTool(
             'launch_desktop_application',
             { applicationId: appTarget.id, permissionId },
@@ -1147,7 +1447,41 @@ export class IntelligenceEngine {
             toolRecord: res.record,
             error: res.result.error
           };
+        };
+
+        if (evalRes.outcome === 'ALLOW_PREAPPROVED') {
+          return this.executePreapprovedAction({
+            reqId,
+            rawInput,
+            intentCategory: 'APPLICATION_LAUNCH',
+            classification,
+            permCategory: 'APPLICATION_LAUNCH',
+            capabilityId: 'APPLICATION_ACCESS',
+            requestedAction: `Launch ${appTarget.displayName}`,
+            target: appTarget.id,
+            reason: evalRes.reason,
+            requestedScope: `Level 1 preapproved launch of ${appTarget.displayName} (${appTarget.id})`,
+            executor: appExecutor,
+            signal: controller.signal,
+            memoryCandidate,
+            snapshot: params.snapshot
+          });
+        }
+
+        const perm = permissionManager.createRequest({
+          category: 'APPLICATION_LAUNCH',
+          requestedAction: `Launch ${appTarget.displayName}`,
+          target: appTarget.id,
+          reason: `User requested launching approved desktop application "${appTarget.displayName}"`,
+          riskLevel: 'MEDIUM',
+          securityLevel: evalRes.level,
+          capabilityId: 'APPLICATION_ACCESS',
+          requestedScope: `Single-use launch of allowlisted application ${appTarget.displayName} (${appTarget.id})`
         });
+
+        this.pendingPermission = perm;
+        this.pendingPermissionInputFingerprint = fingerprint;
+        this.permissionExecutors.set(perm.id, appExecutor);
 
         const reply = `Plan: Launch approved desktop application ${appTarget.displayName} (${appTarget.id}) via the secure allowlist. Do you approve?`;
         conversationManager.addTurn({ role: 'assistant', text: reply, intent: 'APPLICATION_LAUNCH' });
@@ -1172,11 +1506,30 @@ export class IntelligenceEngine {
         });
       }
 
-      // 1c. Phase 7 — FOLDER_ACTION (explicit local path or previously selected project folder)
+      // 1c. Phase 7 & 7.1 — FOLDER_ACTION
       if (classification.category === 'FOLDER_ACTION') {
+        if (permissionPolicy.getCapabilityDecision('FOLDER_ACCESS') === 'DENIED') {
+          const folderEval = permissionPolicy.evaluateActionPolicy({ capability: 'FOLDER_ACCESS' });
+          return this.blockByPolicy({
+            reqId,
+            rawInput,
+            intentCategory: 'FOLDER_ACTION',
+            classification,
+            permCategory: 'FOLDER_ACCESS',
+            requestedAction: 'Open folder in File Explorer',
+            target: this.extractLocalFilesystemPath(rawInput) || desktopBridge.getSelectedFolder()?.path || 'FOLDER_ACCESS',
+            reason: folderEval.reason,
+            securityLevel: folderEval.level,
+            capabilityId: 'FOLDER_ACCESS',
+            memoryCandidate,
+            snapshot: params.snapshot
+          });
+        }
+
         const explicitPath = this.extractLocalFilesystemPath(rawInput);
         const selectedFolder = desktopBridge.getSelectedFolder();
-        const targetFolderPath = explicitPath || selectedFolder?.path || '';
+        const savedFolder = permissionPolicy.getApprovedFolders()[0]?.path || '';
+        const targetFolderPath = explicitPath || selectedFolder?.path || savedFolder;
 
         if (!targetFolderPath) {
           const prompt: PendingInteractivePrompt = {
@@ -1224,19 +1577,14 @@ export class IntelligenceEngine {
           });
         }
 
-        desktopBridge.registerApprovedPath(targetFolderPath);
-        const perm = permissionManager.createRequest({
-          category: 'FOLDER_ACCESS',
-          requestedAction: 'Open folder in File Explorer',
-          target: targetFolderPath,
-          reason: `User requested opening approved folder "${targetFolderPath}"`,
-          riskLevel: 'MEDIUM',
-          requestedScope: `Single-use open access to folder "${targetFolderPath}"`
+        const evalRes = permissionPolicy.evaluateActionPolicy({
+          capability: 'FOLDER_ACCESS',
+          targetPath: targetFolderPath
         });
 
-        this.pendingPermission = perm;
-        this.pendingPermissionInputFingerprint = fingerprint;
-        this.permissionExecutors.set(perm.id, async (permissionId) => {
+        desktopBridge.registerApprovedPath(targetFolderPath);
+
+        const folderExecutor: PermissionExecutor = async (permissionId) => {
           const res = await toolRegistry.executeTool(
             'open_desktop_folder',
             { folderPath: targetFolderPath, permissionId },
@@ -1249,7 +1597,41 @@ export class IntelligenceEngine {
             toolRecord: res.record,
             error: res.result.error
           };
+        };
+
+        if (evalRes.outcome === 'ALLOW_PREAPPROVED') {
+          return this.executePreapprovedAction({
+            reqId,
+            rawInput,
+            intentCategory: 'FOLDER_ACTION',
+            classification,
+            permCategory: 'FOLDER_ACCESS',
+            capabilityId: 'FOLDER_ACCESS',
+            requestedAction: 'Open folder in File Explorer',
+            target: targetFolderPath,
+            reason: evalRes.reason,
+            requestedScope: `Open previously approved folder "${targetFolderPath}"`,
+            executor: folderExecutor,
+            signal: controller.signal,
+            memoryCandidate,
+            snapshot: params.snapshot
+          });
+        }
+
+        const perm = permissionManager.createRequest({
+          category: 'FOLDER_ACCESS',
+          requestedAction: 'Open folder in File Explorer',
+          target: targetFolderPath,
+          reason: `User requested opening approved folder "${targetFolderPath}"`,
+          riskLevel: 'MEDIUM',
+          securityLevel: evalRes.level,
+          capabilityId: 'FOLDER_ACCESS',
+          requestedScope: `Single-use open access to folder "${targetFolderPath}"`
         });
+
+        this.pendingPermission = perm;
+        this.pendingPermissionInputFingerprint = fingerprint;
+        this.permissionExecutors.set(perm.id, folderExecutor);
 
         const reply = `Plan: Open approved folder "${targetFolderPath}" in File Explorer. Do you approve?`;
         conversationManager.addTurn({ role: 'assistant', text: reply, intent: 'FOLDER_ACTION' });
@@ -1274,10 +1656,28 @@ export class IntelligenceEngine {
         });
       }
 
-      // 2. Phase 5 & 7 — FILE_ACTION
+      // 2. Phase 5, 7 & 7.1 — FILE_ACTION
       if (classification.category === 'FILE_ACTION') {
         const lower = rawInput.toLowerCase();
         const explicitFilePath = this.extractLocalFilesystemPath(rawInput);
+
+        if (permissionPolicy.getCapabilityDecision('FOLDER_ACCESS') === 'DENIED') {
+          const folderEval = permissionPolicy.evaluateActionPolicy({ capability: 'FOLDER_ACCESS' });
+          return this.blockByPolicy({
+            reqId,
+            rawInput,
+            intentCategory: 'FILE_ACTION',
+            classification,
+            permCategory: 'FILE_ACCESS',
+            requestedAction: 'Open desktop file with default application',
+            target: explicitFilePath || 'FOLDER_ACCESS',
+            reason: folderEval.reason,
+            securityLevel: folderEval.level,
+            capabilityId: 'FOLDER_ACCESS',
+            memoryCandidate,
+            snapshot: params.snapshot
+          });
+        }
 
         if (explicitFilePath) {
           if (/(^|[\\/])\.\.([\\/]|$)|%2e%2e/i.test(explicitFilePath)) {
@@ -1301,6 +1701,7 @@ export class IntelligenceEngine {
             });
           }
 
+          const isWithinSavedFolder = permissionPolicy.isPathWithinApprovedFolders(explicitFilePath);
           desktopBridge.registerApprovedPath(explicitFilePath);
           const perm = permissionManager.createRequest({
             category: 'FILE_ACCESS',
@@ -1308,6 +1709,8 @@ export class IntelligenceEngine {
             target: explicitFilePath,
             reason: `User requested opening file "${explicitFilePath}"`,
             riskLevel: 'MEDIUM',
+            securityLevel: isWithinSavedFolder ? 'LEVEL_1_PREAPPROVED' : 'LEVEL_2_SESSION_CONFIRMATION',
+            capabilityId: 'FOLDER_ACCESS',
             requestedScope: `Single-use open access to file "${explicitFilePath}"`
           });
 
@@ -1430,10 +1833,28 @@ export class IntelligenceEngine {
         });
       }
 
-      // 3. Phase 5 — BROWSER_ACTION
+      // 3. Phase 5 & 7.1 — BROWSER_ACTION
       if (classification.category === 'BROWSER_ACTION') {
         const extractedTarget = this.extractBrowserTarget(rawInput);
         if (!extractedTarget) {
+          const browserEvalEmpty = permissionPolicy.evaluateActionPolicy({ capability: 'BROWSER_ACCESS' });
+          if (browserEvalEmpty.outcome === 'BLOCKED') {
+            return this.blockByPolicy({
+              reqId,
+              rawInput,
+              intentCategory: 'BROWSER_ACTION',
+              classification,
+              permCategory: 'BROWSER_ACCESS',
+              requestedAction: 'Open website in new browser tab',
+              target: 'BROWSER_ACCESS',
+              reason: browserEvalEmpty.reason,
+              securityLevel: browserEvalEmpty.level,
+              capabilityId: 'BROWSER_ACCESS',
+              memoryCandidate,
+              snapshot: params.snapshot
+            });
+          }
+
           const prompt: PendingInteractivePrompt = {
             kind: 'AMBIGUOUS_CLARIFICATION',
             message: 'Which website or URL would you like me to open in a new browser tab?'
@@ -1455,12 +1876,8 @@ export class IntelligenceEngine {
           });
         }
 
-        const { preview, permissionRequest } = browserActionService.requestOpenWebsitePermission(
-          extractedTarget,
-          `User requested opening "${extractedTarget}" in a new browser tab`
-        );
-
-        if (!preview.valid || !preview.normalizedUrl || !permissionRequest) {
+        const preview = browserActionService.resolveDestinationPreview(extractedTarget);
+        if (!preview.valid || !preview.normalizedUrl) {
           const reply = preview.error || `Unable to verify destination "${extractedTarget}".`;
           this.lastError = reply;
           conversationManager.addTurn({ role: 'assistant', text: reply, intent: 'BROWSER_ACTION' });
@@ -1481,10 +1898,27 @@ export class IntelligenceEngine {
           });
         }
 
-        this.pendingPermission = permissionRequest;
-        this.pendingPermissionInputFingerprint = fingerprint;
         const targetUrl = preview.normalizedUrl;
-        this.permissionExecutors.set(permissionRequest.id, async (permissionId) => {
+        const evalRes = permissionPolicy.evaluateActionPolicy({ capability: 'BROWSER_ACCESS' });
+
+        if (evalRes.outcome === 'BLOCKED') {
+          return this.blockByPolicy({
+            reqId,
+            rawInput,
+            intentCategory: 'BROWSER_ACTION',
+            classification,
+            permCategory: 'BROWSER_ACCESS',
+            requestedAction: 'Open website in new browser tab',
+            target: targetUrl,
+            reason: evalRes.reason,
+            securityLevel: evalRes.level,
+            capabilityId: 'BROWSER_ACCESS',
+            memoryCandidate,
+            snapshot: params.snapshot
+          });
+        }
+
+        const browserExecutor: PermissionExecutor = async (permissionId) => {
           const res = await toolRegistry.executeTool(
             'open_external_url',
             { url: targetUrl, permissionId },
@@ -1501,7 +1935,53 @@ export class IntelligenceEngine {
             browserAction,
             error: res.result.error
           };
-        });
+        };
+
+        if (evalRes.outcome === 'ALLOW_PREAPPROVED') {
+          return this.executePreapprovedAction({
+            reqId,
+            rawInput,
+            intentCategory: 'BROWSER_ACTION',
+            classification,
+            permCategory: 'BROWSER_ACCESS',
+            capabilityId: 'BROWSER_ACCESS',
+            requestedAction: 'Open website in new browser tab',
+            target: targetUrl,
+            reason: evalRes.reason,
+            requestedScope: `Level 1 preapproved browser navigation to ${targetUrl}`,
+            executor: browserExecutor,
+            signal: controller.signal,
+            memoryCandidate,
+            snapshot: params.snapshot
+          });
+        }
+
+        const { permissionRequest } = browserActionService.requestOpenWebsitePermission(
+          extractedTarget,
+          `User requested opening "${extractedTarget}" in a new browser tab`
+        );
+
+        if (!permissionRequest) {
+          return this.finishResult({
+            id: reqId,
+            input: rawInput,
+            reply: `Unable to verify destination "${extractedTarget}".`,
+            status: 'ERROR',
+            classification,
+            providerUsed: 'LOCAL',
+            isExternalModel: false,
+            toolRecords,
+            memoryCandidate,
+            snapshot: params.snapshot,
+            error: 'INVALID_URL'
+          });
+        }
+
+        permissionRequest.securityLevel = evalRes.level;
+        permissionRequest.capabilityId = 'BROWSER_ACCESS';
+        this.pendingPermission = permissionRequest;
+        this.pendingPermissionInputFingerprint = fingerprint;
+        this.permissionExecutors.set(permissionRequest.id, browserExecutor);
 
         const reply = `I can open ${preview.hostname} (${targetUrl}) in a new browser tab. Do you approve?`;
         conversationManager.addTurn({ role: 'assistant', text: reply, intent: 'BROWSER_ACTION' });
@@ -1526,7 +2006,7 @@ export class IntelligenceEngine {
         });
       }
 
-      // 4. Phase 5 — WEB_SEARCH
+      // 4. Phase 5 & 7.1 — WEB_SEARCH
       if (classification.category === 'WEB_SEARCH') {
         const searchIntent = extractSearchIntent(rawInput);
         if (searchIntent.ambiguous || !searchIntent.query) {
@@ -1553,14 +2033,25 @@ export class IntelligenceEngine {
           });
         }
 
-        const perm = webSearchService.requestSearchPermission(
-          searchIntent.query,
-          searchIntent.provider,
-          `Execute web search for "${searchIntent.query}" via ${searchIntent.provider}`
-        );
-        this.pendingPermission = perm;
-        this.pendingPermissionInputFingerprint = fingerprint;
-        this.permissionExecutors.set(perm.id, async (permissionId, signal) => {
+        const evalRes = permissionPolicy.evaluateActionPolicy({ capability: 'BROWSER_ACCESS' });
+        if (evalRes.outcome === 'BLOCKED') {
+          return this.blockByPolicy({
+            reqId,
+            rawInput,
+            intentCategory: 'WEB_SEARCH',
+            classification,
+            permCategory: 'WEB_SEARCH',
+            requestedAction: `Search the web via ${searchIntent.provider}`,
+            target: searchIntent.query,
+            reason: evalRes.reason,
+            securityLevel: evalRes.level,
+            capabilityId: 'BROWSER_ACCESS',
+            memoryCandidate,
+            snapshot: params.snapshot
+          });
+        }
+
+        const searchExecutor: PermissionExecutor = async (permissionId, signal) => {
           if (desktopBridge.isElectron()) {
             const desktopSearch = await toolRegistry.executeTool(
               'desktop_web_search',
@@ -1612,7 +2103,37 @@ export class IntelligenceEngine {
             searchResult: searchRes,
             error: searchRes.error
           };
-        });
+        };
+
+        if (evalRes.outcome === 'ALLOW_PREAPPROVED') {
+          return this.executePreapprovedAction({
+            reqId,
+            rawInput,
+            intentCategory: 'WEB_SEARCH',
+            classification,
+            permCategory: 'WEB_SEARCH',
+            capabilityId: 'BROWSER_ACCESS',
+            requestedAction: `Search the web via ${searchIntent.provider}`,
+            target: searchIntent.query,
+            reason: evalRes.reason,
+            requestedScope: `Level 1 preapproved web search query "${searchIntent.query}"`,
+            executor: searchExecutor,
+            signal: controller.signal,
+            memoryCandidate,
+            snapshot: params.snapshot
+          });
+        }
+
+        const perm = webSearchService.requestSearchPermission(
+          searchIntent.query,
+          searchIntent.provider,
+          `Execute web search for "${searchIntent.query}" via ${searchIntent.provider}`
+        );
+        perm.securityLevel = evalRes.level;
+        perm.capabilityId = 'BROWSER_ACCESS';
+        this.pendingPermission = perm;
+        this.pendingPermissionInputFingerprint = fingerprint;
+        this.permissionExecutors.set(perm.id, searchExecutor);
 
         const reply = `I understood your request as: ${searchIntent.displayDescription}. Shall I proceed?`;
         conversationManager.addTurn({ role: 'assistant', text: reply, intent: 'WEB_SEARCH' });
@@ -1766,17 +2287,25 @@ export class IntelligenceEngine {
 
         // Open Spotify Desktop application explicitly when requested without playback query
         if (/^(?:hey\s+|hi\s+|please\s+)?(?:jarvis[,\s]+)?(?:open|launch|start)\s+spotify\.?$/i.test(lower)) {
-          const perm = permissionManager.createRequest({
-            category: 'MUSIC_CONTROL',
-            requestedAction: 'Launch approved music application: Spotify',
-            target: 'SPOTIFY',
-            reason: 'User requested opening the Spotify desktop music application.',
-            riskLevel: 'MEDIUM',
-            requestedScope: 'Single-use launch of approved music player (SPOTIFY)'
-          });
-          this.pendingPermission = perm;
-          this.pendingPermissionInputFingerprint = fingerprint;
-          this.permissionExecutors.set(perm.id, async (permissionId) => {
+          const musicEval = permissionPolicy.evaluateActionPolicy({ capability: 'MUSIC_ACCESS' });
+          if (musicEval.outcome === 'BLOCKED') {
+            return this.blockByPolicy({
+              reqId,
+              rawInput,
+              intentCategory: 'MUSIC_ACTION',
+              classification,
+              permCategory: 'MUSIC_CONTROL',
+              requestedAction: 'Launch approved music application: Spotify',
+              target: 'SPOTIFY',
+              reason: musicEval.reason,
+              securityLevel: musicEval.level,
+              capabilityId: 'MUSIC_ACCESS',
+              memoryCandidate,
+              snapshot: params.snapshot
+            });
+          }
+
+          const spotifyExecutor: PermissionExecutor = async (permissionId) => {
             const res = await toolRegistry.executeTool(
               'launch_desktop_music',
               { musicTarget: 'SPOTIFY', permissionId },
@@ -1790,7 +2319,40 @@ export class IntelligenceEngine {
               musicState: musicService.getState(),
               error: res.result.error
             };
+          };
+
+          if (musicEval.outcome === 'ALLOW_PREAPPROVED') {
+            return this.executePreapprovedAction({
+              reqId,
+              rawInput,
+              intentCategory: 'MUSIC_ACTION',
+              classification,
+              permCategory: 'MUSIC_CONTROL',
+              capabilityId: 'MUSIC_ACCESS',
+              requestedAction: 'Launch approved music application: Spotify',
+              target: 'SPOTIFY',
+              reason: musicEval.reason,
+              requestedScope: 'Level 1 preapproved launch of Spotify',
+              executor: spotifyExecutor,
+              signal: controller.signal,
+              memoryCandidate,
+              snapshot: params.snapshot
+            });
+          }
+
+          const perm = permissionManager.createRequest({
+            category: 'MUSIC_CONTROL',
+            requestedAction: 'Launch approved music application: Spotify',
+            target: 'SPOTIFY',
+            reason: 'User requested opening the Spotify desktop music application.',
+            riskLevel: 'MEDIUM',
+            securityLevel: musicEval.level,
+            capabilityId: 'MUSIC_ACCESS',
+            requestedScope: 'Single-use launch of approved music player (SPOTIFY)'
           });
+          this.pendingPermission = perm;
+          this.pendingPermissionInputFingerprint = fingerprint;
+          this.permissionExecutors.set(perm.id, spotifyExecutor);
           const reply = 'Plan: Launch Spotify music application. Note: playback controls inside external desktop apps depend on OS media session support. Do you approve opening Spotify?';
           conversationManager.addTurn({ role: 'assistant', text: reply, intent: 'MUSIC_ACTION' });
           this.setStatus(
@@ -1817,17 +2379,27 @@ export class IntelligenceEngine {
 
         // Play user-selected music ("play my selected music" / "play selected track")
         if (/\b(?:my\s+)?selected\s+(?:music|song|track|audio)\b/i.test(lower)) {
+          const musicEval = permissionPolicy.evaluateActionPolicy({ capability: 'MUSIC_ACCESS' });
+          if (musicEval.outcome === 'BLOCKED') {
+            return this.blockByPolicy({
+              reqId,
+              rawInput,
+              intentCategory: 'MUSIC_ACTION',
+              classification,
+              permCategory: 'MUSIC_PLAYBACK',
+              requestedAction: 'Play selected local music',
+              target: this.pendingFileMetadata?.name || 'LOCAL_AUDIO',
+              reason: musicEval.reason,
+              securityLevel: musicEval.level,
+              capabilityId: 'MUSIC_ACCESS',
+              memoryCandidate,
+              snapshot: params.snapshot
+            });
+          }
+
           if (this.pendingFileMetadata?.kind === 'AUDIO' && this.pendingFileMetadata.supported) {
             const selectedAudio = this.pendingFileMetadata;
-            const perm = musicService.requestMusicPermission({
-              sourceType: 'LOCAL_AUDIO',
-              targetLabel: selectedAudio.name,
-              reason: `Play user-selected audio file "${selectedAudio.name}" (${selectedAudio.sizeFormatted})`,
-              metadata: { fileId: selectedAudio.fileId }
-            });
-            this.pendingPermission = perm;
-            this.pendingPermissionInputFingerprint = fingerprint;
-            this.permissionExecutors.set(perm.id, async (permissionId) => {
+            const localMusicExecutor: PermissionExecutor = async (permissionId) => {
               const res = await toolRegistry.executeTool(
                 'control_music_playback',
                 { action: 'PLAY_LOCAL', fileId: selectedAudio.fileId, permissionId },
@@ -1841,7 +2413,38 @@ export class IntelligenceEngine {
                 musicState,
                 error: res.result.error
               };
+            };
+
+            if (musicEval.outcome === 'ALLOW_PREAPPROVED') {
+              return this.executePreapprovedAction({
+                reqId,
+                rawInput,
+                intentCategory: 'MUSIC_ACTION',
+                classification,
+                permCategory: 'MUSIC_PLAYBACK',
+                capabilityId: 'MUSIC_ACCESS',
+                requestedAction: 'Play selected local music',
+                target: selectedAudio.name,
+                reason: musicEval.reason,
+                requestedScope: `Level 1 preapproved local audio playback "${selectedAudio.name}"`,
+                executor: localMusicExecutor,
+                signal: controller.signal,
+                memoryCandidate,
+                snapshot: params.snapshot
+              });
+            }
+
+            const perm = musicService.requestMusicPermission({
+              sourceType: 'LOCAL_AUDIO',
+              targetLabel: selectedAudio.name,
+              reason: `Play user-selected audio file "${selectedAudio.name}" (${selectedAudio.sizeFormatted})`,
+              metadata: { fileId: selectedAudio.fileId }
             });
+            perm.securityLevel = musicEval.level;
+            perm.capabilityId = 'MUSIC_ACCESS';
+            this.pendingPermission = perm;
+            this.pendingPermissionInputFingerprint = fingerprint;
+            this.permissionExecutors.set(perm.id, localMusicExecutor);
 
             const reply = `I found your selected audio file "${selectedAudio.name}" (${selectedAudio.sizeFormatted}). Do you approve starting playback?`;
             conversationManager.addTurn({ role: 'assistant', text: reply, intent: 'MUSIC_ACTION' });
@@ -1885,6 +2488,25 @@ export class IntelligenceEngine {
             toolRecords,
             interactivePrompt: prompt,
             musicState: musicService.getState(),
+            memoryCandidate,
+            snapshot: params.snapshot
+          });
+        }
+
+        // Block general music discovery/launch if MUSIC_ACCESS is explicitly DENIED
+        const generalMusicEval = permissionPolicy.evaluateActionPolicy({ capability: 'MUSIC_ACCESS' });
+        if (generalMusicEval.outcome === 'BLOCKED') {
+          return this.blockByPolicy({
+            reqId,
+            rawInput,
+            intentCategory: 'MUSIC_ACTION',
+            classification,
+            permCategory: 'MUSIC_PLAYBACK',
+            requestedAction: 'Music access request',
+            target: 'MUSIC_ACCESS',
+            reason: generalMusicEval.reason,
+            securityLevel: generalMusicEval.level,
+            capabilityId: 'MUSIC_ACCESS',
             memoryCandidate,
             snapshot: params.snapshot
           });
@@ -1935,8 +2557,31 @@ export class IntelligenceEngine {
         }
 
         const choiceRes = this.selectMusicSourceChoice(detectedSource, trackQuery);
+        if (choiceRes.permissionRequest && generalMusicEval.outcome === 'ALLOW_PREAPPROVED') {
+          const preApprovedPermId = choiceRes.permissionRequest.id;
+          const resExec = await this.resolvePendingPermission('APPROVE_ONCE', preApprovedPermId);
+          return (
+            resExec ||
+            this.finishResult({
+              id: reqId,
+              input: rawInput,
+              reply: choiceRes.reply,
+              status: 'RESPONDING',
+              classification,
+              providerUsed: 'LOCAL',
+              isExternalModel: false,
+              toolRecords,
+              musicState: musicService.getState(),
+              memoryCandidate,
+              snapshot: params.snapshot
+            })
+          );
+        }
+
         conversationManager.addTurn({ role: 'assistant', text: choiceRes.reply, intent: 'MUSIC_ACTION' });
         if (choiceRes.permissionRequest) {
+          choiceRes.permissionRequest.securityLevel = generalMusicEval.level;
+          choiceRes.permissionRequest.capabilityId = 'MUSIC_ACCESS';
           return this.finishResult({
             id: reqId,
             input: rawInput,
@@ -2119,11 +2764,15 @@ export class IntelligenceEngine {
       if (classification.category === 'MEMORY_MANAGEMENT') {
         const lower = rawInput.toLowerCase();
         if (lower.includes('clear memory') || lower.includes('forget everything')) {
+          const level3Eval = permissionPolicy.evaluateActionPolicy({
+            capability: 'FOLDER_ACCESS',
+            operationType: 'CLEAR_MEMORY'
+          });
           const pending: PendingToolApproval = {
             id: `apr-${Date.now().toString(36)}`,
             toolName: 'clear_persistent_memory',
             args: {},
-            reason: 'Clearing all saved persistent user memories cannot be undone.',
+            reason: level3Eval.reason,
             permissionLevel: 'CONSEQUENTIAL'
           };
           this.pendingApproval = pending;
@@ -2186,13 +2835,24 @@ export class IntelligenceEngine {
         const mapped = this.mapWorkspaceToolAction(rawInput);
         if (mapped) {
           const toolDef = toolRegistry.getTool(mapped.toolName);
-          if (toolDef?.requiresConfirmation) {
+          const opType =
+            mapped.toolName === 'delete_selected_hologram'
+              ? 'DELETE_OBJECT'
+              : mapped.toolName === 'export_workspace_notes'
+              ? 'FILE_WRITE'
+              : undefined;
+          const level3Eval = opType
+            ? permissionPolicy.evaluateActionPolicy({ capability: 'FOLDER_ACCESS', operationType: opType })
+            : null;
+          if (toolDef?.requiresConfirmation || level3Eval?.level === 'LEVEL_3_ALWAYS_CONFIRM') {
             const pending: PendingToolApproval = {
               id: `apr-${Date.now().toString(36)}`,
               toolName: mapped.toolName,
               args: mapped.args,
-              reason: `Consequential tool "${mapped.toolName}" requires your explicit confirmation.`,
-              permissionLevel: toolDef.permissionLevel
+              reason:
+                level3Eval?.reason ||
+                `Consequential tool "${mapped.toolName}" requires your explicit confirmation.`,
+              permissionLevel: toolDef?.permissionLevel || 'CONSEQUENTIAL'
             };
             this.pendingApproval = pending;
             const reply = `Confirmation required before executing "${mapped.toolName}". Use the approval prompt in the Intelligence HUD.`;
@@ -2249,7 +2909,88 @@ export class IntelligenceEngine {
         }
       }
 
-      // 8. External AI Provider Reasoning
+      // 7b. Controlled Agent Execution Roles (RESEARCH / CODING / ANALYSIS)
+      if (
+        classification.category === 'RESEARCH_REQUEST' ||
+        classification.category === 'CODING_ASSISTANCE' ||
+        classification.category === 'ANALYSIS_REQUEST'
+      ) {
+        const onAgentChunk = (_delta: string, acc: string) => {
+          this.streamingText = acc;
+          this.emit();
+        };
+
+        const agentRes =
+          classification.category === 'RESEARCH_REQUEST'
+            ? await agentOrchestrator.runResearchAgent({
+                query: rawInput,
+                snapshot: params.snapshot,
+                attachments,
+                signal: controller.signal,
+                onChunk: onAgentChunk
+              })
+            : classification.category === 'CODING_ASSISTANCE'
+            ? await agentOrchestrator.runCodingAgent({
+                prompt: rawInput,
+                snapshot: params.snapshot,
+                attachments,
+                signal: controller.signal,
+                onChunk: onAgentChunk
+              })
+            : await agentOrchestrator.runAnalysisAgent({
+                prompt: rawInput,
+                snapshot: params.snapshot,
+                attachments,
+                signal: controller.signal,
+                onChunk: onAgentChunk
+              });
+
+        this.streamingText = '';
+
+        if (agentRes.aborted || controller.signal.aborted) {
+          return this.finishResult({
+            id: reqId,
+            input: rawInput,
+            reply: agentRes.reply || 'Request cancelled.',
+            status: 'STANDBY',
+            classification,
+            providerUsed: agentRes.providerUsed,
+            isExternalModel: false,
+            toolRecords,
+            agentRun: agentRes.run,
+            attachments: attachmentRefs.length > 0 ? attachmentRefs : undefined,
+            memoryCandidate,
+            snapshot: params.snapshot,
+            cancelled: true
+          });
+        }
+
+        conversationManager.addTurn({
+          role: 'assistant',
+          text: agentRes.reply,
+          intent: classification.category
+        });
+
+        return this.finishResult({
+          id: reqId,
+          input: rawInput,
+          reply: agentRes.reply,
+          status: agentRes.ok ? 'RESPONDING' : 'ERROR',
+          classification,
+          providerUsed: agentRes.providerUsed,
+          isExternalModel: agentRes.isExternalModel,
+          toolRecords,
+          agentRun: agentRes.run,
+          attachments: attachmentRefs.length > 0 ? attachmentRefs : undefined,
+          streamed: agentRes.streamed,
+          fallbackUsed: agentRes.fallbackUsed,
+          memoryCandidate,
+          snapshot: params.snapshot,
+          error: agentRes.error
+        });
+      }
+
+      // 8. External AI Provider Reasoning (with SSE Streaming & Multimodal Attachments)
       const isServerBacked =
         cfg.provider === 'BACKEND' ||
         ((cfg.provider === 'GEMINI' || cfg.provider === 'GROQ') && !contextualAI.hasApiKey());
@@ -2260,15 +3001,22 @@ export class IntelligenceEngine {
         const providerLabel = isServerBacked
           ? `Backend (${cfg.backendMode || 'AUTO'})`
           : `${cfg.provider} (${cfg.modelName})`;
-        this.setStatus('ANALYZING', `Querying ${providerLabel} with session context...`);
+        this.setStatus('ANALYZING', `Streaming ${providerLabel} with session context...`);
         const systemPrompt = this.buildSystemPrompt(params.snapshot, rawInput, groundedToolSummary);
         const messages = conversationManager.buildModelMessages(systemPrompt, 12);
 
-        const extRes = await contextualAI.queryStructuredCompletion({
+        const extRes = await contextualAI.queryStreamingCompletion({
           messages,
+          attachments,
           signal: controller.signal,
-          timeoutMs: 18000
+          timeoutMs: 25000,
+          onChunk: (_delta, acc) => {
+            this.streamingText = acc;
+            this.emit();
+          }
         });
+
+        this.streamingText = '';
 
         if (extRes.aborted || controller.signal.aborted) {
           return this.finishResult({
@@ -2280,6 +3028,7 @@ export class IntelligenceEngine {
             providerUsed: cfg.provider,
             isExternalModel: false,
             toolRecords,
+            attachments: attachmentRefs.length > 0 ? attachmentRefs : undefined,
             memoryCandidate,
             snapshot: params.snapshot,
             cancelled: true
@@ -2303,6 +3052,9 @@ export class IntelligenceEngine {
             providerUsed: extRes.provider || cfg.provider,
             isExternalModel: true,
             toolRecords,
+            attachments: attachmentRefs.length > 0 ? attachmentRefs : undefined,
+            streamed: extRes.streamed,
+            fallbackUsed: Boolean(extRes.fallbackTriggered),
             memoryCandidate,
             snapshot: params.snapshot
           });
@@ -2330,6 +3082,7 @@ export class IntelligenceEngine {
           providerUsed: cfg.provider,
           isExternalModel: false,
           toolRecords,
+          attachments: attachmentRefs.length > 0 ? attachmentRefs : undefined,
           memoryCandidate,
           snapshot: params.snapshot,
           error: failureMsg,
@@ -2363,10 +3116,12 @@ export class IntelligenceEngine {
         providerUsed: 'LOCAL',
         isExternalModel: false,
         toolRecords,
+        attachments: attachmentRefs.length > 0 ? attachmentRefs : undefined,
         memoryCandidate,
         snapshot: params.snapshot
       });
     } finally {
+      this.streamingText = '';
       if (this.activeRequestId === reqId) {
         this.activeAbortController = null;
         this.activeRequestId = null;
@@ -2449,7 +3204,9 @@ export class IntelligenceEngine {
     const active = suggestionEngine.evaluateContext({
       snapshot,
       recentTurns: conversationManager.getRecentTurns(6),
-      status: this.status
+      status: this.status,
+      latestPlan: planningEngine.getLatestPlan(),
+      sessionTurnCount: conversationManager.getTurns().length
     });
     if (active.length > 0 && this.status === 'STANDBY') {
       this.emit();
@@ -2553,6 +3310,10 @@ export class IntelligenceEngine {
     isExternalModel: boolean;
     toolRecords: ToolActivityRecord[];
     plan?: ExecutionPlan;
+    agentRun?: AgentRunSnapshot;
+    attachments?: IntelligenceRequestResult['attachments'];
+    streamed?: boolean;
+    fallbackUsed?: boolean;
     pendingApproval?: PendingToolApproval;
     pendingPermission?: PermissionRequest;
     interactivePrompt?: PendingInteractivePrompt;
@@ -2569,7 +3330,9 @@ export class IntelligenceEngine {
     const activeSuggestions = suggestionEngine.evaluateContext({
       snapshot: params.snapshot,
       recentTurns: conversationManager.getRecentTurns(6),
-      status: params.status
+      status: params.status,
+      latestPlan: planningEngine.getLatestPlan(),
+      sessionTurnCount: conversationManager.getTurns().length
     });
 
     const summary = params.error
@@ -2588,6 +3351,10 @@ export class IntelligenceEngine {
       isExternalModel: params.isExternalModel,
       toolRecords: params.toolRecords,
       plan: params.plan,
+      agentRun: params.agentRun,
+      attachments: params.attachments,
+      streamed: params.streamed,
+      fallbackUsed: params.fallbackUsed,
       pendingApproval: params.pendingApproval,
       pendingPermission: params.pendingPermission,
       interactivePrompt: params.interactivePrompt,

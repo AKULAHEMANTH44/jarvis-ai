@@ -11,6 +11,7 @@ import { FloatingSpatialPanels } from './components/Workspace/FloatingSpatialPan
 import { PermissionConfirmationModal } from './components/Workspace/PermissionConfirmationModal';
 import { AIConfigModal } from './components/HUD/AIConfigModal';
 import { IntelligenceHUD, IntelligenceTabId } from './components/HUD/IntelligenceHUD';
+import { PermissionSetupWizard } from './components/HUD/PermissionSetupWizard';
 import { CommandCenterDashboard } from './components/CommandCenter/CommandCenterDashboard';
 import { HologramSceneManager } from './three/HologramScene';
 import {
@@ -34,6 +35,7 @@ import {
   AssistantMessage,
   VoiceCommand,
   DesktopPermissionRequest,
+  PendingAttachment,
   ToolActivityRecord,
   WorkspaceContextSnapshot
 } from './types/assistant';
@@ -51,6 +53,7 @@ import { memoryManager } from './services/memoryManager';
 import { suggestionEngine } from './services/suggestionEngine';
 import { fileAccessService } from './services/fileAccessService';
 import { musicService } from './services/musicService';
+import { permissionPolicy } from './services/permissionPolicy';
 import {
   HudDrawerId,
   HudLayoutState,
@@ -137,6 +140,9 @@ export const App: React.FC = () => {
   // Modals & Panels State
   const [permissionRequest, setPermissionRequest] = useState<DesktopPermissionRequest | null>(null);
   const [isAIConfigOpen, setIsAIConfigOpen] = useState<boolean>(false);
+  const [isSetupWizardOpen, setIsSetupWizardOpen] = useState<boolean>(
+    () => !autostart && !permissionPolicy.isSetupCompleted()
+  );
   const [notes, setNotes] = useState<string>(
     'STARK INDUSTRIES // MARK VII MEMORANDUM\n• VISION 1.2 spatial sphere core calibrated\n• Fusion harmonic stabilized at 142.8 GHz\n• Multi-object spatial collision matrix active\n• Local-first autonomous intelligence engaged'
   );
@@ -217,6 +223,15 @@ export const App: React.FC = () => {
     handTrackingService.setConfidenceThreshold(calibration.confidenceThreshold);
     sceneManagerRef.current?.setRotationDamping(calibration.rotationDamping);
   }, [calibration.confidenceThreshold, calibration.rotationDamping]);
+
+  useEffect(() => {
+    void permissionPolicy.initializeFromHost().then((cfg) => {
+      if (!autostart && !cfg.setupCompleted) {
+        setIsSetupWizardOpen(true);
+      }
+    });
+    void permissionPolicy.refreshHardwarePermissionStates();
+  }, [autostart]);
 
   // Camera & Tracking State
   const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
@@ -1606,13 +1621,24 @@ export const App: React.FC = () => {
       setVoiceError(null);
       appendMessage('JARVIS', 'Audio sensor deactivated. Hardware microphone tracks closed.', 'INFO');
     } else {
+      if (permissionPolicy.getCapabilityDecision('MICROPHONE_ACCESS') === 'DENIED') {
+        const msg =
+          'Microphone Access is disabled in JARVIS Permissions. Enable it in the Permissions tab or Setup Wizard to activate voice recognition.';
+        setVoiceError(msg);
+        appendMessage('JARVIS', msg, 'ALERT');
+        return;
+      }
       setVoiceError(null);
       const res = await speechService.startListeningWithPermission();
       setIsVoiceActive(res.started);
       if (res.started) {
+        permissionPolicy.setObservedHardwareState('MICROPHONE_ACCESS', 'granted');
         audioService.playActivationWhoosh();
         appendMessage('JARVIS', 'Audio sensor online. Speak your command, sir.', 'INFO');
       } else if (res.error) {
+        if (!res.micGranted && res.error.toLowerCase().includes('denied')) {
+          permissionPolicy.setObservedHardwareState('MICROPHONE_ACCESS', 'denied');
+        }
         setVoiceError(res.error);
         appendMessage('JARVIS', res.error, 'ALERT');
       }
@@ -1653,6 +1679,13 @@ export const App: React.FC = () => {
       }
       appendMessage('JARVIS', 'Optical sensor deactivated. Camera hardware disconnected.', 'INFO');
     } else {
+      if (permissionPolicy.getCapabilityDecision('CAMERA_ACCESS') === 'DENIED') {
+        const msg =
+          'Camera Access is disabled in JARVIS Permissions. Enable it in the Permissions tab or Setup Wizard to start the optical sensor.';
+        setCameraError(msg);
+        appendMessage('JARVIS', msg, 'ALERT');
+        return;
+      }
       if (!videoRef.current) {
         const msg = 'Optical video viewport is not ready yet. Please retry in workspace mode.';
         setCameraError(msg);
@@ -1671,9 +1704,13 @@ export const App: React.FC = () => {
       );
       setIsCameraActive(started);
       if (started) {
+        permissionPolicy.setObservedHardwareState('CAMERA_ACCESS', 'granted');
         audioService.playActivationWhoosh();
         appendMessage('JARVIS', 'Optical sensor online. MediaPipe 21-landmark hand tracking active.', 'INFO');
       } else {
+        if (handTrackingService.getPermissionStatus() === 'denied') {
+          permissionPolicy.setObservedHardwareState('CAMERA_ACCESS', 'denied');
+        }
         const errMsg = handTrackingService.getLastError() || 'Unable to activate optical camera sensor.';
         setCameraError(errMsg);
         appendMessage('JARVIS', errMsg, 'ALERT');
@@ -2242,16 +2279,24 @@ export const App: React.FC = () => {
   }, [handleReconstruct, handleResetTransform]);
 
   const handleSubmitBrainPrompt = useCallback(
-    async (prompt: string) => {
+    async (prompt: string, attachments?: PendingAttachment[]) => {
+      const displayPrompt =
+        prompt.trim() ||
+        (attachments && attachments.length > 0
+          ? `[Attached: ${attachments.map((a) => a.name).join(', ')}]`
+          : '');
       const res = await intelligenceEngine.processRequest({
         input: prompt,
         snapshot: buildWorkspaceSnapshot(),
-        source: 'CONSOLE'
+        source: 'CONSOLE',
+        attachments
       });
       if (res.pendingPermission) {
         setRequestedBrainTab({ tab: 'PERMISSIONS', nonce: nextNonce() });
       }
-      appendMessage('USER', prompt, 'COMMAND');
+      if (displayPrompt) {
+        appendMessage('USER', displayPrompt, 'COMMAND');
+      }
       appendMessage('JARVIS', res.reply, res.error ? 'ALERT' : 'RESPONSE');
     },
     [appendMessage, buildWorkspaceSnapshot]
@@ -2351,6 +2396,8 @@ export const App: React.FC = () => {
           onToggleVoice={handleToggleVoice}
           intelligenceState={intelligenceState}
           recentTools={recentTools}
+          isProcessingCommand={isProcessingCommand}
+          onCancelRequest={() => speechService.interruptAndCancel()}
           onSendCommand={handleSendConsoleCommand}
           onApprovePermission={(permId) => void intelligenceEngine.resolvePendingPermission('APPROVE_ONCE', permId)}
           onDenyPermission={(permId) => void intelligenceEngine.resolvePendingPermission('DENY', permId)}
@@ -2702,14 +2749,15 @@ export const App: React.FC = () => {
                 intelligenceState={intelligenceState}
                 workspaceSnapshot={buildWorkspaceSnapshot()}
                 requestedTab={requestedBrainTab}
-                onSubmitPrompt={(prompt) => void handleSubmitBrainPrompt(prompt)}
-                onCancelRequest={() => intelligenceEngine.cancelActiveRequest()}
+                onSubmitPrompt={(prompt, attachments) => void handleSubmitBrainPrompt(prompt, attachments)}
+                onCancelRequest={() => speechService.interruptAndCancel()}
                 onOpenAIConfig={() => setIsAIConfigOpen(true)}
                 onOpenTasksDrawer={() => {
                   setTaskSubTab('AUTOMATION');
                   setRequestedTaskTab({ tab: 'AUTOMATION', nonce: nextNonce() });
                   setHudState((prev) => openDrawerState(prev, 'TASKS'));
                 }}
+                onOpenSetupWizard={() => setIsSetupWizardOpen(true)}
                 onClose={() => setHudState(closeDrawerState)}
               />
             </section>
@@ -2798,6 +2846,13 @@ export const App: React.FC = () => {
       <AIConfigModal
         isOpen={isAIConfigOpen}
         onClose={() => setIsAIConfigOpen(false)}
+      />
+
+      {/* 8. Persistent Permission Setup Wizard */}
+      <PermissionSetupWizard
+        isOpen={!showBootOverlay && isSetupWizardOpen}
+        isFirstRun={!permissionPolicy.isSetupCompleted()}
+        onClose={() => setIsSetupWizardOpen(false)}
       />
     </div>
   );

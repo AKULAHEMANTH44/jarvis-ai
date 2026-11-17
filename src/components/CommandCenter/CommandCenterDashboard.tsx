@@ -23,6 +23,7 @@ import {
 import { GestureDetectionResult } from '../../types/gesture';
 import { CameraPermissionStatus } from '../../services/handTracking';
 import { IntelligenceStateSnapshot } from '../../services/intelligenceEngine';
+import { planningEngine } from '../../services/planningEngine';
 import { ToolActivityRecord } from '../../types/assistant';
 
 interface CommandCenterDashboardProps {
@@ -58,6 +59,8 @@ interface CommandCenterDashboardProps {
   onToggleVoice: () => void;
   intelligenceState: IntelligenceStateSnapshot;
   recentTools: ToolActivityRecord[];
+  isProcessingCommand?: boolean;
+  onCancelRequest?: () => void;
   onSendCommand: (text: string) => void;
   onApprovePermission: (permId: string) => void;
   onDenyPermission: (permId: string) => void;
@@ -108,6 +111,8 @@ export const CommandCenterDashboard: React.FC<CommandCenterDashboardProps> = ({
   onToggleVoice,
   intelligenceState,
   recentTools,
+  isProcessingCommand = false,
+  onCancelRequest,
   onSendCommand,
   onApprovePermission,
   onDenyPermission,
@@ -134,7 +139,7 @@ export const CommandCenterDashboard: React.FC<CommandCenterDashboardProps> = ({
     else if (nav === 'AGENTS' || nav === 'TASKS' || nav === 'WORKFLOWS') onOpenTasks();
     else if (nav === 'MEMORY') onOpenMemory();
     else if (nav === 'CONVERSATIONS' || nav === 'KNOWLEDGE') onOpenBrain();
-    else if (nav === 'TOOLS') onOpenPermissions();
+    else if (nav === 'TOOLS' || nav === 'PERMISSIONS') onOpenPermissions();
     else if (nav === 'FOCUS') onToggleFocus();
   };
 
@@ -177,7 +182,7 @@ export const CommandCenterDashboard: React.FC<CommandCenterDashboardProps> = ({
                 isVoiceActive={isVoiceActive}
                 isCameraActive={isCameraActive}
                 provider={intelligenceState.lastProviderUsed}
-                hasApiKey={true}
+                hasApiKey={intelligenceState.lastProviderUsed !== 'LOCAL'}
                 onOpenAIConfig={onOpenAIConfig}
                 onOpenMemory={onOpenMemory}
                 onToggleCamera={onToggleCamera}
@@ -238,7 +243,9 @@ export const CommandCenterDashboard: React.FC<CommandCenterDashboardProps> = ({
               <ActiveAgentsPanel
                 isVoiceActive={isVoiceActive}
                 isCameraActive={isCameraActive}
-                hasProviderKey={true}
+                hasProviderKey={intelligenceState.lastProviderUsed !== 'LOCAL'}
+                intelligenceStatus={intelligenceState.status}
+                activeAgentRun={intelligenceState.activeAgentRun}
               />
             </div>
             <div className="lg:col-span-3">
@@ -246,6 +253,9 @@ export const CommandCenterDashboard: React.FC<CommandCenterDashboardProps> = ({
                 latestPlan={intelligenceState.latestPlan}
                 onOpenPlan={onOpenBrain}
                 onOpenTasks={onOpenTasks}
+                onCancelPlan={(planId) => {
+                  planningEngine.cancelPlan(planId);
+                }}
               />
             </div>
             <div className="lg:col-span-3">
@@ -283,7 +293,8 @@ export const CommandCenterDashboard: React.FC<CommandCenterDashboardProps> = ({
         isVoiceActive={isVoiceActive}
         onToggleVoice={onToggleVoice}
         onSendCommand={onSendCommand}
-        isProcessing={false}
+        isProcessing={isProcessingCommand}
+        onCancelRequest={onCancelRequest}
         onOpenVoiceConsole={onOpenVoiceConsole}
       />
     </div>

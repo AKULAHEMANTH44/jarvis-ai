@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Mic, MicOff, Send, Volume2, Sparkles, Radio } from 'lucide-react';
+import { Mic, MicOff, Send, Radio, Square } from 'lucide-react';
 import { audioService } from '../../services/soundFx';
 
 interface VoiceCommandDockProps {
@@ -7,6 +7,7 @@ interface VoiceCommandDockProps {
   onToggleVoice: () => void;
   onSendCommand: (text: string) => void;
   isProcessing: boolean;
+  onCancelRequest?: () => void;
   onOpenVoiceConsole: () => void;
 }
 
@@ -15,6 +16,7 @@ export const VoiceCommandDock: React.FC<VoiceCommandDockProps> = ({
   onToggleVoice,
   onSendCommand,
   isProcessing,
+  onCancelRequest,
   onOpenVoiceConsole
 }) => {
   const [inputVal, setInputVal] = useState('');
@@ -61,6 +63,20 @@ export const VoiceCommandDock: React.FC<VoiceCommandDockProps> = ({
             placeholder={isVoiceActive ? 'Listening to voice command...' : 'Talk or type to J.A.R.V.I.S...'}
             className="w-full bg-black/70 border border-cyan-500/30 rounded-xl px-3.5 py-2 text-xs font-mono text-white placeholder-cyan-500/50 focus:outline-none focus:border-cyan-400 shadow-inner"
           />
+          {isProcessing && onCancelRequest && (
+            <button
+              type="button"
+              onClick={() => {
+                audioService.playChirp(900);
+                onCancelRequest();
+              }}
+              aria-label="Cancel Active AI Request"
+              title="Stop & Cancel Active Request"
+              className="p-2.5 rounded-xl bg-red-950/60 hover:bg-red-900/70 border border-red-400/70 text-red-200 transition-colors"
+            >
+              <Square className="w-4 h-4" />
+            </button>
+          )}
           <button
             type="submit"
             aria-label="Send"

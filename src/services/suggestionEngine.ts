@@ -1,6 +1,7 @@
 import {
   AISuggestion,
   ConversationTurn,
+  ExecutionPlan,
   IntelligenceStatus,
   WorkspaceContextSnapshot
 } from '../types/assistant';
@@ -53,8 +54,10 @@ export class SuggestionEngine {
     snapshot: WorkspaceContextSnapshot;
     recentTurns: ConversationTurn[];
     status: IntelligenceStatus;
+    latestPlan?: ExecutionPlan | null;
+    sessionTurnCount?: number;
   }): AISuggestion[] {
-    const { snapshot, recentTurns, status } = params;
+    const { snapshot, recentTurns, status, latestPlan, sessionTurnCount } = params;
     if (this.shouldSuppressProactiveSurface(status, snapshot)) {
       return this.getActiveSuggestions();
     }
@@ -172,6 +175,55 @@ export class SuggestionEngine {
         recommendedAction: 'Arrange all unlocked objects into a clean spatial grid.',
         relatedTool: 'control_hologram_transform',
         toolArgs: { action: 'set_formation', formation: 'GRID' }
+      });
+    }
+
+    // 8. Incomplete or failed plan review
+    if (latestPlan && (latestPlan.status === 'PARTIAL' || latestPlan.status === 'FAILED')) {
+      const failedCount = latestPlan.steps.filter((s) => s.status === 'FAILED' || s.status === 'SKIPPED').length;
+      candidates.push({
+        signature: `plan-incomplete-${latestPlan.id}`,
+        title: 'Review Incomplete Plan Steps',
+        explanation: `Plan "${latestPlan.objective}" finished as ${latestPlan.status} with ${failedCount} incomplete step(s).`,
+        reason: 'Execution plan had failed or skipped steps requiring review.',
+        priority: 'HIGH',
+        recommendedAction: 'Inspect workspace state and retry or adjust plan prerequisites.',
+        relatedTool: 'inspect_workspace',
+        toolArgs: { includeComponents: true }
+      });
+    }
+
+    // 9. Post-demo verification reminder when demo plan completes
+    if (
+      latestPlan &&
+      latestPlan.status === 'COMPLETED' &&
+      /\b(demo|demonstration|prepare)\b/i.test(latestPlan.objective)
+    ) {
+      candidates.push({
+        signature: `demo-verify-${latestPlan.id}`,
+        title: 'Run Final Health & Build Verification',
+        explanation: 'Demo readiness plan completed. Record final TypeScript/test/build verification checklist.',
+        reason: 'Completed demonstration prep workflow.',
+        priority: 'MEDIUM',
+        recommendedAction: 'Append final pre-demo checklist to Mission Notes.',
+        relatedTool: 'append_workspace_note',
+        toolArgs: {
+          text: '[Final Verification] Confirm npx tsc --noEmit, npx vitest run, and npm run build pass before demo.'
+        }
+      });
+    }
+
+    // 10. Long session context summarization
+    if ((sessionTurnCount || 0) >= 10) {
+      candidates.push({
+        signature: `long-session-recall-${Math.floor((sessionTurnCount || 0) / 10)}`,
+        title: 'Archive Long Session Context',
+        explanation: `Current session has reached ${sessionTurnCount} turns. Retrieve and review active memory & session summary.`,
+        reason: 'Extended multi-turn session active.',
+        priority: 'LOW',
+        recommendedAction: 'Retrieve session memory and working context summary.',
+        relatedTool: 'retrieve_context_and_memory',
+        toolArgs: { query: 'session summary' }
       });
     }
 

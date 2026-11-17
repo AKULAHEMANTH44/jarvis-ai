@@ -19,6 +19,8 @@ export interface CreatePermissionParams {
   target: string;
   reason: string;
   riskLevel?: PermissionRiskLevel;
+  securityLevel?: import('../types/assistant').PermissionSecurityLevel;
+  capabilityId?: import('../types/assistant').PermissionCapabilityId;
   requestedScope: string;
   ttlMs?: number;
   metadata?: Record<string, unknown>;
@@ -115,6 +117,8 @@ export class PermissionManager {
       targetFingerprint: fingerprint,
       reason: params.reason.trim(),
       riskLevel: params.riskLevel || 'MEDIUM',
+      securityLevel: params.securityLevel,
+      capabilityId: params.capabilityId,
       requestedScope: params.requestedScope.trim() || 'Single-use execution only',
       createdAt: now,
       expiresAt: now + ttl,
@@ -124,6 +128,87 @@ export class PermissionManager {
 
     this.requests.set(req.id, req);
     this.appendAudit(req, 'REQUESTED', `Waiting for user approval (${req.requestedScope}).`, now);
+    this.notify();
+    return { ...req };
+  }
+
+  /**
+   * Issue a tracked single-use execution token pre-authorized by a Level 1 persistent user grant.
+   * Preserves audit logs and single-use consumption integrity inside PermissionManager.
+   */
+  public authorizePreapprovedExecution(params: CreatePermissionParams, now = Date.now()): PermissionRequest {
+    this.expireOutdatedRequests(now);
+
+    const cleanTarget = params.target.trim();
+    if (!cleanTarget) {
+      throw new Error('Preapproved execution requires a concrete, non-empty target.');
+    }
+
+    const ttl = Math.max(100, params.ttlMs ?? DEFAULT_PERMISSION_TTL_MS);
+    const req: PermissionRequest = {
+      id: `perm-${now.toString(36)}-${Math.random().toString(36).substring(2, 6)}`,
+      category: params.category,
+      requestedAction: params.requestedAction.trim(),
+      target: cleanTarget,
+      targetFingerprint: normalizePermissionTarget(cleanTarget),
+      reason: params.reason.trim(),
+      riskLevel: params.riskLevel || 'LOW',
+      securityLevel: params.securityLevel || 'LEVEL_1_PREAPPROVED',
+      capabilityId: params.capabilityId,
+      requestedScope: params.requestedScope.trim() || 'Level 1 persistently authorized execution',
+      createdAt: now,
+      expiresAt: now + ttl,
+      decidedAt: now,
+      status: 'APPROVED',
+      resultSummary: 'Authorized automatically via Level 1 persistent user grant.',
+      metadata: params.metadata ? { ...params.metadata } : undefined
+    };
+
+    this.requests.set(req.id, req);
+    this.appendAudit(
+      req,
+      'POLICY_PREAPPROVED',
+      `Executed under Level 1 persistent grant (${req.requestedScope}).`,
+      now
+    );
+    this.notify();
+    return { ...req };
+  }
+
+  public recordPolicyBlock(
+    params: {
+      category: PermissionCategory;
+      requestedAction: string;
+      target: string;
+      reason: string;
+      securityLevel?: import('../types/assistant').PermissionSecurityLevel;
+      capabilityId?: import('../types/assistant').PermissionCapabilityId;
+    },
+    now = Date.now()
+  ): PermissionRequest {
+    const cleanTarget = params.target.trim() || 'unspecified-target';
+    const req: PermissionRequest = {
+      id: `perm-blk-${now.toString(36)}-${Math.random().toString(36).substring(2, 6)}`,
+      category: params.category,
+      requestedAction: params.requestedAction.trim(),
+      target: cleanTarget,
+      targetFingerprint: normalizePermissionTarget(cleanTarget),
+      reason: params.reason.trim(),
+      riskLevel: 'MEDIUM',
+      securityLevel: params.securityLevel,
+      capabilityId: params.capabilityId,
+      requestedScope: 'Blocked by persistent permission policy',
+      createdAt: now,
+      expiresAt: now,
+      decidedAt: now,
+      completedAt: now,
+      status: 'DENIED',
+      resultSummary: params.reason.trim(),
+      error: 'PERMISSION_DENIED_BY_POLICY'
+    };
+
+    this.requests.set(req.id, req);
+    this.appendAudit(req, 'POLICY_BLOCKED', params.reason.trim(), now);
     this.notify();
     return { ...req };
   }
