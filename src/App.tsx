@@ -34,6 +34,7 @@ import {
   AssistantMessage,
   VoiceCommand,
   DesktopPermissionRequest,
+  ToolActivityRecord,
   WorkspaceContextSnapshot
 } from './types/assistant';
 import { CameraPermissionStatus, handTrackingService } from './services/handTracking';
@@ -99,6 +100,9 @@ export const App: React.FC = () => {
   const [isCanvasInteracting, setIsCanvasInteracting] = useState<boolean>(false);
   const [intelligenceState, setIntelligenceState] = useState<IntelligenceStateSnapshot>(() =>
     intelligenceEngine.getSnapshot()
+  );
+  const [recentTools, setRecentTools] = useState<ToolActivityRecord[]>(() =>
+    toolRegistry.getActivityHistory(6)
   );
 
   // Unified Hologram-First Contextual HUD & Focus Mode State
@@ -2142,7 +2146,13 @@ export const App: React.FC = () => {
         snap.status === 'VERIFYING';
       setIsProcessingCommand(busy);
     });
-    return () => unsub();
+    const unsubTools = toolRegistry.subscribe(() => {
+      setRecentTools(toolRegistry.getActivityHistory(6));
+    });
+    return () => {
+      unsub();
+      unsubTools();
+    };
   }, []);
 
   useEffect(() => {
@@ -2340,9 +2350,11 @@ export const App: React.FC = () => {
           isVoiceActive={isVoiceActive}
           onToggleVoice={handleToggleVoice}
           intelligenceState={intelligenceState}
+          recentTools={recentTools}
           onSendCommand={handleSendConsoleCommand}
           onApprovePermission={(permId) => void intelligenceEngine.resolvePendingPermission('APPROVE_ONCE', permId)}
           onDenyPermission={(permId) => void intelligenceEngine.resolvePendingPermission('DENY', permId)}
+          onCancelPermission={(permId) => void intelligenceEngine.resolvePendingPermission('CANCEL', permId)}
           onOpenAIConfig={() => setIsAIConfigOpen(true)}
           onOpenObjectLab={() => {
             setMode('WORKSPACE');

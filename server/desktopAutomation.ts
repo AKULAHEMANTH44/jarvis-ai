@@ -2,29 +2,30 @@ import path from 'path';
 import fs from 'fs';
 import { spawn } from 'child_process';
 
+export interface AllowedApplicationEntry {
+  id: string;
+  displayName: string;
+  description: string;
+  winExecutable: string;
+  macExecutable?: string;
+  linuxExecutable?: string;
+  defaultArgs?: string[];
+  category?: 'APP' | 'BROWSER' | 'MUSIC';
+}
+
 /**
- * Strict allowlist of permitted Windows / Desktop applications.
+ * Strict configurable allowlist of permitted Windows / Desktop applications.
  * No arbitrary binaries, scripts, or terminal shells (cmd.exe, powershell.exe, bash, etc.) are allowed.
  */
-export const ALLOWED_APPLICATIONS: Record<
-  string,
-  {
-    id: string;
-    displayName: string;
-    description: string;
-    winExecutable: string;
-    macExecutable?: string;
-    linuxExecutable?: string;
-    defaultArgs?: string[];
-  }
-> = {
+export const DEFAULT_ALLOWED_APPLICATIONS: Record<string, AllowedApplicationEntry> = {
   VS_CODE: {
     id: 'VS_CODE',
     displayName: 'Visual Studio Code',
     description: 'Code editor and development environment',
     winExecutable: 'code.cmd',
     macExecutable: 'code',
-    linuxExecutable: 'code'
+    linuxExecutable: 'code',
+    category: 'APP'
   },
   NOTEPAD: {
     id: 'NOTEPAD',
@@ -32,7 +33,8 @@ export const ALLOWED_APPLICATIONS: Record<
     description: 'Lightweight text editor',
     winExecutable: 'notepad.exe',
     macExecutable: 'open',
-    linuxExecutable: 'gedit'
+    linuxExecutable: 'gedit',
+    category: 'APP'
   },
   CALCULATOR: {
     id: 'CALCULATOR',
@@ -40,7 +42,8 @@ export const ALLOWED_APPLICATIONS: Record<
     description: 'Standard system scientific calculator',
     winExecutable: 'calc.exe',
     macExecutable: 'open',
-    linuxExecutable: 'gnome-calculator'
+    linuxExecutable: 'gnome-calculator',
+    category: 'APP'
   },
   EXPLORER: {
     id: 'EXPLORER',
@@ -48,7 +51,8 @@ export const ALLOWED_APPLICATIONS: Record<
     description: 'Windows graphical folder and filesystem navigator',
     winExecutable: 'explorer.exe',
     macExecutable: 'open',
-    linuxExecutable: 'xdg-open'
+    linuxExecutable: 'xdg-open',
+    category: 'APP'
   },
   BROWSER: {
     id: 'BROWSER',
@@ -56,7 +60,17 @@ export const ALLOWED_APPLICATIONS: Record<
     description: 'System default web browser',
     winExecutable: 'explorer.exe',
     macExecutable: 'open',
-    linuxExecutable: 'xdg-open'
+    linuxExecutable: 'xdg-open',
+    category: 'BROWSER'
+  },
+  CHROME: {
+    id: 'CHROME',
+    displayName: 'Google Chrome',
+    description: 'Google Chrome web browser',
+    winExecutable: 'chrome.exe',
+    macExecutable: 'open',
+    linuxExecutable: 'google-chrome',
+    category: 'BROWSER'
   },
   SPOTIFY: {
     id: 'SPOTIFY',
@@ -64,8 +78,13 @@ export const ALLOWED_APPLICATIONS: Record<
     description: 'Music streaming and playback application',
     winExecutable: 'spotify.exe',
     macExecutable: 'open',
-    linuxExecutable: 'spotify'
+    linuxExecutable: 'spotify',
+    category: 'MUSIC'
   }
+};
+
+export const ALLOWED_APPLICATIONS: Record<string, AllowedApplicationEntry> = {
+  ...DEFAULT_ALLOWED_APPLICATIONS
 };
 
 /**
@@ -87,6 +106,8 @@ export const BLOCKED_COMMANDS = new Set([
   'cscript.exe',
   'reg',
   'reg.exe',
+  'regedit',
+  'regedit.exe',
   'format',
   'del',
   'rmdir',
@@ -96,8 +117,12 @@ export const BLOCKED_COMMANDS = new Set([
   'curl',
   'wget',
   'rundll32',
-  'rundll32.exe'
+  'rundll32.exe',
+  'mshta',
+  'mshta.exe'
 ]);
+
+const DANGEROUS_ARG_PATTERN = /[;&|`$<>\r\n\0]|^(?:\/c|-c|-e|--eval|-enc|-encodedcommand|-command)(?:$|[=\s:])/i;
 
 export interface DesktopExecutionResult {
   ok: boolean;
@@ -110,14 +135,118 @@ export interface DesktopExecutionResult {
   details?: Record<string, unknown>;
 }
 
+export interface DesktopAuditEntry {
+  id: string;
+  action: string;
+  target: string;
+  ok: boolean;
+  pid?: number;
+  error?: string;
+  timestamp: number;
+}
+
 export class DesktopAutomationService {
+  private allowedApplications: Map<string, AllowedApplicationEntry> = new Map(
+    Object.entries(DEFAULT_ALLOWED_APPLICATIONS)
+  );
+  private approvedRoots: Set<string> = new Set();
+  private requireApprovedRoot = false;
+  private auditLog: DesktopAuditEntry[] = [];
+
+  public getAllowedApplications(): AllowedApplicationEntry[] {
+    return Array.from(this.allowedApplications.values());
+  }
+
+  public registerAllowedApplication(entry: AllowedApplicationEntry): { ok: boolean; error?: string } {
+    const normId = entry.id.trim().toUpperCase().replace(/[\s-]+/g, '_');
+    const winBin = path.basename(entry.winExecutable).toLowerCase();
+    const linuxBin = entry.linuxExecutable ? path.basename(entry.linuxExecutable).toLowerCase() : '';
+    const macBin = entry.macExecutable ? path.basename(entry.macExecutable).toLowerCase() : '';
+
+    if (
+      BLOCKED_COMMANDS.has(winBin) ||
+      (linuxBin && BLOCKED_COMMANDS.has(linuxBin)) ||
+      (macBin && BLOCKED_COMMANDS.has(macBin))
+    ) {
+      return { ok: false, error: `Blocked executable "${entry.winExecutable}" cannot be registered.` };
+    }
+
+    if (/[;&|`$<>\r\n\0]/.test(entry.winExecutable)) {
+      return { ok: false, error: 'Executable name contains disallowed shell characters.' };
+    }
+
+    this.allowedApplications.set(normId, { ...entry, id: normId });
+    return { ok: true };
+  }
+
+  public resetAllowedApplications(): void {
+    this.allowedApplications = new Map(Object.entries(DEFAULT_ALLOWED_APPLICATIONS));
+  }
+
+  public setRequireApprovedPath(enabled: boolean): void {
+    this.requireApprovedRoot = enabled;
+  }
+
+  public approvePath(rawPath: string): { ok: boolean; normalizedPath?: string; error?: string } {
+    const val = this.validatePath(rawPath, { skipApprovedCheck: true });
+    if (!val.valid || !val.normalizedPath) {
+      return { ok: false, error: val.error };
+    }
+    this.approvedRoots.add(val.normalizedPath);
+    return { ok: true, normalizedPath: val.normalizedPath };
+  }
+
+  public getApprovedPaths(): string[] {
+    return Array.from(this.approvedRoots);
+  }
+
+  public clearApprovedPaths(): void {
+    this.approvedRoots.clear();
+  }
+
+  public isPathWithinApprovedRoots(resolvedPath: string): boolean {
+    if (this.approvedRoots.size === 0) return !this.requireApprovedRoot;
+    const normalizedTarget = path.resolve(resolvedPath);
+    for (const root of this.approvedRoots) {
+      const normalizedRoot = path.resolve(root);
+      if (normalizedTarget === normalizedRoot) return true;
+      const rootWithSep = normalizedRoot.endsWith(path.sep) ? normalizedRoot : `${normalizedRoot}${path.sep}`;
+      if (normalizedTarget.startsWith(rootWithSep)) return true;
+    }
+    return false;
+  }
+
+  public getAuditLog(limit = 40): DesktopAuditEntry[] {
+    return this.auditLog.slice(0, Math.max(1, limit)).map((e) => ({ ...e }));
+  }
+
+  public clearAuditLog(): void {
+    this.auditLog = [];
+  }
+
+  private recordAudit(entry: Omit<DesktopAuditEntry, 'id' | 'timestamp'>): void {
+    this.auditLog.unshift({
+      id: `daud-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 5)}`,
+      timestamp: Date.now(),
+      ...entry
+    });
+    if (this.auditLog.length > 100) {
+      this.auditLog = this.auditLog.slice(0, 100);
+    }
+  }
+
   /**
    * Safe path validation:
-   * 1. Rejects path traversal sequences (e.g. '..', '%2e%2e', null bytes).
+   * 1. Rejects path traversal sequences (including URL-encoded '%2e%2e' and '..') & null bytes.
    * 2. Checks absolute path resolution.
-   * 3. Prevents access to forbidden system roots unless explicitly authorized.
+   * 3. Verifies path falls inside allowedRoot / approvedRoots when configured.
    */
-  public validatePath(rawPath: string, allowedRoot?: string): { valid: boolean; normalizedPath?: string; error?: string } {
+  public validatePath(
+    rawPath: string,
+    options: { allowedRoot?: string; skipApprovedCheck?: boolean } | string = {}
+  ): { valid: boolean; normalizedPath?: string; error?: string } {
+    const opts = typeof options === 'string' ? { allowedRoot: options } : options;
+
     if (!rawPath || typeof rawPath !== 'string') {
       return { valid: false, error: 'Path is required and must be a string.' };
     }
@@ -127,26 +256,40 @@ export class DesktopAutomationService {
       return { valid: false, error: 'Path cannot be empty.' };
     }
 
-    // Check for null bytes or dangerous control characters
     if (trimmed.includes('\0') || /[\r\n]/.test(trimmed)) {
       return { valid: false, error: 'Path contains prohibited control characters.' };
     }
 
-    // Check for directory traversal sequences
-    if (/(^|[\\/])\.\.([\\/]|$)/.test(trimmed)) {
+    let decoded = trimmed;
+    try {
+      decoded = decodeURIComponent(trimmed);
+    } catch {
+      decoded = trimmed;
+    }
+
+    if (/(^|[\\/])\.\.([\\/]|$)/.test(trimmed) || /(^|[\\/])\.\.([\\/]|$)/.test(decoded)) {
       return { valid: false, error: 'Path traversal (..) is strictly prohibited.' };
     }
 
     try {
       const resolved = path.resolve(trimmed);
 
-      // If an allowed root directory is specified, verify resolved path is inside it
-      if (allowedRoot) {
-        const resolvedRoot = path.resolve(allowedRoot);
-        if (!resolved.startsWith(resolvedRoot) && resolved !== resolvedRoot) {
+      if (opts.allowedRoot) {
+        const resolvedRoot = path.resolve(opts.allowedRoot);
+        const rootWithSep = resolvedRoot.endsWith(path.sep) ? resolvedRoot : `${resolvedRoot}${path.sep}`;
+        if (resolved !== resolvedRoot && !resolved.startsWith(rootWithSep)) {
           return {
             valid: false,
             error: `Path "${trimmed}" is outside the authorized root directory ("${resolvedRoot}").`
+          };
+        }
+      }
+
+      if (!opts.skipApprovedCheck && (this.requireApprovedRoot || this.approvedRoots.size > 0)) {
+        if (!this.isPathWithinApprovedRoots(resolved)) {
+          return {
+            valid: false,
+            error: `Path "${resolved}" is not within user-selected or approved desktop paths.`
           };
         }
       }
@@ -160,24 +303,86 @@ export class DesktopAutomationService {
     }
   }
 
+  private async spawnDetachedSafe(
+    executable: string,
+    args: string[]
+  ): Promise<{ ok: boolean; pid?: number; error?: string }> {
+    const baseName = path.basename(executable).toLowerCase();
+    if (BLOCKED_COMMANDS.has(baseName)) {
+      return { ok: false, error: `Blocked restricted command binary "${executable}".` };
+    }
+
+    return new Promise((resolve) => {
+      let settled = false;
+      try {
+        const child = spawn(executable, args, {
+          detached: true,
+          stdio: 'ignore',
+          shell: false
+        });
+
+        child.on('error', (err: NodeJS.ErrnoException) => {
+          if (!settled) {
+            settled = true;
+            resolve({
+              ok: false,
+              error: err.code === 'ENOENT' ? `Executable "${executable}" was not found on this system.` : err.message
+            });
+          }
+        });
+
+        setTimeout(() => {
+          if (!settled) {
+            settled = true;
+            try {
+              child.unref();
+            } catch {
+              // ignore unref errors
+            }
+            resolve({ ok: true, pid: child.pid });
+          }
+        }, 45);
+      } catch (err: unknown) {
+        if (!settled) {
+          settled = true;
+          resolve({ ok: false, error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+    });
+  }
+
   /**
    * Launch an application from the strict allowlist.
    * NEVER runs arbitrary shell commands.
    */
   public async launchApprovedApplication(appKeyOrId: string, customArgs: string[] = []): Promise<DesktopExecutionResult> {
-    const normalizedKey = appKeyOrId.trim().toUpperCase().replace(/[\s-]+/g, '_');
+    const rawTrimmed = String(appKeyOrId || '').trim();
+    const rawLower = rawTrimmed.toLowerCase();
+    const normalizedKey = rawTrimmed.toUpperCase().replace(/[\s-]+/g, '_');
 
-    // Find in allowlist by key or id
+    if (BLOCKED_COMMANDS.has(rawLower) || BLOCKED_COMMANDS.has(`${rawLower}.exe`)) {
+      const blockedRes: DesktopExecutionResult = {
+        ok: false,
+        action: 'APPLICATION_LAUNCH',
+        target: appKeyOrId,
+        verified: false,
+        summary: `Blocked restricted shell/system binary "${appKeyOrId}".`,
+        error: 'BLOCKED_SHELL_COMMAND'
+      };
+      this.recordAudit({ action: 'APPLICATION_LAUNCH', target: rawTrimmed, ok: false, error: blockedRes.error });
+      return blockedRes;
+    }
+
     const appEntry =
-      ALLOWED_APPLICATIONS[normalizedKey] ||
-      Object.values(ALLOWED_APPLICATIONS).find(
+      this.allowedApplications.get(normalizedKey) ||
+      Array.from(this.allowedApplications.values()).find(
         (a) =>
           a.id.toUpperCase() === normalizedKey ||
           a.displayName.toUpperCase().replace(/[\s-]+/g, '_') === normalizedKey
       );
 
     if (!appEntry) {
-      return {
+      const disallowedRes: DesktopExecutionResult = {
         ok: false,
         action: 'APPLICATION_LAUNCH',
         target: appKeyOrId,
@@ -185,52 +390,48 @@ export class DesktopAutomationService {
         summary: `Application "${appKeyOrId}" is not in the approved application allowlist.`,
         error: 'DISALLOWED_APPLICATION'
       };
+      this.recordAudit({ action: 'APPLICATION_LAUNCH', target: rawTrimmed, ok: false, error: disallowedRes.error });
+      return disallowedRes;
     }
 
-    // Sanitize any custom arguments (no semicolons, pipes, or command separators)
-    const sanitizedArgs = customArgs.filter((arg) => {
-      return typeof arg === 'string' && !/[;&|`$<>]/.test(arg);
-    });
+    const sanitizedArgs = Array.isArray(customArgs)
+      ? customArgs.filter((arg) => typeof arg === 'string' && !DANGEROUS_ARG_PATTERN.test(arg.trim()))
+      : [];
 
-    try {
-      const isWin = process.platform === 'win32';
-      const isMac = process.platform === 'darwin';
-      const executable = isWin
-        ? appEntry.winExecutable
-        : isMac
-        ? appEntry.macExecutable || 'open'
-        : appEntry.linuxExecutable || 'xdg-open';
+    const isWin = process.platform === 'win32';
+    const isMac = process.platform === 'darwin';
+    const executable = isWin
+      ? appEntry.winExecutable
+      : isMac
+      ? appEntry.macExecutable || 'open'
+      : appEntry.linuxExecutable || 'xdg-open';
 
-      // Safe spawn without shell (shell: false prevents command injection)
-      const child = spawn(executable, sanitizedArgs, {
-        detached: true,
-        stdio: 'ignore',
-        shell: false
-      });
-
-      // Unref so server doesn't wait for the desktop app to close
-      child.unref();
-
-      return {
-        ok: true,
-        action: 'APPLICATION_LAUNCH',
-        target: appEntry.displayName,
-        verified: true,
-        pid: child.pid,
-        summary: `Successfully launched ${appEntry.displayName} (PID: ${child.pid || 'detached'}).`,
-        details: { applicationId: appEntry.id, executable }
-      };
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return {
+    const spawnOut = await this.spawnDetachedSafe(executable, sanitizedArgs);
+    if (!spawnOut.ok) {
+      const failRes: DesktopExecutionResult = {
         ok: false,
         action: 'APPLICATION_LAUNCH',
         target: appEntry.displayName,
         verified: false,
-        summary: `Failed to launch ${appEntry.displayName}: ${msg}`,
-        error: msg
+        summary: `Failed to launch ${appEntry.displayName}: ${spawnOut.error}`,
+        error: spawnOut.error,
+        details: { applicationId: appEntry.id, executable }
       };
+      this.recordAudit({ action: 'APPLICATION_LAUNCH', target: appEntry.displayName, ok: false, error: spawnOut.error });
+      return failRes;
     }
+
+    const okRes: DesktopExecutionResult = {
+      ok: true,
+      action: 'APPLICATION_LAUNCH',
+      target: appEntry.displayName,
+      verified: true,
+      pid: spawnOut.pid,
+      summary: `Successfully launched ${appEntry.displayName} (PID: ${spawnOut.pid || 'detached'}).`,
+      details: { applicationId: appEntry.id, executable }
+    };
+    this.recordAudit({ action: 'APPLICATION_LAUNCH', target: appEntry.displayName, ok: true, pid: spawnOut.pid });
+    return okRes;
   }
 
   /**
@@ -239,7 +440,7 @@ export class DesktopAutomationService {
   public async openApprovedFile(filePath: string): Promise<DesktopExecutionResult> {
     const val = this.validatePath(filePath);
     if (!val.valid || !val.normalizedPath) {
-      return {
+      const errRes: DesktopExecutionResult = {
         ok: false,
         action: 'FILE_ACCESS',
         target: filePath,
@@ -247,13 +448,13 @@ export class DesktopAutomationService {
         summary: val.error || 'Blocked invalid file path.',
         error: val.error
       };
+      this.recordAudit({ action: 'FILE_ACCESS', target: filePath, ok: false, error: errRes.error });
+      return errRes;
     }
 
     const targetPath = val.normalizedPath;
-
-    // Check if file actually exists
     if (!fs.existsSync(targetPath)) {
-      return {
+      const missingRes: DesktopExecutionResult = {
         ok: false,
         action: 'FILE_ACCESS',
         target: targetPath,
@@ -261,11 +462,13 @@ export class DesktopAutomationService {
         summary: `Target file "${path.basename(targetPath)}" was not found on disk.`,
         error: 'FILE_NOT_FOUND'
       };
+      this.recordAudit({ action: 'FILE_ACCESS', target: targetPath, ok: false, error: missingRes.error });
+      return missingRes;
     }
 
     const stat = fs.statSync(targetPath);
     if (stat.isDirectory()) {
-      return {
+      const dirRes: DesktopExecutionResult = {
         ok: false,
         action: 'FILE_ACCESS',
         target: targetPath,
@@ -273,40 +476,38 @@ export class DesktopAutomationService {
         summary: `Target "${targetPath}" is a directory. Use folder open action instead.`,
         error: 'IS_DIRECTORY'
       };
+      this.recordAudit({ action: 'FILE_ACCESS', target: targetPath, ok: false, error: dirRes.error });
+      return dirRes;
     }
 
-    try {
-      const isWin = process.platform === 'win32';
-      const isMac = process.platform === 'darwin';
-      const launcher = isWin ? 'explorer.exe' : isMac ? 'open' : 'xdg-open';
+    const isWin = process.platform === 'win32';
+    const isMac = process.platform === 'darwin';
+    const launcher = isWin ? 'explorer.exe' : isMac ? 'open' : 'xdg-open';
 
-      const child = spawn(launcher, [targetPath], {
-        detached: true,
-        stdio: 'ignore',
-        shell: false
-      });
-      child.unref();
-
-      return {
-        ok: true,
-        action: 'FILE_ACCESS',
-        target: targetPath,
-        verified: true,
-        pid: child.pid,
-        summary: `Opened file "${path.basename(targetPath)}" with default application.`,
-        details: { sizeBytes: stat.size, extension: path.extname(targetPath) }
-      };
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return {
+    const spawnOut = await this.spawnDetachedSafe(launcher, [targetPath]);
+    if (!spawnOut.ok) {
+      const failRes: DesktopExecutionResult = {
         ok: false,
         action: 'FILE_ACCESS',
         target: targetPath,
         verified: false,
-        summary: `Unable to open file: ${msg}`,
-        error: msg
+        summary: `Unable to open file: ${spawnOut.error}`,
+        error: spawnOut.error
       };
+      this.recordAudit({ action: 'FILE_ACCESS', target: targetPath, ok: false, error: spawnOut.error });
+      return failRes;
     }
+
+    this.recordAudit({ action: 'FILE_ACCESS', target: targetPath, ok: true, pid: spawnOut.pid });
+    return {
+      ok: true,
+      action: 'FILE_ACCESS',
+      target: targetPath,
+      verified: true,
+      pid: spawnOut.pid,
+      summary: `Opened file "${path.basename(targetPath)}" with default application.`,
+      details: { sizeBytes: stat.size, extension: path.extname(targetPath) }
+    };
   }
 
   /**
@@ -315,7 +516,7 @@ export class DesktopAutomationService {
   public async openApprovedFolder(folderPath: string): Promise<DesktopExecutionResult> {
     const val = this.validatePath(folderPath);
     if (!val.valid || !val.normalizedPath) {
-      return {
+      const errRes: DesktopExecutionResult = {
         ok: false,
         action: 'FOLDER_ACCESS',
         target: folderPath,
@@ -323,12 +524,13 @@ export class DesktopAutomationService {
         summary: val.error || 'Blocked invalid folder path.',
         error: val.error
       };
+      this.recordAudit({ action: 'FOLDER_ACCESS', target: folderPath, ok: false, error: errRes.error });
+      return errRes;
     }
 
     const targetPath = val.normalizedPath;
-
     if (!fs.existsSync(targetPath)) {
-      return {
+      const missingRes: DesktopExecutionResult = {
         ok: false,
         action: 'FOLDER_ACCESS',
         target: targetPath,
@@ -336,11 +538,13 @@ export class DesktopAutomationService {
         summary: `Target folder "${targetPath}" does not exist on disk.`,
         error: 'FOLDER_NOT_FOUND'
       };
+      this.recordAudit({ action: 'FOLDER_ACCESS', target: targetPath, ok: false, error: missingRes.error });
+      return missingRes;
     }
 
     const stat = fs.statSync(targetPath);
     if (!stat.isDirectory()) {
-      return {
+      const notDirRes: DesktopExecutionResult = {
         ok: false,
         action: 'FOLDER_ACCESS',
         target: targetPath,
@@ -348,50 +552,63 @@ export class DesktopAutomationService {
         summary: `Target "${targetPath}" is a file, not a folder.`,
         error: 'NOT_A_DIRECTORY'
       };
+      this.recordAudit({ action: 'FOLDER_ACCESS', target: targetPath, ok: false, error: notDirRes.error });
+      return notDirRes;
     }
 
-    try {
-      const isWin = process.platform === 'win32';
-      const isMac = process.platform === 'darwin';
-      const launcher = isWin ? 'explorer.exe' : isMac ? 'open' : 'xdg-open';
+    const isWin = process.platform === 'win32';
+    const isMac = process.platform === 'darwin';
+    const launcher = isWin ? 'explorer.exe' : isMac ? 'open' : 'xdg-open';
 
-      const child = spawn(launcher, [targetPath], {
-        detached: true,
-        stdio: 'ignore',
-        shell: false
-      });
-      child.unref();
-
-      return {
-        ok: true,
-        action: 'FOLDER_ACCESS',
-        target: targetPath,
-        verified: true,
-        pid: child.pid,
-        summary: `Opened folder "${path.basename(targetPath) || targetPath}" in File Explorer.`
-      };
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return {
+    const spawnOut = await this.spawnDetachedSafe(launcher, [targetPath]);
+    if (!spawnOut.ok) {
+      const failRes: DesktopExecutionResult = {
         ok: false,
         action: 'FOLDER_ACCESS',
         target: targetPath,
         verified: false,
-        summary: `Unable to open folder: ${msg}`,
-        error: msg
+        summary: `Unable to open folder: ${spawnOut.error}`,
+        error: spawnOut.error
       };
+      this.recordAudit({ action: 'FOLDER_ACCESS', target: targetPath, ok: false, error: spawnOut.error });
+      return failRes;
     }
+
+    this.recordAudit({ action: 'FOLDER_ACCESS', target: targetPath, ok: true, pid: spawnOut.pid });
+    return {
+      ok: true,
+      action: 'FOLDER_ACCESS',
+      target: targetPath,
+      verified: true,
+      pid: spawnOut.pid,
+      summary: `Opened folder "${path.basename(targetPath) || targetPath}" in File Explorer.`
+    };
   }
 
   /**
-   * Open default web browser with a validated URL.
+   * Open default web browser with a validated URL (no embedded credentials, HTTP/HTTPS only).
    */
   public async openApprovedBrowser(url?: string): Promise<DesktopExecutionResult> {
     const targetUrl = url ? url.trim() : 'https://www.google.com';
 
-    // Validate URL protocol
-    if (!/^https?:\/\//i.test(targetUrl)) {
-      return {
+    let parsed: URL;
+    try {
+      parsed = new URL(targetUrl);
+    } catch {
+      const errRes: DesktopExecutionResult = {
+        ok: false,
+        action: 'BROWSER_ACCESS',
+        target: targetUrl,
+        verified: false,
+        summary: 'Invalid or malformed URL.',
+        error: 'INVALID_URL'
+      };
+      this.recordAudit({ action: 'BROWSER_ACCESS', target: targetUrl, ok: false, error: errRes.error });
+      return errRes;
+    }
+
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      const errRes: DesktopExecutionResult = {
         ok: false,
         action: 'BROWSER_ACCESS',
         target: targetUrl,
@@ -399,45 +616,57 @@ export class DesktopAutomationService {
         summary: 'Browser navigation requires an HTTP or HTTPS URL.',
         error: 'INVALID_URL'
       };
+      this.recordAudit({ action: 'BROWSER_ACCESS', target: targetUrl, ok: false, error: errRes.error });
+      return errRes;
     }
 
-    try {
-      const isWin = process.platform === 'win32';
-      const isMac = process.platform === 'darwin';
-      const launcher = isWin ? 'explorer.exe' : isMac ? 'open' : 'xdg-open';
-
-      const child = spawn(launcher, [targetUrl], {
-        detached: true,
-        stdio: 'ignore',
-        shell: false
-      });
-      child.unref();
-
-      return {
-        ok: true,
-        action: 'BROWSER_ACCESS',
-        target: targetUrl,
-        verified: true,
-        summary: `Opened default web browser to ${targetUrl}.`
-      };
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return {
+    if (parsed.username || parsed.password) {
+      const credRes: DesktopExecutionResult = {
         ok: false,
         action: 'BROWSER_ACCESS',
-        target: targetUrl,
+        target: parsed.origin,
         verified: false,
-        summary: `Failed to open web browser: ${msg}`,
-        error: msg
+        summary: 'Blocked URL containing embedded login credentials.',
+        error: 'CREDENTIALS_BLOCKED'
       };
+      this.recordAudit({ action: 'BROWSER_ACCESS', target: parsed.origin, ok: false, error: credRes.error });
+      return credRes;
     }
+
+    const isWin = process.platform === 'win32';
+    const isMac = process.platform === 'darwin';
+    const launcher = isWin ? 'explorer.exe' : isMac ? 'open' : 'xdg-open';
+
+    const spawnOut = await this.spawnDetachedSafe(launcher, [parsed.toString()]);
+    if (!spawnOut.ok) {
+      const failRes: DesktopExecutionResult = {
+        ok: false,
+        action: 'BROWSER_ACCESS',
+        target: parsed.toString(),
+        verified: false,
+        summary: `Failed to open web browser: ${spawnOut.error}`,
+        error: spawnOut.error
+      };
+      this.recordAudit({ action: 'BROWSER_ACCESS', target: parsed.toString(), ok: false, error: spawnOut.error });
+      return failRes;
+    }
+
+    this.recordAudit({ action: 'BROWSER_ACCESS', target: parsed.toString(), ok: true, pid: spawnOut.pid });
+    return {
+      ok: true,
+      action: 'BROWSER_ACCESS',
+      target: parsed.toString(),
+      verified: true,
+      pid: spawnOut.pid,
+      summary: `Opened default web browser to ${parsed.toString()}.`
+    };
   }
 
   /**
    * Perform an approved web search in default browser.
    */
   public async searchWeb(query: string, engine = 'google'): Promise<DesktopExecutionResult> {
-    const cleanQuery = query.trim();
+    const cleanQuery = String(query || '').trim();
     if (!cleanQuery) {
       return {
         ok: false,
@@ -450,25 +679,66 @@ export class DesktopAutomationService {
     }
 
     const encoded = encodeURIComponent(cleanQuery);
+    const normalizedEngine = engine.trim().toLowerCase();
     const searchUrl =
-      engine === 'duckduckgo'
+      normalizedEngine === 'duckduckgo'
         ? `https://duckduckgo.com/?q=${encoded}`
-        : engine === 'bing'
+        : normalizedEngine === 'bing'
         ? `https://www.bing.com/search?q=${encoded}`
         : `https://www.google.com/search?q=${encoded}`;
 
-    return this.openApprovedBrowser(searchUrl);
+    const browserRes = await this.openApprovedBrowser(searchUrl);
+    return {
+      ...browserRes,
+      action: 'WEB_SEARCH',
+      target: cleanQuery,
+      summary: browserRes.ok
+        ? `Opened default browser search for "${cleanQuery}" (${normalizedEngine || 'google'}).`
+        : browserRes.summary,
+      details: {
+        ...(browserRes.details || {}),
+        searchUrl,
+        engine: normalizedEngine || 'google'
+      }
+    };
   }
 
   /**
-   * Launch approved music application or play selected music.
+   * Launch an approved music application or open approved audio file.
    */
-  public async launchMusicApp(musicTarget = 'Spotify'): Promise<DesktopExecutionResult> {
-    return this.launchApprovedApplication('SPOTIFY');
+  public async launchMusicApp(musicTarget = 'SPOTIFY'): Promise<DesktopExecutionResult> {
+    const trimmed = String(musicTarget || 'SPOTIFY').trim();
+    const norm = trimmed.toUpperCase().replace(/[\s-]+/g, '_');
+
+    // Allow launching Spotify or any registered music-category application
+    const musicEntry = Array.from(this.allowedApplications.values()).find(
+      (a) =>
+        (a.category === 'MUSIC' || a.id === 'SPOTIFY') &&
+        (a.id.toUpperCase() === norm || a.displayName.toUpperCase().replace(/[\s-]+/g, '_') === norm)
+    );
+
+    if (!musicEntry) {
+      const errRes: DesktopExecutionResult = {
+        ok: false,
+        action: 'MUSIC_CONTROL',
+        target: trimmed,
+        verified: false,
+        summary: `Music application "${trimmed}" is not in the approved music allowlist.`,
+        error: 'DISALLOWED_MUSIC_APPLICATION'
+      };
+      this.recordAudit({ action: 'MUSIC_CONTROL', target: trimmed, ok: false, error: errRes.error });
+      return errRes;
+    }
+
+    const appRes = await this.launchApprovedApplication(musicEntry.id);
+    return {
+      ...appRes,
+      action: 'MUSIC_CONTROL'
+    };
   }
 
   /**
-   * Search for files within an authorized folder.
+   * Search for files within an authorized folder (returns filenames only; never reads content).
    */
   public findFilesInFolder(
     folderPath: string,

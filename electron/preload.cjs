@@ -37,6 +37,14 @@ contextBridge.exposeInMainWorld('jarvisDesktop', {
     return ipcRenderer.invoke('jarvis:findFilesInFolder', { folderPath, filterPattern });
   },
 
+  selectFile: async () => {
+    return ipcRenderer.invoke('jarvis:selectFile');
+  },
+
+  selectFolder: async () => {
+    return ipcRenderer.invoke('jarvis:selectFolder');
+  },
+
   getSystemStatus: async () => {
     return ipcRenderer.invoke('jarvis:getSystemStatus');
   }

@@ -519,11 +519,19 @@ export interface MusicPlaybackState {
   error?: string;
 }
 
+export interface SelectedFolderMetadata {
+  folderId: string;
+  name: string;
+  path: string;
+  selectedAt: number;
+}
+
 export interface PendingInteractivePrompt {
-  kind: 'FILE_PICKER' | 'MUSIC_SOURCE' | 'AMBIGUOUS_CLARIFICATION';
+  kind: 'FILE_PICKER' | 'FOLDER_PICKER' | 'MUSIC_SOURCE' | 'AMBIGUOUS_CLARIFICATION';
   message: string;
   requestedAction?: string;
   query?: string;
+  allowFolderSelection?: boolean;
   musicChoices?: { id: MusicSourceType; label: string; description: string }[];
 }
 

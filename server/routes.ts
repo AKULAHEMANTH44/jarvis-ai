@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { llmService } from './llmService.js';
 import { LLMChatRequest, LLMMode } from './types.js';
-import { desktopAutomationService, ALLOWED_APPLICATIONS } from './desktopAutomation.js';
+import { desktopAutomationService } from './desktopAutomation.js';
 
 export const apiRouter = Router();
 
@@ -70,12 +70,32 @@ apiRouter.post('/llm/mode', (req: Request, res: Response) => {
 apiRouter.get('/desktop/apps', (_req: Request, res: Response) => {
   res.json({
     ok: true,
-    applications: Object.values(ALLOWED_APPLICATIONS).map((app) => ({
+    applications: desktopAutomationService.getAllowedApplications().map((app) => ({
       id: app.id,
       displayName: app.displayName,
-      description: app.description
+      description: app.description,
+      category: app.category || 'APP'
     }))
   });
+});
+
+// Register a user-selected/approved folder or file path
+apiRouter.post('/desktop/paths/approve', (req: Request, res: Response) => {
+  const { path: rawPath } = req.body || {};
+  if (!rawPath || typeof rawPath !== 'string') {
+    res.status(400).json({ ok: false, error: 'MISSING_PATH' });
+    return;
+  }
+  const approved = desktopAutomationService.approvePath(rawPath);
+  res.status(approved.ok ? 200 : 400).json(approved);
+});
+
+apiRouter.get('/desktop/paths', (_req: Request, res: Response) => {
+  res.json({ ok: true, approvedPaths: desktopAutomationService.getApprovedPaths() });
+});
+
+apiRouter.get('/desktop/audit', (_req: Request, res: Response) => {
+  res.json({ ok: true, auditLog: desktopAutomationService.getAuditLog(40) });
 });
 
 // Launch approved application
@@ -150,7 +170,7 @@ apiRouter.post('/desktop/search', async (req: Request, res: Response) => {
 apiRouter.post('/desktop/music', async (req: Request, res: Response) => {
   const { musicTarget } = req.body || {};
   const result = await desktopAutomationService.launchMusicApp(
-    musicTarget ? String(musicTarget) : 'Spotify'
+    musicTarget ? String(musicTarget) : 'SPOTIFY'
   );
   res.status(result.ok ? 200 : 403).json(result);
 });

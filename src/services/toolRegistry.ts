@@ -1270,7 +1270,7 @@ export class ToolRegistry {
 
     this.registerTool({
       name: 'launch_desktop_application',
-      description: 'Launch an approved Windows/Desktop application (VS_CODE, NOTEPAD, CALCULATOR, EXPLORER, BROWSER, SPOTIFY) after explicit APPLICATION_LAUNCH permission.',
+      description: 'Launch an approved Windows/Desktop application (VS_CODE, NOTEPAD, CALCULATOR, EXPLORER, BROWSER, CHROME, SPOTIFY) after explicit APPLICATION_LAUNCH permission.',
       permissionLevel: 'CONSEQUENTIAL',
       requiresConfirmation: true,
       inputSchema: {
@@ -1278,7 +1278,7 @@ export class ToolRegistry {
         properties: {
           applicationId: {
             type: 'string',
-            description: 'Application identifier (VS_CODE, NOTEPAD, CALCULATOR, EXPLORER, BROWSER, SPOTIFY).'
+            description: 'Application identifier (VS_CODE, NOTEPAD, CALCULATOR, EXPLORER, BROWSER, CHROME, SPOTIFY).'
           },
           permissionId: {
             type: 'string',

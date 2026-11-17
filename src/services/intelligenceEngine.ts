@@ -13,6 +13,7 @@ import {
   PendingToolApproval,
   PermissionRequest,
   SelectedFileMetadata,
+  SelectedFolderMetadata,
   ToolActivityRecord,
   WebSearchResponse,
   WorkspaceContextSnapshot
@@ -28,6 +29,7 @@ import { fileAccessService } from './fileAccessService';
 import { browserActionService } from './browserActionService';
 import { webSearchService, extractSearchIntent } from './webSearchService';
 import { musicService, MUSIC_SOURCE_CHOICES } from './musicService';
+import { desktopBridge, DesktopExecutionResult } from './desktopBridge';
 
 export interface IntelligenceStateSnapshot {
   status: IntelligenceStatus;
@@ -88,6 +90,18 @@ const INTERNAL_WORKSPACE_TARGETS = new Set([
   'workspace',
   'holographic workspace'
 ]);
+
+const APPROVED_APP_ALIASES: { id: string; displayName: string; pattern: RegExp }[] = [
+  { id: 'VS_CODE', displayName: 'Visual Studio Code', pattern: /\b(visual\s+studio\s+code|vs\s*code)\b/i },
+  { id: 'NOTEPAD', displayName: 'Notepad', pattern: /\bnotepad(?:\.exe)?\b/i },
+  { id: 'CALCULATOR', displayName: 'Windows Calculator', pattern: /\b(?:windows\s+)?(?:calculator|calc(?:\.exe)?)\b/i },
+  { id: 'EXPLORER', displayName: 'File Explorer', pattern: /\b(?:file|windows)\s+explorer\b/i },
+  { id: 'CHROME', displayName: 'Google Chrome', pattern: /\b(?:google\s+)?chrome(?:\.exe)?\b/i },
+  { id: 'BROWSER', displayName: 'Default Web Browser', pattern: /\b(?:default\s+(?:web\s+)?browser|web\s+browser)\b/i }
+];
+
+const BLOCKED_SHELL_OR_SYSTEM_PATTERN =
+  /\b(?:open|launch|start|run|execute)\s+(?:the\s+)?(?:cmd(?:\.exe)?|command\s+prompt|powershell(?:\.exe)?|pwsh(?:\.exe)?|bash|zsh|terminal|regedit(?:\.exe)?|registry\s+editor|wscript(?:\.exe)?|cscript(?:\.exe)?|rundll32(?:\.exe)?|mshta(?:\.exe)?)\b/i;
 
 export class IntelligenceEngine {
   private status: IntelligenceStatus = 'STANDBY';
@@ -267,9 +281,9 @@ export class IntelligenceEngine {
       };
     }
 
-    // 3. Music Playback / Audio Controls
+    // 3. Music Playback / Audio Controls / Spotify App
     if (
-      /\b(play\s+(?:some\s+)?(?:music|song|songs|track|tracks|audio|relaxing|instrumental|ambient|jazz|lofi|classical|music\s+on)|pause\s+(?:the\s+)?music|resume\s+(?:the\s+)?music|stop\s+(?:the\s+)?music|volume\s+(?:up|down|to|\d+)|find\s+(?:a\s+)?(?:track|song|music)|listen\s+to\s+music)\b/i.test(
+      /\b(play\s+(?:my\s+)?(?:selected\s+)?(?:some\s+)?(?:music|song|songs|track|tracks|audio|relaxing|instrumental|ambient|jazz|lofi|classical|music\s+on)|pause\s+(?:the\s+)?(?:music|spotify)|resume\s+(?:the\s+)?(?:music|spotify)|stop\s+(?:the\s+)?(?:music|spotify)|volume\s+(?:up|down|to|\d+)|find\s+(?:a\s+)?(?:track|song|music)|listen\s+to\s+music|(?:open|launch|start)\s+spotify)\b/i.test(
         lower
       ) ||
       /\bplay\b.*\b(on\s+(?:spotify|youtube\s+music|soundcloud|youtube)|music|song|track|album|playlist)\b/i.test(
@@ -304,9 +318,43 @@ export class IntelligenceEngine {
       };
     }
 
+    // 4b. Desktop Application Launch (check BEFORE file/browser intents so "open File Explorer" or "open Calculator" routes properly)
+    if (
+      BLOCKED_SHELL_OR_SYSTEM_PATTERN.test(lower) ||
+      this.detectApplicationTarget(lower) ||
+      /\b(?:open|launch|start|run)\s+(?:an?\s+)?(?:app|application|program|software)\b/i.test(lower)
+    ) {
+      return {
+        category: 'APPLICATION_LAUNCH',
+        confidence: 0.93,
+        summary: 'Permission-gated desktop application launch request.',
+        requiresTool: true,
+        requiresPlan: false,
+        missingInformation,
+        resolvedReferences: followUp.resolvedReferences
+      };
+    }
+
+    // 4c. Folder Access Intent (when an explicit folder path exists or user references a selected folder)
+    if (
+      /\b(open|show|browse|reveal)\b.*\bfolder\b/i.test(lower) &&
+      (this.extractLocalFilesystemPath(text) !== null || desktopBridge.getSelectedFolder() !== null)
+    ) {
+      return {
+        category: 'FOLDER_ACTION',
+        confidence: 0.92,
+        summary: 'Permission-gated local folder access request.',
+        requiresTool: true,
+        requiresPlan: false,
+        missingInformation,
+        resolvedReferences: followUp.resolvedReferences
+      };
+    }
+
     // 5. File Access Intent
     if (
-      /\b(open\s+(?:my\s+|a\s+|the\s+)?(?:file|project\s+report|report|document|pdf|image|photo|project\s+folder|folder)|select\s+(?:a\s+)?file|read\s+(?:the\s+)?(?:selected\s+)?(?:file|document|report)|summarize\s+(?:the\s+)?(?:selected\s+)?(?:report|file|document)|import\s+(?:a\s+|an\s+)?(?:3d\s+model|model\s+file|glb|gltf|obj|stl))\b/i.test(
+      this.extractLocalFilesystemPath(text) !== null ||
+      /\b(open\s+(?:my\s+|a\s+|the\s+)?(?:file|project\s+report|report|document|pdf|image|photo|selected\s+project\s+folder|project\s+folder|folder)|select\s+(?:a\s+)?(?:file|folder)|read\s+(?:the\s+)?(?:selected\s+)?(?:file|document|report)|summarize\s+(?:the\s+)?(?:selected\s+)?(?:report|file|document)|import\s+(?:a\s+|an\s+)?(?:3d\s+model|model\s+file|glb|gltf|obj|stl))\b/i.test(
         lower
       )
     ) {
@@ -455,6 +503,28 @@ export class IntelligenceEngine {
       missingInformation,
       resolvedReferences: followUp.resolvedReferences
     };
+  }
+
+  private detectApplicationTarget(lower: string): { id: string; displayName: string } | null {
+    if (!/\b(open|launch|start|run)\b/i.test(lower)) {
+      return null;
+    }
+    for (const entry of APPROVED_APP_ALIASES) {
+      if (entry.pattern.test(lower)) {
+        return { id: entry.id, displayName: entry.displayName };
+      }
+    }
+    return null;
+  }
+
+  private extractLocalFilesystemPath(rawInput: string): string | null {
+    const winMatch = rawInput.match(/([a-zA-Z]:\\[^\n"']+?)(?=[.?!]*(?:\s*$))/);
+    if (winMatch) return winMatch[1].trim();
+    const posixMatch = rawInput.match(/(\/(?:tmp|Users|home|var|mnt|opt|workspace|app)(?:\/[^\s"']+)+)/);
+    if (posixMatch) return posixMatch[1].replace(/[.?!]+$/, '').trim();
+    const traversalMatch = rawInput.match(/((?:\.\.|%2e%2e)(?:[\\/][^\s"']+)+)/i);
+    if (traversalMatch) return traversalMatch[1].trim();
+    return null;
   }
 
   private looksLikeBrowserIntent(lower: string): boolean {
@@ -619,6 +689,54 @@ export class IntelligenceEngine {
     return { metadata, permissionRequest, reply };
   }
 
+  public handleUserPickedFolder(folder: SelectedFolderMetadata | null): {
+    folder: SelectedFolderMetadata | null;
+    permissionRequest?: PermissionRequest;
+    reply: string;
+  } {
+    this.interactivePrompt = null;
+    if (!folder || !folder.path) {
+      this.setStatus('STANDBY', 'Folder selection cancelled by user.', 'Action cancelled.');
+      return {
+        folder: null,
+        reply: 'Folder selection was cancelled. No directories were opened.'
+      };
+    }
+
+    const cleanFolder = desktopBridge.setSelectedFolder(folder.path, folder.name);
+    const perm = permissionManager.createRequest({
+      category: 'FOLDER_ACCESS',
+      requestedAction: 'Open selected folder in File Explorer',
+      target: cleanFolder.path,
+      reason: `User selected folder "${cleanFolder.name}" (${cleanFolder.path}) to open.`,
+      riskLevel: 'MEDIUM',
+      requestedScope: `Single-use open access to folder "${cleanFolder.path}"`
+    });
+
+    this.pendingPermission = perm;
+    this.permissionExecutors.set(perm.id, async (permissionId) => {
+      const res = await toolRegistry.executeTool(
+        'open_desktop_folder',
+        { folderPath: cleanFolder.path, permissionId },
+        { approvedByUser: true }
+      );
+      return {
+        ok: res.result.ok,
+        reply: res.result.summary,
+        toolRecord: res.record,
+        error: res.result.error
+      };
+    });
+
+    const reply = `Selected folder "${cleanFolder.name}" (${cleanFolder.path}). Do you approve opening this folder?`;
+    this.setStatus(
+      'AWAITING_APPROVAL',
+      `Waiting for approval to open folder ${cleanFolder.name}`,
+      'Waiting for your permission.'
+    );
+    return { folder: cleanFolder, permissionRequest: perm, reply };
+  }
+
   public selectMusicSourceChoice(
     sourceType: MusicSourceType,
     query = ''
@@ -779,9 +897,13 @@ export class IntelligenceEngine {
           category:
             existing.category === 'FILE_ACCESS'
               ? 'FILE_ACTION'
+              : existing.category === 'FOLDER_ACCESS'
+              ? 'FOLDER_ACTION'
+              : existing.category === 'APPLICATION_LAUNCH'
+              ? 'APPLICATION_LAUNCH'
               : existing.category === 'WEB_SEARCH'
               ? 'WEB_SEARCH'
-              : existing.category === 'MUSIC_PLAYBACK'
+              : existing.category === 'MUSIC_PLAYBACK' || existing.category === 'MUSIC_CONTROL'
               ? 'MUSIC_ACTION'
               : 'BROWSER_ACTION',
           confidence: 1,
@@ -810,10 +932,16 @@ export class IntelligenceEngine {
       const nextStage = execOut.ok
         ? existing.category === 'BROWSER_ACCESS'
           ? 'Website opened successfully.'
+          : existing.category === 'APPLICATION_LAUNCH'
+          ? 'Application launched successfully.'
+          : existing.category === 'FOLDER_ACCESS'
+          ? 'Folder opened successfully.'
           : existing.category === 'WEB_SEARCH'
           ? 'Search completed.'
           : existing.category === 'FILE_ACCESS'
           ? 'Opening the selected file.'
+          : existing.category === 'MUSIC_CONTROL'
+          ? 'Music application launched.'
           : existing.category === 'MUSIC_PLAYBACK' && execOut.musicState?.isActualAudioPlaying
           ? 'Music playback started.'
           : 'Completed approved action.'
@@ -944,17 +1072,293 @@ export class IntelligenceEngine {
         });
       }
 
-      // 2. Phase 5 — FILE_ACTION
-      if (classification.category === 'FILE_ACTION') {
+      // 1b. Phase 7 — APPLICATION_LAUNCH
+      if (classification.category === 'APPLICATION_LAUNCH') {
         const lower = rawInput.toLowerCase();
 
-        // Handle "open my project folder" honestly without claiming filesystem access
+        // Reject shell/command prompt/terminal requests immediately
+        if (BLOCKED_SHELL_OR_SYSTEM_PATTERN.test(lower)) {
+          const msg =
+            'Security policy blocks launching unrestricted terminal shells or system configuration binaries (cmd, powershell, bash, regedit).';
+          this.lastError = msg;
+          conversationManager.addTurn({ role: 'assistant', text: msg, intent: 'APPLICATION_LAUNCH' });
+          this.setStatus('ERROR', msg, 'Blocked disallowed shell/system binary.');
+          return this.finishResult({
+            id: reqId,
+            input: rawInput,
+            reply: msg,
+            status: 'ERROR',
+            classification,
+            providerUsed: 'LOCAL',
+            isExternalModel: false,
+            toolRecords,
+            memoryCandidate,
+            snapshot: params.snapshot,
+            error: 'BLOCKED_SHELL_COMMAND',
+            preserveStatus: true
+          });
+        }
+
+        const appTarget = this.detectApplicationTarget(lower);
+        if (!appTarget) {
+          const prompt: PendingInteractivePrompt = {
+            kind: 'AMBIGUOUS_CLARIFICATION',
+            message:
+              'Which approved application would you like me to launch? (Visual Studio Code, Notepad, Calculator, File Explorer, Google Chrome, Web Browser, or Spotify)'
+          };
+          this.interactivePrompt = prompt;
+          conversationManager.addTurn({ role: 'assistant', text: prompt.message, intent: 'APPLICATION_LAUNCH' });
+          return this.finishResult({
+            id: reqId,
+            input: rawInput,
+            reply: prompt.message,
+            status: 'RESPONDING',
+            classification,
+            providerUsed: 'LOCAL',
+            isExternalModel: false,
+            toolRecords,
+            interactivePrompt: prompt,
+            memoryCandidate,
+            snapshot: params.snapshot
+          });
+        }
+
+        const perm = permissionManager.createRequest({
+          category: 'APPLICATION_LAUNCH',
+          requestedAction: `Launch ${appTarget.displayName}`,
+          target: appTarget.id,
+          reason: `User requested launching approved desktop application "${appTarget.displayName}"`,
+          riskLevel: 'MEDIUM',
+          requestedScope: `Single-use launch of allowlisted application ${appTarget.displayName} (${appTarget.id})`
+        });
+
+        this.pendingPermission = perm;
+        this.pendingPermissionInputFingerprint = fingerprint;
+        this.permissionExecutors.set(perm.id, async (permissionId) => {
+          const res = await toolRegistry.executeTool(
+            'launch_desktop_application',
+            { applicationId: appTarget.id, permissionId },
+            { approvedByUser: true }
+          );
+          const desktopRes = res.result.data?.desktopResult as DesktopExecutionResult | undefined;
+          return {
+            ok: res.result.ok,
+            reply: desktopRes?.summary || res.result.summary,
+            toolRecord: res.record,
+            error: res.result.error
+          };
+        });
+
+        const reply = `Plan: Launch approved desktop application ${appTarget.displayName} (${appTarget.id}) via the secure allowlist. Do you approve?`;
+        conversationManager.addTurn({ role: 'assistant', text: reply, intent: 'APPLICATION_LAUNCH' });
+        this.setStatus(
+          'AWAITING_APPROVAL',
+          `Waiting for approval to launch ${appTarget.displayName}`,
+          'Waiting for your permission.'
+        );
+        return this.finishResult({
+          id: reqId,
+          input: rawInput,
+          reply,
+          status: 'AWAITING_APPROVAL',
+          classification,
+          providerUsed: 'LOCAL',
+          isExternalModel: false,
+          toolRecords,
+          pendingPermission: perm,
+          memoryCandidate,
+          snapshot: params.snapshot,
+          preserveStatus: true
+        });
+      }
+
+      // 1c. Phase 7 — FOLDER_ACTION (explicit local path or previously selected project folder)
+      if (classification.category === 'FOLDER_ACTION') {
+        const explicitPath = this.extractLocalFilesystemPath(rawInput);
+        const selectedFolder = desktopBridge.getSelectedFolder();
+        const targetFolderPath = explicitPath || selectedFolder?.path || '';
+
+        if (!targetFolderPath) {
+          const prompt: PendingInteractivePrompt = {
+            kind: 'FILE_PICKER',
+            allowFolderSelection: true,
+            requestedAction: 'Select a project folder or file',
+            message:
+              'Browser security prevents JARVIS from silently scanning local folders. Select your project folder or specific file(s) using the picker below.'
+          };
+          this.interactivePrompt = prompt;
+          conversationManager.addTurn({ role: 'assistant', text: prompt.message, intent: 'FOLDER_ACTION' });
+          return this.finishResult({
+            id: reqId,
+            input: rawInput,
+            reply: prompt.message,
+            status: 'RESPONDING',
+            classification,
+            providerUsed: 'LOCAL',
+            isExternalModel: false,
+            toolRecords,
+            interactivePrompt: prompt,
+            memoryCandidate,
+            snapshot: params.snapshot
+          });
+        }
+
+        if (/(^|[\\/])\.\.([\\/]|$)|%2e%2e/i.test(targetFolderPath)) {
+          const msg = 'Blocked invalid folder path: directory traversal (..) is prohibited.';
+          this.lastError = msg;
+          conversationManager.addTurn({ role: 'assistant', text: msg, intent: 'FOLDER_ACTION' });
+          this.setStatus('ERROR', msg, 'Blocked invalid folder path.');
+          return this.finishResult({
+            id: reqId,
+            input: rawInput,
+            reply: msg,
+            status: 'ERROR',
+            classification,
+            providerUsed: 'LOCAL',
+            isExternalModel: false,
+            toolRecords,
+            memoryCandidate,
+            snapshot: params.snapshot,
+            error: 'PATH_TRAVERSAL_BLOCKED',
+            preserveStatus: true
+          });
+        }
+
+        desktopBridge.registerApprovedPath(targetFolderPath);
+        const perm = permissionManager.createRequest({
+          category: 'FOLDER_ACCESS',
+          requestedAction: 'Open folder in File Explorer',
+          target: targetFolderPath,
+          reason: `User requested opening approved folder "${targetFolderPath}"`,
+          riskLevel: 'MEDIUM',
+          requestedScope: `Single-use open access to folder "${targetFolderPath}"`
+        });
+
+        this.pendingPermission = perm;
+        this.pendingPermissionInputFingerprint = fingerprint;
+        this.permissionExecutors.set(perm.id, async (permissionId) => {
+          const res = await toolRegistry.executeTool(
+            'open_desktop_folder',
+            { folderPath: targetFolderPath, permissionId },
+            { approvedByUser: true }
+          );
+          const desktopRes = res.result.data?.desktopResult as DesktopExecutionResult | undefined;
+          return {
+            ok: res.result.ok,
+            reply: desktopRes?.summary || res.result.summary,
+            toolRecord: res.record,
+            error: res.result.error
+          };
+        });
+
+        const reply = `Plan: Open approved folder "${targetFolderPath}" in File Explorer. Do you approve?`;
+        conversationManager.addTurn({ role: 'assistant', text: reply, intent: 'FOLDER_ACTION' });
+        this.setStatus(
+          'AWAITING_APPROVAL',
+          `Waiting for approval to open folder ${targetFolderPath}`,
+          'Waiting for your permission.'
+        );
+        return this.finishResult({
+          id: reqId,
+          input: rawInput,
+          reply,
+          status: 'AWAITING_APPROVAL',
+          classification,
+          providerUsed: 'LOCAL',
+          isExternalModel: false,
+          toolRecords,
+          pendingPermission: perm,
+          memoryCandidate,
+          snapshot: params.snapshot,
+          preserveStatus: true
+        });
+      }
+
+      // 2. Phase 5 & 7 — FILE_ACTION
+      if (classification.category === 'FILE_ACTION') {
+        const lower = rawInput.toLowerCase();
+        const explicitFilePath = this.extractLocalFilesystemPath(rawInput);
+
+        if (explicitFilePath) {
+          if (/(^|[\\/])\.\.([\\/]|$)|%2e%2e/i.test(explicitFilePath)) {
+            const msg = 'Blocked invalid file path: directory traversal (..) is prohibited.';
+            this.lastError = msg;
+            conversationManager.addTurn({ role: 'assistant', text: msg, intent: 'FILE_ACTION' });
+            this.setStatus('ERROR', msg, 'Blocked invalid file path.');
+            return this.finishResult({
+              id: reqId,
+              input: rawInput,
+              reply: msg,
+              status: 'ERROR',
+              classification,
+              providerUsed: 'LOCAL',
+              isExternalModel: false,
+              toolRecords,
+              memoryCandidate,
+              snapshot: params.snapshot,
+              error: 'PATH_TRAVERSAL_BLOCKED',
+              preserveStatus: true
+            });
+          }
+
+          desktopBridge.registerApprovedPath(explicitFilePath);
+          const perm = permissionManager.createRequest({
+            category: 'FILE_ACCESS',
+            requestedAction: 'Open desktop file with default application',
+            target: explicitFilePath,
+            reason: `User requested opening file "${explicitFilePath}"`,
+            riskLevel: 'MEDIUM',
+            requestedScope: `Single-use open access to file "${explicitFilePath}"`
+          });
+
+          this.pendingPermission = perm;
+          this.pendingPermissionInputFingerprint = fingerprint;
+          this.permissionExecutors.set(perm.id, async (permissionId) => {
+            const res = await toolRegistry.executeTool(
+              'open_desktop_file_system',
+              { filePath: explicitFilePath, permissionId },
+              { approvedByUser: true }
+            );
+            const desktopRes = res.result.data?.desktopResult as DesktopExecutionResult | undefined;
+            return {
+              ok: res.result.ok,
+              reply: desktopRes?.summary || res.result.summary,
+              toolRecord: res.record,
+              error: res.result.error
+            };
+          });
+
+          const reply = `Plan: Open file "${explicitFilePath}" with its default desktop application. Do you approve?`;
+          conversationManager.addTurn({ role: 'assistant', text: reply, intent: 'FILE_ACTION' });
+          this.setStatus(
+            'AWAITING_APPROVAL',
+            `Waiting for approval to open ${explicitFilePath}`,
+            'Waiting for your permission.'
+          );
+          return this.finishResult({
+            id: reqId,
+            input: rawInput,
+            reply,
+            status: 'AWAITING_APPROVAL',
+            classification,
+            providerUsed: 'LOCAL',
+            isExternalModel: false,
+            toolRecords,
+            pendingPermission: perm,
+            memoryCandidate,
+            snapshot: params.snapshot,
+            preserveStatus: true
+          });
+        }
+
+        // Handle "open my project folder" honestly while offering native/browser folder & file pickers
         if (/\bfolder\b/i.test(lower)) {
           const prompt: PendingInteractivePrompt = {
             kind: 'FILE_PICKER',
-            requestedAction: 'Select file(s) from your project folder',
+            allowFolderSelection: true,
+            requestedAction: 'Select a project folder or file(s) from your project folder',
             message:
-              'Browser security prevents JARVIS from silently scanning local folders. Select the specific file(s) from your project folder using the file picker below.'
+              'Browser security prevents JARVIS from silently scanning local folders. Select your project folder or the specific file(s) from your project folder using the picker below.'
           };
           this.interactivePrompt = prompt;
           const reply = prompt.message;
@@ -1157,6 +1561,21 @@ export class IntelligenceEngine {
         this.pendingPermission = perm;
         this.pendingPermissionInputFingerprint = fingerprint;
         this.permissionExecutors.set(perm.id, async (permissionId, signal) => {
+          if (desktopBridge.isElectron()) {
+            const desktopSearch = await toolRegistry.executeTool(
+              'desktop_web_search',
+              { query: searchIntent.query, permissionId },
+              { approvedByUser: true }
+            );
+            const desktopRes = desktopSearch.result.data?.desktopResult as DesktopExecutionResult | undefined;
+            return {
+              ok: desktopSearch.result.ok,
+              reply: desktopRes?.summary || desktopSearch.result.summary,
+              toolRecord: desktopSearch.record,
+              error: desktopSearch.result.error
+            };
+          }
+
           const searchRes = await webSearchService.executeApprovedSearch(
             searchIntent.query,
             permissionId,
@@ -1339,6 +1758,132 @@ export class IntelligenceEngine {
             providerUsed: 'LOCAL',
             isExternalModel: false,
             toolRecords,
+            musicState: musicService.getState(),
+            memoryCandidate,
+            snapshot: params.snapshot
+          });
+        }
+
+        // Open Spotify Desktop application explicitly when requested without playback query
+        if (/^(?:hey\s+|hi\s+|please\s+)?(?:jarvis[,\s]+)?(?:open|launch|start)\s+spotify\.?$/i.test(lower)) {
+          const perm = permissionManager.createRequest({
+            category: 'MUSIC_CONTROL',
+            requestedAction: 'Launch approved music application: Spotify',
+            target: 'SPOTIFY',
+            reason: 'User requested opening the Spotify desktop music application.',
+            riskLevel: 'MEDIUM',
+            requestedScope: 'Single-use launch of approved music player (SPOTIFY)'
+          });
+          this.pendingPermission = perm;
+          this.pendingPermissionInputFingerprint = fingerprint;
+          this.permissionExecutors.set(perm.id, async (permissionId) => {
+            const res = await toolRegistry.executeTool(
+              'launch_desktop_music',
+              { musicTarget: 'SPOTIFY', permissionId },
+              { approvedByUser: true }
+            );
+            const desktopRes = res.result.data?.desktopResult as DesktopExecutionResult | undefined;
+            return {
+              ok: res.result.ok,
+              reply: desktopRes?.summary || res.result.summary,
+              toolRecord: res.record,
+              musicState: musicService.getState(),
+              error: res.result.error
+            };
+          });
+          const reply = 'Plan: Launch Spotify music application. Note: playback controls inside external desktop apps depend on OS media session support. Do you approve opening Spotify?';
+          conversationManager.addTurn({ role: 'assistant', text: reply, intent: 'MUSIC_ACTION' });
+          this.setStatus(
+            'AWAITING_APPROVAL',
+            'Waiting for approval to launch Spotify',
+            'Waiting for your permission.'
+          );
+          return this.finishResult({
+            id: reqId,
+            input: rawInput,
+            reply,
+            status: 'AWAITING_APPROVAL',
+            classification,
+            providerUsed: 'LOCAL',
+            isExternalModel: false,
+            toolRecords,
+            pendingPermission: perm,
+            musicState: musicService.getState(),
+            memoryCandidate,
+            snapshot: params.snapshot,
+            preserveStatus: true
+          });
+        }
+
+        // Play user-selected music ("play my selected music" / "play selected track")
+        if (/\b(?:my\s+)?selected\s+(?:music|song|track|audio)\b/i.test(lower)) {
+          if (this.pendingFileMetadata?.kind === 'AUDIO' && this.pendingFileMetadata.supported) {
+            const selectedAudio = this.pendingFileMetadata;
+            const perm = musicService.requestMusicPermission({
+              sourceType: 'LOCAL_AUDIO',
+              targetLabel: selectedAudio.name,
+              reason: `Play user-selected audio file "${selectedAudio.name}" (${selectedAudio.sizeFormatted})`,
+              metadata: { fileId: selectedAudio.fileId }
+            });
+            this.pendingPermission = perm;
+            this.pendingPermissionInputFingerprint = fingerprint;
+            this.permissionExecutors.set(perm.id, async (permissionId) => {
+              const res = await toolRegistry.executeTool(
+                'control_music_playback',
+                { action: 'PLAY_LOCAL', fileId: selectedAudio.fileId, permissionId },
+                { approvedByUser: true }
+              );
+              const musicState = (res.result.data?.musicState as MusicPlaybackState | undefined) || musicService.getState();
+              return {
+                ok: res.result.ok,
+                reply: res.result.summary,
+                toolRecord: res.record,
+                musicState,
+                error: res.result.error
+              };
+            });
+
+            const reply = `I found your selected audio file "${selectedAudio.name}" (${selectedAudio.sizeFormatted}). Do you approve starting playback?`;
+            conversationManager.addTurn({ role: 'assistant', text: reply, intent: 'MUSIC_ACTION' });
+            this.setStatus(
+              'AWAITING_APPROVAL',
+              `Waiting for approval to play ${selectedAudio.name}`,
+              'Waiting for your permission.'
+            );
+            return this.finishResult({
+              id: reqId,
+              input: rawInput,
+              reply,
+              status: 'AWAITING_APPROVAL',
+              classification,
+              providerUsed: 'LOCAL',
+              isExternalModel: false,
+              toolRecords,
+              pendingPermission: perm,
+              musicState: musicService.getState(),
+              memoryCandidate,
+              snapshot: params.snapshot,
+              preserveStatus: true
+            });
+          }
+
+          const prompt: PendingInteractivePrompt = {
+            kind: 'FILE_PICKER',
+            requestedAction: 'Select an audio file (.mp3, .wav, .ogg, .m4a, .flac)',
+            message: 'No audio track is currently selected. Select an audio file from your device to review playback permission.'
+          };
+          this.interactivePrompt = prompt;
+          conversationManager.addTurn({ role: 'assistant', text: prompt.message, intent: 'MUSIC_ACTION' });
+          return this.finishResult({
+            id: reqId,
+            input: rawInput,
+            reply: prompt.message,
+            status: 'RESPONDING',
+            classification,
+            providerUsed: 'LOCAL',
+            isExternalModel: false,
+            toolRecords,
+            interactivePrompt: prompt,
             musicState: musicService.getState(),
             memoryCandidate,
             snapshot: params.snapshot

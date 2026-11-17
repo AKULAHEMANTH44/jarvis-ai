@@ -23,6 +23,7 @@ import {
 import { GestureDetectionResult } from '../../types/gesture';
 import { CameraPermissionStatus } from '../../services/handTracking';
 import { IntelligenceStateSnapshot } from '../../services/intelligenceEngine';
+import { ToolActivityRecord } from '../../types/assistant';
 
 interface CommandCenterDashboardProps {
   currentModelId: HologramModelId;
@@ -56,9 +57,11 @@ interface CommandCenterDashboardProps {
   isVoiceActive: boolean;
   onToggleVoice: () => void;
   intelligenceState: IntelligenceStateSnapshot;
+  recentTools: ToolActivityRecord[];
   onSendCommand: (text: string) => void;
   onApprovePermission: (permId: string) => void;
   onDenyPermission: (permId: string) => void;
+  onCancelPermission: (permId: string) => void;
   onOpenAIConfig: () => void;
   onOpenObjectLab: () => void;
   onOpenTasks: () => void;
@@ -104,9 +107,11 @@ export const CommandCenterDashboard: React.FC<CommandCenterDashboardProps> = ({
   isVoiceActive,
   onToggleVoice,
   intelligenceState,
+  recentTools,
   onSendCommand,
   onApprovePermission,
   onDenyPermission,
+  onCancelPermission,
   onOpenAIConfig,
   onOpenObjectLab,
   onOpenTasks,
@@ -217,10 +222,11 @@ export const CommandCenterDashboard: React.FC<CommandCenterDashboardProps> = ({
             <div className="lg:col-span-3">
               <LiveIntelligenceFeed
                 suggestions={intelligenceState.activeSuggestions}
-                recentTools={[]}
+                recentTools={recentTools}
                 pendingPermission={intelligenceState.pendingPermission}
                 onApprovePermission={onApprovePermission}
                 onDenyPermission={onDenyPermission}
+                onCancelPermission={onCancelPermission}
                 onOpenPermissions={onOpenPermissions}
               />
             </div>

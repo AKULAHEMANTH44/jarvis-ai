@@ -22,6 +22,7 @@ import { toolRegistry } from '../../services/toolRegistry';
 import { contextualAI } from '../../services/contextualAI';
 import { permissionManager } from '../../services/permissionManager';
 import { fileAccessService } from '../../services/fileAccessService';
+import { desktopBridge } from '../../services/desktopBridge';
 import { musicService } from '../../services/musicService';
 import { audioService } from '../../services/soundFx';
 import {
@@ -138,6 +139,8 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
   );
   const [registeredTools] = useState<ToolDefinition[]>(() => toolRegistry.listTools());
   const [filePickBusy, setFilePickBusy] = useState(false);
+  const [folderPathInput, setFolderPathInput] = useState('');
+  const [folderPickNotice, setFolderPickNotice] = useState<string | null>(null);
 
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -218,6 +221,7 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
   const handleTriggerFilePicker = async (accept?: string) => {
     if (filePickBusy) return;
     setFilePickBusy(true);
+    setFolderPickNotice(null);
     try {
       const picked = await fileAccessService.pickFilesFromBrowser({ accept });
       if (picked.cancelled) {
@@ -235,6 +239,39 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
     } finally {
       setFilePickBusy(false);
     }
+  };
+
+  const handleTriggerFolderPicker = async () => {
+    if (filePickBusy) return;
+    setFilePickBusy(true);
+    setFolderPickNotice(null);
+    try {
+      const res = await desktopBridge.pickFolder();
+      if (res.cancelled) {
+        intelligenceEngine.clearInteractivePrompt();
+        return;
+      }
+      if (res.folder) {
+        intelligenceEngine.handleUserPickedFolder(res.folder);
+        return;
+      }
+      if (res.error) {
+        setFolderPickNotice(res.error);
+      }
+    } finally {
+      setFilePickBusy(false);
+    }
+  };
+
+  const handleStageManualFolder = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleaned = folderPathInput.trim();
+    if (!cleaned) return;
+    const name = cleaned.split(/[\\/]/).filter(Boolean).pop() || cleaned;
+    setFolderPickNotice(null);
+    setFolderPathInput('');
+    const folderMeta = desktopBridge.setSelectedFolder(cleaned, name);
+    intelligenceEngine.handleUserPickedFolder(folderMeta);
   };
 
   const handleSaveMemory = (e: React.FormEvent) => {
@@ -494,23 +531,58 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
                 {intelligenceState.interactivePrompt.message}
               </p>
 
-              {intelligenceState.interactivePrompt.kind === 'FILE_PICKER' && (
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    disabled={filePickBusy}
-                    onClick={() =>
-                      void handleTriggerFilePicker(
-                        intelligenceState.interactivePrompt?.requestedAction?.includes('audio')
-                          ? 'audio/*'
-                          : undefined
-                      )
-                    }
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded border border-cyan-400 bg-cyan-500/20 hover:bg-cyan-500/35 text-white text-[10px] font-orbitron"
-                  >
-                    <FolderOpen className="w-3.5 h-3.5" />
-                    <span>{filePickBusy ? 'OPENING PICKER...' : 'SELECT FILE'}</span>
-                  </button>
+              {(intelligenceState.interactivePrompt.kind === 'FILE_PICKER' ||
+                intelligenceState.interactivePrompt.kind === 'FOLDER_PICKER') && (
+                <div className="space-y-2">
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      disabled={filePickBusy}
+                      onClick={() =>
+                        void handleTriggerFilePicker(
+                          intelligenceState.interactivePrompt?.requestedAction?.includes('audio')
+                            ? 'audio/*'
+                            : undefined
+                        )
+                      }
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded border border-cyan-400 bg-cyan-500/20 hover:bg-cyan-500/35 text-white text-[10px] font-orbitron"
+                    >
+                      <FolderOpen className="w-3.5 h-3.5" />
+                      <span>{filePickBusy ? 'OPENING PICKER...' : 'SELECT FILE'}</span>
+                    </button>
+                    {(intelligenceState.interactivePrompt.allowFolderSelection ||
+                      intelligenceState.interactivePrompt.kind === 'FOLDER_PICKER') && (
+                      <button
+                        type="button"
+                        disabled={filePickBusy}
+                        onClick={() => void handleTriggerFolderPicker()}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded border border-emerald-400/70 bg-emerald-500/15 hover:bg-emerald-500/30 text-emerald-100 text-[10px] font-orbitron"
+                      >
+                        <FolderOpen className="w-3.5 h-3.5" />
+                        <span>SELECT FOLDER</span>
+                      </button>
+                    )}
+                  </div>
+                  {folderPickNotice && (
+                    <div className="space-y-1.5 pt-1">
+                      <p className="text-[9.5px] text-amber-200/90">{folderPickNotice}</p>
+                      <form onSubmit={handleStageManualFolder} className="flex gap-1.5">
+                        <input
+                          type="text"
+                          value={folderPathInput}
+                          onChange={(e) => setFolderPathInput(e.target.value)}
+                          placeholder="Or enter approved desktop folder path (e.g. C:\Projects\app)"
+                          className="flex-1 bg-black/75 border border-cyan-500/40 rounded px-2 py-1 text-[10px] text-white placeholder-cyan-500/50"
+                        />
+                        <button
+                          type="submit"
+                          className="px-2.5 py-1 rounded border border-cyan-400 bg-cyan-500/20 text-white text-[9.5px] font-orbitron"
+                        >
+                          STAGE
+                        </button>
+                      </form>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -963,14 +1035,24 @@ export const IntelligenceHUD: React.FC<IntelligenceHUDProps> = ({
                   Every file read, browser tab, web search, or music action requires single-use approval. Silence is never treated as approval.
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={() => void handleTriggerFilePicker()}
-                className="flex items-center gap-1 px-2.5 py-1 rounded border border-cyan-400/60 bg-cyan-500/15 hover:bg-cyan-500/30 text-white text-[9.5px] font-orbitron shrink-0"
-              >
-                <FolderOpen className="w-3 h-3" />
-                <span>SELECT FILE</span>
-              </button>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => void handleTriggerFilePicker()}
+                  className="flex items-center gap-1 px-2.5 py-1 rounded border border-cyan-400/60 bg-cyan-500/15 hover:bg-cyan-500/30 text-white text-[9.5px] font-orbitron"
+                >
+                  <FolderOpen className="w-3 h-3" />
+                  <span>SELECT FILE</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleTriggerFolderPicker()}
+                  className="flex items-center gap-1 px-2.5 py-1 rounded border border-emerald-400/60 bg-emerald-500/15 hover:bg-emerald-500/30 text-emerald-100 text-[9.5px] font-orbitron"
+                >
+                  <FolderOpen className="w-3 h-3" />
+                  <span>SELECT FOLDER</span>
+                </button>
+              </div>
             </div>
 
             <div className="font-orbitron text-[9.5px] text-cyan-300">
