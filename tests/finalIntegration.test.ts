@@ -15,8 +15,8 @@ import { gestureEngine } from '../src/services/gestureEngine';
 import { customGestureService } from '../src/services/customGestureService';
 import { RingGimbalsEffect } from '../src/three/effects/RingGimbals';
 import { HologramAssistantState } from '../src/three/HologramScene';
-import { GeminiProvider } from '../server/geminiProvider.js';
-import { GroqProvider } from '../server/groqProvider.js';
+import { GeminiProvider, geminiProvider } from '../server/geminiProvider.js';
+import { GroqProvider, groqProvider } from '../server/groqProvider.js';
 import { LLMService } from '../server/llmService.js';
 import {
   DesktopAutomationService,
@@ -172,12 +172,12 @@ describe('BATCH 6 — Cinematic Experience & Final System Integration', () => {
           projectPath: tmpProject,
           filePath: path.join(tmpProject, 'app.ts'),
           proposedContent: 'export const value = 2;\n',
-          allowOverwrite: true
+          overwrite: true
         });
         expect(patchResult.ok).toBe(true);
         expect(fs.readFileSync(path.join(tmpProject, 'app.ts'), 'utf-8')).toBe('export const value = 2;\n');
 
-        const rollback = await devBackend.rollbackPatch(patchResult.backup!.backupId, tmpProject);
+        const rollback = await devBackend.rollbackPatch(patchResult.patchId!, tmpProject);
         expect(rollback.ok).toBe(true);
         expect(fs.readFileSync(path.join(tmpProject, 'app.ts'), 'utf-8')).toBe('export const value = 1;\n');
       } finally {
@@ -258,19 +258,19 @@ describe('BATCH 6 — Cinematic Experience & Final System Integration', () => {
     });
 
     it('smoothly dampens RingGimbalsEffect color/activity across IDLE -> THINKING -> EXECUTING -> ERROR', () => {
-      const group = new THREE.Group();
-      const gimbals = new RingGimbalsEffect(group);
+      const gimbals = new RingGimbalsEffect(0x00f0ff);
+      const group = gimbals.group;
 
       gimbals.setCoreActivity({ isProcessing: true });
       gimbals.update(1.0, 1.0, 0.016);
-      const thinkingColor = (group.children[0] as THREE.Mesh).material as THREE.MeshBasicMaterial;
+      const thinkingColor = (group.children[1] as THREE.Mesh).material as THREE.MeshBasicMaterial;
       const bThinking = thinkingColor.color.getHex();
 
       gimbals.setCoreActivity({ isError: true });
       for (let i = 0; i < 60; i++) {
         gimbals.update(1.0 + i * 0.016, 1.0, 0.016);
       }
-      const errColor = ((group.children[0] as THREE.Mesh).material as THREE.MeshBasicMaterial).color.getHex();
+      const errColor = ((group.children[1] as THREE.Mesh).material as THREE.MeshBasicMaterial).color.getHex();
       expect(errColor).not.toBe(bThinking);
     });
 
@@ -303,9 +303,8 @@ describe('BATCH 6 — Cinematic Experience & Final System Integration', () => {
       process.env.GEMINI_API_KEY = 'fake-gemini-key';
       process.env.GROQ_API_KEY = 'fake-groq-key';
 
-      const gemini = new GeminiProvider();
-      expect(gemini.getModelName()).toBe('gemini-4-hydrogen');
-      gemini.setClient(
+      expect(geminiProvider.getModelName()).toBe('gemini-4-hydrogen');
+      geminiProvider.setClient(
         {
           models: {
             generateContent: vi.fn().mockRejectedValue({ status: 401, message: 'Invalid API key' })
@@ -314,8 +313,7 @@ describe('BATCH 6 — Cinematic Experience & Final System Integration', () => {
         'fake-gemini-key'
       );
 
-      const groq = new GroqProvider();
-      expect(groq.getModelName()).toBe('llama-3.3-70b-versatile');
+      expect(groqProvider.getModelName()).toBe('llama-3.3-70b-versatile');
 
       vi.stubGlobal(
         'fetch',
@@ -328,15 +326,15 @@ describe('BATCH 6 — Cinematic Experience & Final System Integration', () => {
         })
       );
 
-      const llm = new LLMService(gemini, groq);
-      const res = await llm.generate({
+      const llm = new LLMService();
+      const res = await llm.chat({
         messages: [{ role: 'user', content: 'Run check' }],
         mode: 'AUTO'
       });
 
       expect(res.ok).toBe(true);
       expect(res.provider).toBe('GROQ');
-      expect(res.fallbackUsed).toBe(true);
+      expect(res.fallbackTriggered).toBe(true);
       expect(res.text).toContain('Fallback Groq synthesis');
     });
 
