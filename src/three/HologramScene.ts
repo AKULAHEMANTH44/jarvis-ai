@@ -16,10 +16,12 @@ import {
   SliceAxis,
   SpatialObjectState
 } from '../types/hologram';
+import { Landmark3D } from '../types/gesture';
 import { SpatialObjectManager, SpatialInstance } from './SpatialObjectManager';
 import { EnergyShockwaveEffect } from './effects/EnergyShockwave';
 import { ParticleFieldEffect } from './effects/ParticleField';
 import { RingGimbalsEffect } from './effects/RingGimbals';
+import { HolographicHandMesh } from './HolographicHandMesh';
 import {
   buildDepthReliefGeometry,
   buildPresetGeometry,
@@ -92,6 +94,7 @@ export class HologramSceneManager {
 
   // 3D Laser Pointer Reticle (Two-Finger Point / Inspection)
   private laserReticle: THREE.Group;
+  private holographicHand: HolographicHandMesh;
 
   public autoRotate: boolean = true;
   public rotationSpeed: number = 1.0;
@@ -222,10 +225,13 @@ export class HologramSceneManager {
     this.sliceFrame.visible = false;
     this.scene.add(this.sliceFrame);
 
-    // 8. 3D Laser Targeting Reticle
+    // 8. 3D Laser Targeting Reticle & Holographic Hand
     this.laserReticle = this.createLaserReticle();
     this.laserReticle.visible = false;
     this.scene.add(this.laserReticle);
+
+    this.holographicHand = new HolographicHandMesh(colorHex);
+    this.scene.add(this.holographicHand.group);
 
     // Sync initial progress & visual settings
     this.spatialManager.setInitializationProgress(this.initProgress);
@@ -1005,6 +1011,7 @@ export class HologramSceneManager {
       this.ringGimbals.setColorTheme(hex);
       this.particleField.setColorTheme(hex);
       this.shockwave.setColorTheme(hex);
+      this.holographicHand.setColorTheme(hex);
       (this.sliceFrame.material as THREE.LineBasicMaterial).color.setHex(hex);
     }
     if (settings.renderMode !== undefined && (isInitial || settings.renderMode !== prev.renderMode)) {
@@ -1110,6 +1117,14 @@ export class HologramSceneManager {
 
   public setHandCentroid(centroid?: { x: number; y: number; z: number }) {
     this.activeHandCentroid = centroid;
+  }
+
+  public updateHolographicHand(landmarks?: Landmark3D[]) {
+    if (landmarks && landmarks.length >= 21) {
+      this.holographicHand.updateLandmarks(landmarks);
+    } else {
+      this.holographicHand.setVisible(false);
+    }
   }
 
   public triggerShockwave() {

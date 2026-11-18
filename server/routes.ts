@@ -283,3 +283,61 @@ apiRouter.post('/desktop/folder/find', (req: Request, res: Response) => {
   res.status(result.ok ? 200 : 400).json(result);
 });
 
+// Discover installed applications
+apiRouter.get('/desktop/apps/discover', async (_req: Request, res: Response) => {
+  try {
+    const apps = await desktopAutomationService.discoverApplications();
+    res.json({ ok: true, applications: apps });
+  } catch (err: unknown) {
+    res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// List files and directories with metadata
+apiRouter.post('/desktop/folder/list', (req: Request, res: Response) => {
+  const { folderPath } = req.body || {};
+  if (!folderPath) {
+    res.status(400).json({ ok: false, summary: 'Missing folderPath.', error: 'MISSING_FOLDER_PATH' });
+    return;
+  }
+  const result = desktopAutomationService.listApprovedFolder(String(folderPath));
+  res.status(result.ok ? 200 : 400).json(result);
+});
+
+// Read safe text or document content
+apiRouter.post('/desktop/file/read', (req: Request, res: Response) => {
+  const { filePath } = req.body || {};
+  if (!filePath) {
+    res.status(400).json({ ok: false, summary: 'Missing filePath.', error: 'MISSING_FILE_PATH' });
+    return;
+  }
+  const result = desktopAutomationService.readApprovedFile(String(filePath));
+  res.status(result.ok ? 200 : 400).json(result);
+});
+
+// Create text file with approval
+apiRouter.post('/desktop/file/create', (req: Request, res: Response) => {
+  const { filePath, content, overwrite } = req.body || {};
+  if (!filePath) {
+    res.status(400).json({ ok: false, summary: 'Missing filePath.', error: 'MISSING_FILE_PATH' });
+    return;
+  }
+  const result = desktopAutomationService.createApprovedFile(
+    String(filePath),
+    typeof content === 'string' ? content : '',
+    Boolean(overwrite)
+  );
+  res.status(result.ok ? 200 : 400).json(result);
+});
+
+// Inspect web page title and description
+apiRouter.post('/desktop/browser/inspect', async (req: Request, res: Response) => {
+  const { url } = req.body || {};
+  if (!url) {
+    res.status(400).json({ ok: false, error: 'MISSING_URL' });
+    return;
+  }
+  const result = await desktopAutomationService.inspectWebPage(String(url));
+  res.status(result.ok ? 200 : 400).json(result);
+});
+

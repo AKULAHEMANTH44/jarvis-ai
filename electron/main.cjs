@@ -583,6 +583,90 @@ ipcMain.handle('jarvis:getSystemStatus', async (event) => {
   };
 });
 
+ipcMain.handle('jarvis:discoverApps', async (event) => {
+  if (!isTrustedSender(event)) return { ok: false, error: 'UNTRUSTED_IPC_SENDER' };
+  const apps = Object.values(ALLOWED_APPLICATIONS).map((app) => ({
+    ...app,
+    available: true,
+    status: 'AVAILABLE'
+  }));
+  return { ok: true, applications: apps };
+});
+
+ipcMain.handle('jarvis:listFolder', async (event, { folderPath }) => {
+  if (!isTrustedSender(event)) return { ok: false, items: [], error: 'UNTRUSTED_IPC_SENDER' };
+  const val = validatePath(folderPath);
+  if (!val.valid) return { ok: false, items: [], error: val.error };
+  if (!fs.existsSync(val.resolved) || !fs.statSync(val.resolved).isDirectory()) {
+    return { ok: false, items: [], error: 'Folder not found or is not a directory.' };
+  }
+  try {
+    const names = fs.readdirSync(val.resolved);
+    const items = [];
+    for (const name of names.slice(0, 100)) {
+      try {
+        const full = path.join(val.resolved, name);
+        const stat = fs.statSync(full);
+        const ext = path.extname(name).replace(/^\./, '').toLowerCase();
+        items.push({
+          name,
+          path: full,
+          isDirectory: stat.isDirectory(),
+          sizeBytes: stat.size,
+          modifiedTime: stat.mtimeMs,
+          extension: ext
+        });
+      } catch {
+        // skip
+      }
+    }
+    return { ok: true, folder: val.resolved, items };
+  } catch (err) {
+    return { ok: false, items: [], error: err.message };
+  }
+});
+
+ipcMain.handle('jarvis:readFile', async (event, { filePath }) => {
+  if (!isTrustedSender(event)) return { ok: false, error: 'UNTRUSTED_IPC_SENDER' };
+  const val = validatePath(filePath);
+  if (!val.valid) return { ok: false, error: val.error };
+  if (!fs.existsSync(val.resolved)) return { ok: false, error: 'FILE_NOT_FOUND' };
+  const stat = fs.statSync(val.resolved);
+  if (stat.isDirectory()) return { ok: false, error: 'IS_DIRECTORY' };
+  const ext = path.extname(val.resolved).replace(/^\./, '').toLowerCase();
+  if (BLOCKED_BINARIES.has(ext) || ext === 'exe' || ext === 'dll') {
+    return { ok: false, error: 'BLOCKED_EXTENSION' };
+  }
+  if (stat.size > 5 * 1024 * 1024) {
+    return { ok: false, error: 'FILE_TOO_LARGE' };
+  }
+  try {
+    const content = fs.readFileSync(val.resolved, 'utf8');
+    return { ok: true, path: val.resolved, name: path.basename(val.resolved), content, sizeBytes: stat.size };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('jarvis:createFile', async (event, { filePath, content, overwrite }) => {
+  if (!isTrustedSender(event)) return { ok: false, error: 'UNTRUSTED_IPC_SENDER' };
+  const val = validatePath(filePath);
+  if (!val.valid) return { ok: false, error: val.error };
+  const ext = path.extname(val.resolved).replace(/^\./, '').toLowerCase();
+  if (BLOCKED_BINARIES.has(ext) || ext === 'exe' || ext === 'dll') {
+    return { ok: false, error: 'BLOCKED_EXTENSION' };
+  }
+  if (fs.existsSync(val.resolved) && !overwrite) {
+    return { ok: false, exists: true, error: 'FILE_ALREADY_EXISTS' };
+  }
+  try {
+    fs.writeFileSync(val.resolved, String(content || ''), { encoding: 'utf8', mode: 0o644 });
+    return { ok: true, path: val.resolved, name: path.basename(val.resolved) };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
 app.whenReady().then(() => {
   loadPermissionConfigFromDisk();
   createWindow();

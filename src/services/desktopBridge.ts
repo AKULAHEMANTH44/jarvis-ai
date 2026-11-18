@@ -21,6 +21,30 @@ export interface ApprovedAppInfo {
   category?: 'APP' | 'BROWSER' | 'MUSIC';
 }
 
+export interface DiscoveredAppInfo extends ApprovedAppInfo {
+  available: boolean;
+  status: 'AVAILABLE' | 'NOT_INSTALLED' | 'UNKNOWN';
+  resolvedPath?: string;
+  lastLaunched?: number;
+}
+
+export interface FolderItemEntry {
+  name: string;
+  path: string;
+  isDirectory: boolean;
+  sizeBytes: number;
+  modifiedTime: number;
+  extension: string;
+}
+
+export interface WebPageInspectionResult {
+  ok: boolean;
+  url: string;
+  title?: string;
+  description?: string;
+  error?: string;
+}
+
 export interface DesktopActionAuditEntry {
   id: string;
   action: string;
@@ -802,6 +826,245 @@ export class DesktopBridgeService {
         ok: false,
         folder: folderPath,
         files: [],
+        error: err instanceof Error ? err.message : String(err)
+      };
+    }
+  }
+
+  /**
+   * Application Discovery: inspects installed status of allowed applications safely
+   */
+  public async discoverApplications(): Promise<DiscoveredAppInfo[]> {
+    if (this.isElectron()) {
+      const electronBridge = (window as unknown as {
+        jarvisDesktop: { discoverApps?: () => Promise<{ ok: boolean; applications?: DiscoveredAppInfo[] }> };
+      }).jarvisDesktop;
+      if (electronBridge?.discoverApps) {
+        try {
+          const res = await electronBridge.discoverApps();
+          if (res.ok && Array.isArray(res.applications)) {
+            return res.applications;
+          }
+        } catch {
+          // fallback
+        }
+      }
+    }
+
+    if (typeof fetch === 'function') {
+      try {
+        const res = await fetch('/api/desktop/apps/discover');
+        if (res.ok) {
+          const json = (await res.json()) as { ok: boolean; applications?: DiscoveredAppInfo[] };
+          if (json.ok && Array.isArray(json.applications)) {
+            return json.applications;
+          }
+        }
+      } catch {
+        // fallback
+      }
+    }
+
+    return DEFAULT_APPROVED_APPS.map((a) => ({
+      ...a,
+      available: true,
+      status: 'AVAILABLE'
+    }));
+  }
+
+  /**
+   * List files and folders inside an authorized folder with metadata
+   */
+  public async listFilesInFolder(
+    folderPath: string
+  ): Promise<{ ok: boolean; folder: string; items: FolderItemEntry[]; error?: string }> {
+    const cleanPath = folderPath.trim();
+    if (!this.isPathApproved(cleanPath)) {
+      return {
+        ok: false,
+        folder: cleanPath,
+        items: [],
+        error: `Folder "${cleanPath}" is outside approved desktop paths.`
+      };
+    }
+
+    if (this.isElectron()) {
+      const electronBridge = (window as unknown as {
+        jarvisDesktop: { listFolder?: (p: string) => Promise<{ ok: boolean; folder: string; items: FolderItemEntry[]; error?: string }> };
+      }).jarvisDesktop;
+      if (electronBridge?.listFolder) {
+        return await electronBridge.listFolder(cleanPath);
+      }
+    }
+
+    try {
+      const res = await fetch('/api/desktop/folder/list', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folderPath: cleanPath })
+      });
+      return await res.json();
+    } catch (err: unknown) {
+      return {
+        ok: false,
+        folder: cleanPath,
+        items: [],
+        error: err instanceof Error ? err.message : String(err)
+      };
+    }
+  }
+
+  /**
+   * Read safe text or document content from an authorized file
+   */
+  public async readApprovedDesktopFile(
+    filePath: string,
+    permissionId?: string
+  ): Promise<{ ok: boolean; path: string; name: string; content?: string; sizeBytes?: number; error?: string }> {
+    const cleanPath = filePath.trim();
+    if (!this.isPathApproved(cleanPath)) {
+      return {
+        ok: false,
+        path: cleanPath,
+        name: cleanPath.split(/[\\/]/).pop() || cleanPath,
+        error: `Path "${cleanPath}" is outside approved desktop paths.`
+      };
+    }
+
+    if (permissionId) {
+      const auth = permissionManager.beginAuthorizedExecution(permissionId, 'FILE_ACCESS', cleanPath);
+      if (!auth.authorized) {
+        return {
+          ok: false,
+          path: cleanPath,
+          name: cleanPath.split(/[\\/]/).pop() || cleanPath,
+          error: auth.error || 'PERMISSION_DENIED'
+        };
+      }
+    }
+
+    if (this.isElectron()) {
+      const electronBridge = (window as unknown as {
+        jarvisDesktop: { readFile?: (p: string) => Promise<{ ok: boolean; path: string; name: string; content?: string; sizeBytes?: number; error?: string }> };
+      }).jarvisDesktop;
+      if (electronBridge?.readFile) {
+        const res = await electronBridge.readFile(cleanPath);
+        if (permissionId) {
+          permissionManager.completeExecution(permissionId, res.ok, res.ok ? `Read file "${res.name}".` : res.error || 'Failed to read file.', res.error);
+        }
+        return res;
+      }
+    }
+
+    try {
+      const res = await fetch('/api/desktop/file/read', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filePath: cleanPath })
+      });
+      const data = await res.json();
+      if (permissionId) {
+        permissionManager.completeExecution(permissionId, data.ok, data.ok ? `Read file "${data.name}".` : data.error || 'Failed to read file.', data.error);
+      }
+      return data;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (permissionId) {
+        permissionManager.completeExecution(permissionId, false, msg, msg);
+      }
+      return {
+        ok: false,
+        path: cleanPath,
+        name: cleanPath.split(/[\\/]/).pop() || cleanPath,
+        error: msg
+      };
+    }
+  }
+
+  /**
+   * Create a new text file inside an authorized folder path with overwrite protection
+   */
+  public async createApprovedDesktopFile(
+    targetFilePath: string,
+    content: string,
+    overwrite = false,
+    permissionId?: string
+  ): Promise<{ ok: boolean; path: string; name: string; sizeBytes?: number; exists?: boolean; error?: string }> {
+    const cleanPath = targetFilePath.trim();
+    if (!this.isPathApproved(cleanPath)) {
+      return {
+        ok: false,
+        path: cleanPath,
+        name: cleanPath.split(/[\\/]/).pop() || cleanPath,
+        error: `Path "${cleanPath}" is outside approved desktop paths.`
+      };
+    }
+
+    if (permissionId) {
+      const auth = permissionManager.beginAuthorizedExecution(permissionId, 'FILE_CREATE', cleanPath);
+      if (!auth.authorized) {
+        return {
+          ok: false,
+          path: cleanPath,
+          name: cleanPath.split(/[\\/]/).pop() || cleanPath,
+          error: auth.error || 'PERMISSION_DENIED'
+        };
+      }
+    }
+
+    if (this.isElectron()) {
+      const electronBridge = (window as unknown as {
+        jarvisDesktop: { createFile?: (p: string, c: string, o?: boolean) => Promise<{ ok: boolean; path: string; name: string; sizeBytes?: number; exists?: boolean; error?: string }> };
+      }).jarvisDesktop;
+      if (electronBridge?.createFile) {
+        const res = await electronBridge.createFile(cleanPath, content, overwrite);
+        if (permissionId) {
+          permissionManager.completeExecution(permissionId, res.ok, res.ok ? `Created file "${res.name}".` : res.error || 'File creation failed.', res.error);
+        }
+        return res;
+      }
+    }
+
+    try {
+      const res = await fetch('/api/desktop/file/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filePath: cleanPath, content, overwrite })
+      });
+      const data = await res.json();
+      if (permissionId) {
+        permissionManager.completeExecution(permissionId, data.ok, data.ok ? `Created file "${data.name}".` : data.error || 'File creation failed.', data.error);
+      }
+      return data;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (permissionId) {
+        permissionManager.completeExecution(permissionId, false, msg, msg);
+      }
+      return {
+        ok: false,
+        path: cleanPath,
+        name: cleanPath.split(/[\\/]/).pop() || cleanPath,
+        error: msg
+      };
+    }
+  }
+
+  /**
+   * Inspect web page metadata safely with SSRF protection
+   */
+  public async inspectWebPage(url: string): Promise<WebPageInspectionResult> {
+    try {
+      const res = await fetch('/api/desktop/browser/inspect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: url.trim() })
+      });
+      return await res.json();
+    } catch (err: unknown) {
+      return {
+        ok: false,
+        url,
         error: err instanceof Error ? err.message : String(err)
       };
     }

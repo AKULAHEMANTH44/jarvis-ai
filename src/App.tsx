@@ -1700,6 +1700,9 @@ export const App: React.FC = () => {
           setFps(currentFps);
           const detection = gestureEngine.processResults(result);
           setGestureResult(detection);
+          if (sceneManagerRef.current) {
+            sceneManagerRef.current.updateHolographicHand(detection.hands[0]?.landmarks);
+          }
         }
       );
       setIsCameraActive(started);

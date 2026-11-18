@@ -77,6 +77,7 @@ export interface GestureDetectionResult {
   dispersionControl?: DispersionControlTelemetry;
   angularVelocity?: number; // rad/s instantaneous rotational speed
   rotationDirection?: 'LEFT' | 'RIGHT' | 'UP' | 'DOWN' | 'ROLL' | 'NONE';
+  customGestureMatch?: { profileId: string; actionId: string; name: string };
   timestamp: number;
 }
 

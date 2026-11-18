@@ -63,5 +63,21 @@ contextBridge.exposeInMainWorld('jarvisDesktop', {
 
   revokeFolderPath: async (folderPath) => {
     return ipcRenderer.invoke('jarvis:revokeFolderPath', { folderPath });
+  },
+
+  discoverApps: async () => {
+    return ipcRenderer.invoke('jarvis:discoverApps');
+  },
+
+  listFolder: async (folderPath) => {
+    return ipcRenderer.invoke('jarvis:listFolder', { folderPath });
+  },
+
+  readFile: async (filePath) => {
+    return ipcRenderer.invoke('jarvis:readFile', { filePath });
+  },
+
+  createFile: async (filePath, content, overwrite = false) => {
+    return ipcRenderer.invoke('jarvis:createFile', { filePath, content, overwrite });
   }
 });

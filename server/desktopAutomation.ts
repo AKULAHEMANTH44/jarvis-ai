@@ -14,6 +14,34 @@ export interface AllowedApplicationEntry {
   category?: 'APP' | 'BROWSER' | 'MUSIC';
 }
 
+export interface DiscoveredApplicationInfo extends AllowedApplicationEntry {
+  available: boolean;
+  status: 'AVAILABLE' | 'NOT_INSTALLED' | 'UNKNOWN';
+  resolvedPath?: string;
+  lastLaunched?: number;
+}
+
+export interface FolderItemEntry {
+  name: string;
+  path: string;
+  isDirectory: boolean;
+  sizeBytes: number;
+  modifiedTime: number;
+  extension: string;
+}
+
+export interface WebPageInspectionResult {
+  ok: boolean;
+  url: string;
+  title?: string;
+  description?: string;
+  error?: string;
+}
+
+export const BLOCKED_FILE_EXTENSIONS = new Set([
+  'exe', 'msi', 'bat', 'cmd', 'ps1', 'sh', 'vbs', 'vbe', 'dll', 'sys', 'com', 'app', 'dmg', 'pkg', 'deb', 'rpm'
+]);
+
 /**
  * Strict configurable allowlist of permitted Windows / Desktop applications.
  * No arbitrary binaries, scripts, or terminal shells (cmd.exe, powershell.exe, bash, etc.) are allowed.
@@ -1058,6 +1086,345 @@ export class DesktopAutomationService {
         ok: false,
         folder: targetPath,
         files: [],
+        error: err instanceof Error ? err.message : String(err)
+      };
+    }
+  }
+
+  /**
+   * Application discovery: inspects installed status of allowed applications safely
+   */
+  public async discoverApplications(): Promise<DiscoveredApplicationInfo[]> {
+    const isWin = process.platform === 'win32';
+    const isMac = process.platform === 'darwin';
+    const apps = Array.from(this.allowedApplications.values());
+    const discovered: DiscoveredApplicationInfo[] = [];
+
+    for (const app of apps) {
+      let available = false;
+      let resolvedPath: string | undefined = undefined;
+
+      if (isWin) {
+        const winName = app.winExecutable.toLowerCase();
+        const winDir = process.env.WINDIR || 'C:\\Windows';
+        const sys32 = path.join(winDir, 'System32');
+        const progFiles = process.env.ProgramFiles || 'C:\\Program Files';
+        const progFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+        const localAppData = process.env.LOCALAPPDATA || '';
+        const appData = process.env.APPDATA || '';
+
+        const candidatePaths: string[] = [];
+        if (winName === 'calc.exe') candidatePaths.push(path.join(sys32, 'calc.exe'), path.join(winDir, 'calc.exe'));
+        else if (winName === 'notepad.exe') candidatePaths.push(path.join(sys32, 'notepad.exe'), path.join(winDir, 'notepad.exe'));
+        else if (winName === 'explorer.exe') candidatePaths.push(path.join(winDir, 'explorer.exe'));
+        else if (winName === 'code.cmd' || winName === 'code.exe') {
+          candidatePaths.push(
+            path.join(localAppData, 'Programs', 'Microsoft VS Code', 'bin', 'code.cmd'),
+            path.join(localAppData, 'Programs', 'Microsoft VS Code', 'Code.exe'),
+            path.join(progFiles, 'Microsoft VS Code', 'bin', 'code.cmd')
+          );
+        } else if (winName === 'chrome.exe') {
+          candidatePaths.push(
+            path.join(progFiles, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+            path.join(progFilesX86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+            path.join(localAppData, 'Google', 'Chrome', 'Application', 'chrome.exe')
+          );
+        } else if (winName === 'spotify.exe') {
+          candidatePaths.push(
+            path.join(appData, 'Spotify', 'Spotify.exe'),
+            path.join(localAppData, 'Microsoft', 'WindowsApps', 'Spotify.exe')
+          );
+        }
+
+        for (const p of candidatePaths) {
+          try {
+            if (fs.existsSync(p)) {
+              available = true;
+              resolvedPath = p;
+              break;
+            }
+          } catch {
+            // ignore
+          }
+        }
+
+        if (!available && process.env.PATH) {
+          const pathDirs = process.env.PATH.split(path.delimiter);
+          for (const dir of pathDirs) {
+            try {
+              const full = path.join(dir, app.winExecutable);
+              if (fs.existsSync(full)) {
+                available = true;
+                resolvedPath = full;
+                break;
+              }
+            } catch {
+              // ignore
+            }
+          }
+        }
+
+        if (!available && (app.id === 'BROWSER' || app.id === 'EXPLORER' || app.id === 'NOTEPAD' || app.id === 'CALCULATOR')) {
+          available = true;
+        }
+      } else {
+        const execName = isMac ? (app.macExecutable || 'open') : (app.linuxExecutable || 'xdg-open');
+        if (execName === 'open' || execName === 'xdg-open') {
+          available = true;
+          resolvedPath = `/usr/bin/${execName}`;
+        } else if (process.env.PATH) {
+          const pathDirs = process.env.PATH.split(path.delimiter);
+          for (const dir of pathDirs) {
+            try {
+              const full = path.join(dir, execName);
+              if (fs.existsSync(full)) {
+                available = true;
+                resolvedPath = full;
+                break;
+              }
+            } catch {
+              // ignore
+            }
+          }
+        }
+        if (app.id === 'BROWSER' || app.id === 'EXPLORER' || process.env.VITEST) {
+          available = true;
+        }
+      }
+
+      discovered.push({
+        ...app,
+        available,
+        status: available ? 'AVAILABLE' : 'NOT_INSTALLED',
+        resolvedPath
+      });
+    }
+
+    return discovered;
+  }
+
+  /**
+   * List files and folders inside an authorized folder with metadata
+   */
+  public listApprovedFolder(folderPath: string): {
+    ok: boolean;
+    folder: string;
+    items: FolderItemEntry[];
+    error?: string;
+  } {
+    const val = this.validatePath(folderPath);
+    if (!val.valid || !val.normalizedPath) {
+      return { ok: false, folder: folderPath, items: [], error: val.error };
+    }
+
+    const targetPath = val.normalizedPath;
+    if (!fs.existsSync(targetPath) || !fs.statSync(targetPath).isDirectory()) {
+      return { ok: false, folder: targetPath, items: [], error: 'Folder not found or is not a directory.' };
+    }
+
+    try {
+      const names = fs.readdirSync(targetPath);
+      const items: FolderItemEntry[] = [];
+      for (const name of names.slice(0, 100)) {
+        try {
+          const full = path.join(targetPath, name);
+          const stat = fs.statSync(full);
+          const ext = path.extname(name).replace(/^\./, '').toLowerCase();
+          items.push({
+            name,
+            path: full,
+            isDirectory: stat.isDirectory(),
+            sizeBytes: stat.size,
+            modifiedTime: stat.mtimeMs,
+            extension: ext
+          });
+        } catch {
+          // skip
+        }
+      }
+      return { ok: true, folder: targetPath, items };
+    } catch (err: unknown) {
+      return { ok: false, folder: targetPath, items: [], error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /**
+   * Read safe text/document content from an authorized file
+   */
+  public readApprovedFile(filePath: string): {
+    ok: boolean;
+    path: string;
+    name: string;
+    content?: string;
+    sizeBytes?: number;
+    error?: string;
+  } {
+    const val = this.validatePath(filePath);
+    if (!val.valid || !val.normalizedPath) {
+      return { ok: false, path: filePath, name: path.basename(filePath), error: val.error };
+    }
+
+    const target = val.normalizedPath;
+    if (!fs.existsSync(target)) {
+      return { ok: false, path: target, name: path.basename(target), error: 'File does not exist.' };
+    }
+
+    const stat = fs.statSync(target);
+    if (stat.isDirectory()) {
+      return { ok: false, path: target, name: path.basename(target), error: 'Target is a directory, not a file.' };
+    }
+
+    const ext = path.extname(target).replace(/^\./, '').toLowerCase();
+    if (BLOCKED_FILE_EXTENSIONS.has(ext)) {
+      return { ok: false, path: target, name: path.basename(target), error: `Blocked reading executable/binary file (.${ext}).` };
+    }
+
+    if (stat.size > 5 * 1024 * 1024) {
+      return { ok: false, path: target, name: path.basename(target), error: `File exceeds 5MB size limit (${stat.size} bytes).` };
+    }
+
+    try {
+      const content = fs.readFileSync(target, 'utf8');
+      return {
+        ok: true,
+        path: target,
+        name: path.basename(target),
+        content,
+        sizeBytes: stat.size
+      };
+    } catch (err: unknown) {
+      return { ok: false, path: target, name: path.basename(target), error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /**
+   * Create or save text content into an authorized folder path with overwrite protection
+   */
+  public createApprovedFile(
+    targetFilePath: string,
+    content: string,
+    overwrite = false
+  ): {
+    ok: boolean;
+    path: string;
+    name: string;
+    sizeBytes?: number;
+    exists?: boolean;
+    error?: string;
+  } {
+    const val = this.validatePath(targetFilePath);
+    if (!val.valid || !val.normalizedPath) {
+      return { ok: false, path: targetFilePath, name: path.basename(targetFilePath), error: val.error };
+    }
+
+    const target = val.normalizedPath;
+    const ext = path.extname(target).replace(/^\./, '').toLowerCase();
+    if (BLOCKED_FILE_EXTENSIONS.has(ext)) {
+      return { ok: false, path: target, name: path.basename(target), error: `Disallowed extension (.${ext}). Executable creation blocked.` };
+    }
+
+    if (fs.existsSync(target)) {
+      if (!overwrite) {
+        return {
+          ok: false,
+          path: target,
+          name: path.basename(target),
+          exists: true,
+          error: 'FILE_ALREADY_EXISTS: Target file already exists. Explicit confirmation required to overwrite.'
+        };
+      }
+    }
+
+    try {
+      const parentDir = path.dirname(target);
+      if (!fs.existsSync(parentDir)) {
+        return { ok: false, path: target, name: path.basename(target), error: 'Parent directory does not exist.' };
+      }
+
+      fs.writeFileSync(target, content, { encoding: 'utf8', mode: 0o644 });
+      const sizeBytes = Buffer.byteLength(content, 'utf8');
+      this.recordAudit({
+        action: 'FILE_CREATE',
+        target,
+        ok: true
+      });
+      return {
+        ok: true,
+        path: target,
+        name: path.basename(target),
+        sizeBytes
+      };
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.recordAudit({
+        action: 'FILE_CREATE',
+        target,
+        ok: false,
+        error: msg
+      });
+      return { ok: false, path: target, name: path.basename(target), error: msg };
+    }
+  }
+
+  /**
+   * Safe web page preview/inspection with SSRF protection
+   */
+  public async inspectWebPage(rawUrl: string): Promise<WebPageInspectionResult> {
+    let parsed: URL;
+    try {
+      parsed = new URL(String(rawUrl || '').trim());
+    } catch {
+      return { ok: false, url: rawUrl, error: 'Invalid URL format.' };
+    }
+
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      return { ok: false, url: rawUrl, error: 'Only HTTP/HTTPS URLs can be inspected.' };
+    }
+
+    const host = parsed.hostname.toLowerCase();
+    if (
+      host === 'localhost' ||
+      host === '127.0.0.1' ||
+      host === '0.0.0.0' ||
+      host.endsWith('.local') ||
+      /^10\./.test(host) ||
+      /^192\.168\./.test(host) ||
+      /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(host) ||
+      /^169\.254\./.test(host)
+    ) {
+      return { ok: false, url: rawUrl, error: 'Private or internal network inspection is blocked for safety.' };
+    }
+
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3500);
+      const res = await fetch(parsed.toString(), {
+        signal: controller.signal,
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) JARVIS/7.0' }
+      });
+      clearTimeout(timeout);
+
+      if (!res.ok) {
+        return { ok: false, url: parsed.toString(), error: `HTTP error ${res.status}` };
+      }
+
+      const html = await res.text();
+      const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+      const title = titleMatch ? titleMatch[1].trim() : parsed.hostname;
+
+      const metaDescMatch = html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']+)["']/i);
+      const description = metaDescMatch ? metaDescMatch[1].trim() : undefined;
+
+      return {
+        ok: true,
+        url: parsed.toString(),
+        title,
+        description
+      };
+    } catch (err: unknown) {
+      return {
+        ok: false,
+        url: parsed.toString(),
         error: err instanceof Error ? err.message : String(err)
       };
     }

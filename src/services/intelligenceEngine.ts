@@ -35,7 +35,8 @@ import { fileAccessService } from './fileAccessService';
 import { browserActionService } from './browserActionService';
 import { webSearchService, extractSearchIntent } from './webSearchService';
 import { musicService, MUSIC_SOURCE_CHOICES } from './musicService';
-import { desktopBridge, DesktopExecutionResult } from './desktopBridge';
+import { desktopBridge, DesktopExecutionResult, WebPageInspectionResult } from './desktopBridge';
+import { desktopWorkflowService } from './desktopWorkflowService';
 import { agentOrchestrator } from './agentOrchestrator';
 
 export interface IntelligenceStateSnapshot {
@@ -106,7 +107,8 @@ const APPROVED_APP_ALIASES: { id: string; displayName: string; pattern: RegExp }
   { id: 'CALCULATOR', displayName: 'Windows Calculator', pattern: /\b(?:windows\s+)?(?:calculator|calc(?:\.exe)?)\b/i },
   { id: 'EXPLORER', displayName: 'File Explorer', pattern: /\b(?:file|windows)\s+explorer\b/i },
   { id: 'CHROME', displayName: 'Google Chrome', pattern: /\b(?:google\s+)?chrome(?:\.exe)?\b/i },
-  { id: 'BROWSER', displayName: 'Default Web Browser', pattern: /\b(?:default\s+(?:web\s+)?browser|web\s+browser)\b/i }
+  { id: 'BROWSER', displayName: 'Default Web Browser', pattern: /\b(?:default\s+(?:web\s+)?browser|web\s+browser)\b/i },
+  { id: 'SPOTIFY', displayName: 'Spotify', pattern: /\bspotify(?:\.exe)?\b/i }
 ];
 
 const BLOCKED_SHELL_OR_SYSTEM_PATTERN =
@@ -289,7 +291,7 @@ export class IntelligenceEngine {
 
     // 2. Multi-step planning detection
     if (
-      /\b(prepare my project|prepare.*demo|demonstration|multi[- ]step|workflow|create a plan|plan how|step[- ]by[- ]step|full audit)\b/i.test(
+      /\b(prepare my project|prepare.*demo|demonstration|multi[- ]step|workflow|run\s+workflow|execute\s+workflow|start\s+workflow|create a plan|plan how|step[- ]by[- ]step|full audit)\b/i.test(
         lower
       )
     ) {
@@ -391,17 +393,31 @@ export class IntelligenceEngine {
       };
     }
 
-    // 5. File Access Intent
+    // 4d. Ambiguous notes request clarification
+    if (/\b(open\s+my\s+notes|open\s+notes)\b/i.test(lower)) {
+      missingInformation.push('Did you mean to open the file or browse its containing directory?');
+      return {
+        category: 'CLARIFICATION_NEEDED',
+        confidence: 0.94,
+        summary: 'Ambiguous request: notes file vs containing directory.',
+        requiresTool: false,
+        requiresPlan: false,
+        missingInformation,
+        resolvedReferences: followUp.resolvedReferences
+      };
+    }
+
+    // 5. File Access, Creation & Search Intent
     if (
       this.extractLocalFilesystemPath(text) !== null ||
-      /\b(open\s+(?:my\s+|a\s+|the\s+)?(?:file|project\s+report|report|document|pdf|image|photo|selected\s+project\s+folder|project\s+folder|folder)|select\s+(?:a\s+)?(?:file|folder)|read\s+(?:the\s+)?(?:selected\s+)?(?:file|document|report)|summarize\s+(?:the\s+)?(?:selected\s+)?(?:report|file|document)|import\s+(?:a\s+|an\s+)?(?:3d\s+model|model\s+file|glb|gltf|obj|stl))\b/i.test(
+      /\b(find\s+(?:a\s+)?file|search\s+(?:for\s+)?(?:a\s+)?file|search\s+files|create\s+(?:a\s+)?(?:text\s+)?file|write\s+(?:a\s+)?(?:text\s+)?file|save\s+(?:text\s+)?to\s+file|read\s+(?:the\s+)?(?:file\s+)?[a-zA-Z0-9_.-]+\.[a-zA-Z0-9]+|open\s+(?:my\s+|a\s+|the\s+)?(?:file|project\s+report|report|document|pdf|image|photo|selected\s+project\s+folder|project\s+folder|folder)|select\s+(?:a\s+)?(?:file|folder)|read\s+(?:the\s+)?(?:selected\s+)?(?:file|document|report)|summarize\s+(?:the\s+)?(?:selected\s+)?(?:report|file|document)|import\s+(?:a\s+|an\s+)?(?:3d\s+model|model\s+file|glb|gltf|obj|stl))\b/i.test(
         lower
       )
     ) {
       return {
         category: 'FILE_ACTION',
         confidence: 0.91,
-        summary: 'User-selected file access or inspection request.',
+        summary: 'User-selected file access, creation, search, or inspection request.',
         requiresTool: true,
         requiresPlan: false,
         missingInformation,
@@ -611,11 +627,11 @@ export class IntelligenceEngine {
   }
 
   private looksLikeBrowserIntent(lower: string): boolean {
-    if (/\b(open\s+a\s+new\s+tab|open\s+new\s+tab|open\s+website|open\s+site)\b/i.test(lower)) {
+    if (/\b(open\s+a\s+new\s+tab|open\s+new\s+tab|open\s+website|open\s+site|inspect\s+(?:this\s+)?(?:website|webpage|page|site|url))\b/i.test(lower)) {
       return true;
     }
     const navMatch = lower.match(
-      /\b(?:open|navigate\s+to|go\s+to|visit|browse\s+to|launch)\s+([a-z0-9.-/:?=&_%+-]+(?:\s+[a-z0-9.-]+)?)/i
+      /\b(?:open|navigate\s+to|go\s+to|visit|browse\s+to|launch|inspect)\s+([a-z0-9.-/:?=&_%+-]+(?:\s+[a-z0-9.-]+)?)/i
     );
     if (!navMatch) return false;
     const rawTarget = navMatch[1].replace(/[.?!]+$/, '').trim().toLowerCase();
@@ -637,6 +653,11 @@ export class IntelligenceEngine {
     if (/^(?:open\s+(?:a\s+)?new\s+tab|open\s+(?:a\s+)?website|navigate)$/i.test(cleaned)) {
       return null;
     }
+
+    const inspectMatch = cleaned.match(
+      /(?:inspect\s+(?:this\s+)?(?:website\s+|webpage\s+|page\s+|url\s+)?)(https?:\/\/\S+|[a-z0-9.-]+\.[a-z]{2,}(?:\/\S*)?)/i
+    );
+    if (inspectMatch) return inspectMatch[1].trim();
 
     const urlMatch = cleaned.match(/https?:\/\/\S+|javascript:\S+|data:\S+|file:\S+/i);
     if (urlMatch) return urlMatch[0];
@@ -1528,7 +1549,32 @@ export class IntelligenceEngine {
 
         const explicitPath = this.extractLocalFilesystemPath(rawInput);
         const selectedFolder = desktopBridge.getSelectedFolder();
-        const savedFolder = permissionPolicy.getApprovedFolders()[0]?.path || '';
+        const savedFolders = permissionPolicy.getApprovedFolders();
+
+        // Clarify if user asks "open project folder" but multiple approved folders exist
+        if (
+          !explicitPath &&
+          !selectedFolder &&
+          savedFolders.length > 1 &&
+          !savedFolders.some((f) => rawInput.toLowerCase().includes(f.name.toLowerCase()))
+        ) {
+          const msg = `Which project folder would you like me to open? (${savedFolders.map((f) => f.name).join(', ')})`;
+          conversationManager.addTurn({ role: 'assistant', text: msg, intent: 'FOLDER_ACTION' });
+          return this.finishResult({
+            id: reqId,
+            input: rawInput,
+            reply: msg,
+            status: 'RESPONDING',
+            classification,
+            providerUsed: 'LOCAL',
+            isExternalModel: false,
+            toolRecords,
+            memoryCandidate,
+            snapshot: params.snapshot
+          });
+        }
+
+        const savedFolder = savedFolders[0]?.path || '';
         const targetFolderPath = explicitPath || selectedFolder?.path || savedFolder;
 
         if (!targetFolderPath) {
@@ -1754,6 +1800,235 @@ export class IntelligenceEngine {
           });
         }
 
+        // 1. Natural language create text file: "create a text file named <name> containing <text>"
+        const createMatch = rawInput.match(
+          /(?:create|write)\s+(?:a\s+)?(?:text\s+)?file\s+(?:named\s+|called\s+)?["']?([a-zA-Z0-9_.-]+\.[a-zA-Z0-9]+)["']?\s*(?:containing|with\s+(?:content|text))?\s*["']?([\s\S]*?)["']?$/i
+        );
+        if (createMatch) {
+          const fileName = createMatch[1];
+          const fileContent = createMatch[2]?.trim() || 'Created by JARVIS Desktop Assistant.';
+          const selectedFolder = desktopBridge.getSelectedFolder()?.path || permissionPolicy.getApprovedFolders()[0]?.path;
+          if (!selectedFolder) {
+            const msg = 'Where should I save this file? Please specify an approved directory or select a folder first.';
+            conversationManager.addTurn({ role: 'assistant', text: msg, intent: 'FILE_ACTION' });
+            return this.finishResult({
+              id: reqId,
+              input: rawInput,
+              reply: msg,
+              status: 'RESPONDING',
+              classification,
+              providerUsed: 'LOCAL',
+              isExternalModel: false,
+              toolRecords,
+              memoryCandidate,
+              snapshot: params.snapshot
+            });
+          }
+
+          const targetFilePath = `${selectedFolder.replace(/[\\/]+$/, '')}/${fileName}`;
+          if (/(^|[\\/])\.\.([\\/]|$)|%2e%2e/i.test(targetFilePath)) {
+            const msg = 'Blocked invalid file path: directory traversal (..) is prohibited.';
+            this.lastError = msg;
+            conversationManager.addTurn({ role: 'assistant', text: msg, intent: 'FILE_ACTION' });
+            return this.finishResult({
+              id: reqId,
+              input: rawInput,
+              reply: msg,
+              status: 'ERROR',
+              classification,
+              providerUsed: 'LOCAL',
+              isExternalModel: false,
+              toolRecords,
+              memoryCandidate,
+              snapshot: params.snapshot,
+              error: 'PATH_TRAVERSAL_BLOCKED'
+            });
+          }
+
+          const perm = permissionManager.createRequest({
+            category: 'FILE_CREATE',
+            requestedAction: `Create text file "${fileName}"`,
+            target: targetFilePath,
+            reason: `User requested creating file "${fileName}" in approved folder`,
+            riskLevel: 'LOW',
+            securityLevel: 'LEVEL_2_SESSION_CONFIRMATION',
+            capabilityId: 'FOLDER_ACCESS',
+            requestedScope: `Write new text file to "${targetFilePath}"`
+          });
+
+          this.pendingPermission = perm;
+          this.pendingPermissionInputFingerprint = fingerprint;
+          this.permissionExecutors.set(perm.id, async (permissionId) => {
+            const res = await toolRegistry.executeTool(
+              'create_desktop_text_file',
+              { filePath: targetFilePath, content: fileContent, overwrite: false, permissionId },
+              { approvedByUser: true }
+            );
+            return {
+              ok: res.result.ok,
+              reply: res.result.summary,
+              toolRecord: res.record,
+              error: res.result.error
+            };
+          });
+
+          const reply = `Plan: Create text file "${fileName}" in approved folder "${selectedFolder}" (${fileContent.length} chars). Do you approve?`;
+          conversationManager.addTurn({ role: 'assistant', text: reply, intent: 'FILE_ACTION' });
+          this.setStatus(
+            'AWAITING_APPROVAL',
+            `Waiting for approval to create file ${fileName}`,
+            'Waiting for your permission.'
+          );
+          return this.finishResult({
+            id: reqId,
+            input: rawInput,
+            reply,
+            status: 'AWAITING_APPROVAL',
+            classification,
+            providerUsed: 'LOCAL',
+            isExternalModel: false,
+            toolRecords,
+            pendingPermission: perm,
+            memoryCandidate,
+            snapshot: params.snapshot,
+            preserveStatus: true
+          });
+        }
+
+        // 2. Natural language file search: "find a file named <name>" or "search files"
+        const searchFileMatch = rawInput.match(
+          /(?:find|search\s+for)\s+(?:a\s+)?file(?:\s+named)?\s+["']?([a-zA-Z0-9_.-]+)["']?/i
+        );
+        if (searchFileMatch) {
+          const searchName = searchFileMatch[1].trim();
+          const targetFolder = desktopBridge.getSelectedFolder()?.path || permissionPolicy.getApprovedFolders()[0]?.path;
+          if (!targetFolder) {
+            const msg = 'Which project folder would you like me to search? Please select or approve an access folder first.';
+            conversationManager.addTurn({ role: 'assistant', text: msg, intent: 'FILE_ACTION' });
+            return this.finishResult({
+              id: reqId,
+              input: rawInput,
+              reply: msg,
+              status: 'RESPONDING',
+              classification,
+              providerUsed: 'LOCAL',
+              isExternalModel: false,
+              toolRecords,
+              memoryCandidate,
+              snapshot: params.snapshot
+            });
+          }
+
+          const listing = await desktopBridge.listFilesInFolder(targetFolder);
+          if (!listing.ok) {
+            const msg = `Unable to search folder "${targetFolder}": ${listing.error}`;
+            conversationManager.addTurn({ role: 'assistant', text: msg, intent: 'FILE_ACTION' });
+            return this.finishResult({
+              id: reqId,
+              input: rawInput,
+              reply: msg,
+              status: 'ERROR',
+              classification,
+              providerUsed: 'LOCAL',
+              isExternalModel: false,
+              toolRecords,
+              memoryCandidate,
+              snapshot: params.snapshot,
+              error: listing.error
+            });
+          }
+
+          const matchedFiles = listing.items.filter((item) =>
+            item.name.toLowerCase().includes(searchName.toLowerCase())
+          );
+          let reply = '';
+          if (matchedFiles.length > 0) {
+            const fileListStr = matchedFiles
+              .map((f) => `• ${f.name} (${f.isDirectory ? 'Directory' : `${f.sizeBytes} bytes`})`)
+              .join('\n');
+            reply = `Found ${matchedFiles.length} matching item(s) in "${targetFolder}":\n${fileListStr}\nWould you like me to read or open one of these files?`;
+          } else {
+            reply = `No files matching "${searchName}" were found in "${targetFolder}". (Scanned ${listing.items.length} items).`;
+          }
+          conversationManager.addTurn({ role: 'assistant', text: reply, intent: 'FILE_ACTION' });
+          return this.finishResult({
+            id: reqId,
+            input: rawInput,
+            reply,
+            status: 'RESPONDING',
+            classification,
+            providerUsed: 'LOCAL',
+            isExternalModel: false,
+            toolRecords,
+            memoryCandidate,
+            snapshot: params.snapshot
+          });
+        }
+
+        // 3. Natural language read file: "read <filename>"
+        const readFileMatch = rawInput.match(
+          /\bread\s+(?:the\s+)?(?:file\s+)?["']?([a-zA-Z0-9_.-]+\.[a-zA-Z0-9]+)["']?/i
+        );
+        if (readFileMatch) {
+          const targetName = readFileMatch[1].trim();
+          const targetFolder = desktopBridge.getSelectedFolder()?.path || permissionPolicy.getApprovedFolders()[0]?.path;
+          const fullPath = targetFolder ? `${targetFolder.replace(/[\\/]+$/, '')}/${targetName}` : targetName;
+          desktopBridge.registerApprovedPath(fullPath);
+
+          const perm = permissionManager.createRequest({
+            category: 'FILE_ACCESS',
+            requestedAction: `Read desktop file "${targetName}"`,
+            target: fullPath,
+            reason: `User requested reading safe text from "${targetName}"`,
+            riskLevel: 'LOW',
+            securityLevel: 'LEVEL_1_PREAPPROVED',
+            capabilityId: 'FOLDER_ACCESS',
+            requestedScope: `Read text content from "${fullPath}"`
+          });
+
+          this.pendingPermission = perm;
+          this.pendingPermissionInputFingerprint = fingerprint;
+          this.permissionExecutors.set(perm.id, async (permissionId) => {
+            const res = await toolRegistry.executeTool(
+              'read_desktop_file',
+              { filePath: fullPath, permissionId },
+              { approvedByUser: true }
+            );
+            const readData = res.result.data?.fileRead;
+            const reply = res.result.ok && readData?.content
+              ? `File "${readData.name}" (${readData.sizeBytes} bytes, ${readData.lineCount} lines):\n\n${readData.content.slice(0, 1500)}`
+              : res.result.summary;
+            return {
+              ok: res.result.ok,
+              reply,
+              toolRecord: res.record,
+              error: res.result.error
+            };
+          });
+
+          const reply = `Plan: Read content from "${fullPath}". Do you approve?`;
+          conversationManager.addTurn({ role: 'assistant', text: reply, intent: 'FILE_ACTION' });
+          this.setStatus(
+            'AWAITING_APPROVAL',
+            `Waiting for approval to read ${targetName}`,
+            'Waiting for your permission.'
+          );
+          return this.finishResult({
+            id: reqId,
+            input: rawInput,
+            reply,
+            status: 'AWAITING_APPROVAL',
+            classification,
+            providerUsed: 'LOCAL',
+            isExternalModel: false,
+            toolRecords,
+            pendingPermission: perm,
+            memoryCandidate,
+            snapshot: params.snapshot,
+            preserveStatus: true
+          });
+        }
+
         // Handle "open my project folder" honestly while offering native/browser folder & file pickers
         if (/\bfolder\b/i.test(lower)) {
           const prompt: PendingInteractivePrompt = {
@@ -1899,6 +2174,34 @@ export class IntelligenceEngine {
         }
 
         const targetUrl = preview.normalizedUrl;
+
+        // Webpage Inspection request: "inspect this website <url>"
+        if (/\binspect\b/i.test(rawInput)) {
+          this.setStatus('TOOL_EXECUTION', `Inspecting web page: ${targetUrl}`);
+          const res = await toolRegistry.executeTool('inspect_web_page', { url: targetUrl });
+          const inspection = res.result.data?.pageInspection as WebPageInspectionResult | undefined;
+          let reply = '';
+          if (res.result.ok && inspection) {
+            reply = `Web Page Inspection for ${targetUrl}:\n• Title: ${inspection.title || 'Untitled'}\n• Status: ${inspection.status}\n• Description: ${inspection.description || 'No description provided'}\n• Content Preview: ${inspection.previewText || 'None'}`;
+          } else {
+            reply = res.result.error || `Unable to inspect ${targetUrl}`;
+          }
+          conversationManager.addTurn({ role: 'assistant', text: reply, intent: 'BROWSER_ACTION' });
+          return this.finishResult({
+            id: reqId,
+            input: rawInput,
+            reply,
+            status: res.result.ok ? 'RESPONDING' : 'ERROR',
+            classification,
+            providerUsed: 'LOCAL',
+            isExternalModel: false,
+            toolRecords: res.record ? [...toolRecords, res.record] : toolRecords,
+            memoryCandidate,
+            snapshot: params.snapshot,
+            error: res.result.error
+          });
+        }
+
         const evalRes = permissionPolicy.evaluateActionPolicy({ capability: 'BROWSER_ACCESS' });
 
         if (evalRes.outcome === 'BLOCKED') {
@@ -2617,6 +2920,30 @@ export class IntelligenceEngine {
 
       // 6. Multi-Step Plan
       if (classification.category === 'MULTI_STEP_PLAN') {
+        if (/\b(run\s+workflow|execute\s+workflow|start\s+workflow)\b/i.test(rawInput)) {
+          const selectedFolder = desktopBridge.getSelectedFolder()?.name || permissionPolicy.getApprovedFolders()[0]?.name || 'current_project';
+          const wf = desktopWorkflowService.createProjectFileSummaryWorkflow(selectedFolder, 'notes.txt', 'audit_summary.txt');
+          void desktopWorkflowService.runWorkflow(wf);
+          const reply = `Starting multi-step desktop workflow: "${wf.title}" (${wf.steps.length} steps) targeting "${selectedFolder}". Track live step progress in the Workflows panel.`;
+          conversationManager.addTurn({
+            role: 'assistant',
+            text: reply,
+            intent: 'MULTI_STEP_PLAN'
+          });
+          return this.finishResult({
+            id: reqId,
+            input: rawInput,
+            reply,
+            status: 'RESPONDING',
+            classification,
+            providerUsed: 'LOCAL',
+            isExternalModel: false,
+            toolRecords,
+            memoryCandidate,
+            snapshot: params.snapshot
+          });
+        }
+
         this.setStatus('PLANNING', `Constructing structured execution plan for "${rawInput.slice(0, 40)}"`);
         const plan = planningEngine.createPlanFromRequest(rawInput, params.snapshot);
         if (plan.requiresApproval) {

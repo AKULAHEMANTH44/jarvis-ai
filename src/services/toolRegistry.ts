@@ -14,6 +14,7 @@ import { fileAccessService } from './fileAccessService';
 import { browserActionService, validateNavigationUrl } from './browserActionService';
 import { webSearchService, extractSearchIntent } from './webSearchService';
 import { musicService } from './musicService';
+import { desktopWorkflowService } from './desktopWorkflowService';
 import { MusicSourceType, WebSearchProviderId } from '../types/assistant';
 
 export interface WorkspaceToolHost {
@@ -1468,6 +1469,176 @@ export class ToolRegistry {
             : res.error || 'Unable to inspect folder.',
           data: { searchResult: res },
           error: res.error
+        };
+      }
+    });
+
+    this.registerTool({
+      name: 'discover_desktop_applications',
+      description: 'Discover all supported desktop applications and their installation/availability status.',
+      permissionLevel: 'READ_ONLY',
+      requiresConfirmation: false,
+      inputSchema: {
+        type: 'object',
+        properties: {},
+        required: []
+      },
+      execute: async () => {
+        const apps = await desktopBridge.discoverApplications();
+        const availableCount = apps.filter((a) => a.available).length;
+        return {
+          ok: true,
+          verified: true,
+          summary: `Discovered ${apps.length} supported applications (${availableCount} available on this system).`,
+          data: { applications: apps }
+        };
+      }
+    });
+
+    this.registerTool({
+      name: 'list_desktop_folder_contents',
+      description: 'List all files and subdirectories with sizes, extensions, and timestamps inside an authorized folder.',
+      permissionLevel: 'READ_ONLY',
+      requiresConfirmation: false,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          folderPath: { type: 'string', description: 'Directory path to list.' }
+        },
+        required: ['folderPath']
+      },
+      execute: async (args) => {
+        const folderPath = String(args.folderPath || '');
+        const res = await desktopBridge.listFilesInFolder(folderPath);
+        return {
+          ok: res.ok,
+          verified: res.ok,
+          summary: res.ok
+            ? `Listed ${res.items.length} item(s) inside "${res.folder}".`
+            : res.error || 'Failed listing folder.',
+          data: { folderListing: res },
+          error: res.error
+        };
+      }
+    });
+
+    this.registerTool({
+      name: 'read_desktop_file',
+      description: 'Read safe text or document contents from an authorized desktop file path.',
+      permissionLevel: 'READ_ONLY',
+      requiresConfirmation: false,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: { type: 'string', description: 'File path to read.' },
+          permissionId: { type: 'string', description: 'Optional approval token if required.' }
+        },
+        required: ['filePath']
+      },
+      execute: async (args) => {
+        const filePath = String(args.filePath || '');
+        const permissionId = args.permissionId ? String(args.permissionId) : undefined;
+        const res = await desktopBridge.readApprovedDesktopFile(filePath, permissionId);
+        return {
+          ok: res.ok,
+          verified: res.ok,
+          summary: res.ok
+            ? `Read "${res.name}" (${res.sizeBytes || 0} bytes).`
+            : res.error || 'Failed reading desktop file.',
+          data: { fileRead: res },
+          error: res.error
+        };
+      }
+    });
+
+    this.registerTool({
+      name: 'create_desktop_text_file',
+      description: 'Create a new text or markdown file inside an authorized folder path with overwrite protection.',
+      permissionLevel: 'CONSEQUENTIAL',
+      requiresConfirmation: true,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: { type: 'string', description: 'Target destination file path.' },
+          content: { type: 'string', description: 'Text or code content to write.' },
+          overwrite: { type: 'boolean', description: 'Explicitly permit overwriting an existing file.' },
+          permissionId: { type: 'string', description: 'Approved FILE_CREATE permission ID.' }
+        },
+        required: ['filePath', 'content', 'permissionId']
+      },
+      execute: async (args) => {
+        const filePath = String(args.filePath || '');
+        const content = String(args.content || '');
+        const overwrite = Boolean(args.overwrite);
+        const permissionId = String(args.permissionId || '');
+        const res = await desktopBridge.createApprovedDesktopFile(filePath, content, overwrite, permissionId);
+        return {
+          ok: res.ok,
+          verified: res.ok,
+          summary: res.ok
+            ? `Successfully created "${res.name}" (${res.sizeBytes || 0} bytes).`
+            : res.error || 'Failed creating desktop file.',
+          data: { fileCreated: res },
+          error: res.error
+        };
+      }
+    });
+
+    this.registerTool({
+      name: 'inspect_web_page',
+      description: 'Inspect public title and meta summary of an approved HTTP/HTTPS website safely.',
+      permissionLevel: 'READ_ONLY',
+      requiresConfirmation: false,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'Target website URL.' }
+        },
+        required: ['url']
+      },
+      execute: async (args) => {
+        const url = String(args.url || '');
+        const res = await desktopBridge.inspectWebPage(url);
+        return {
+          ok: res.ok,
+          verified: res.ok,
+          summary: res.ok
+            ? `Inspected "${res.title || res.url}"`
+            : res.error || 'Failed inspecting webpage.',
+          data: { pageInspection: res },
+          error: res.error
+        };
+      }
+    });
+
+    this.registerTool({
+      name: 'run_desktop_workflow',
+      description: 'Run a structured sequential multi-step desktop workflow with progress tracking.',
+      permissionLevel: 'CONSEQUENTIAL',
+      requiresConfirmation: true,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          folderName: { type: 'string', description: 'Approved project folder name.' },
+          fileName: { type: 'string', description: 'Target file name to inspect and summarize.' },
+          saveFileName: { type: 'string', description: 'Name of the summary output file.' }
+        },
+        required: ['folderName', 'fileName']
+      },
+      execute: async (args) => {
+        const folderName = String(args.folderName || '');
+        const fileName = String(args.fileName || '');
+        const saveFileName = args.saveFileName ? String(args.saveFileName) : 'summary.txt';
+
+        const workflow = desktopWorkflowService.createProjectFileSummaryWorkflow(folderName, fileName, saveFileName);
+        const ok = await desktopWorkflowService.runWorkflow(workflow);
+        return {
+          ok,
+          verified: ok,
+          summary: ok
+            ? `Multi-step workflow "${workflow.title}" completed successfully.`
+            : 'Workflow stopped or cancelled before full completion.',
+          data: { workflowResult: desktopWorkflowService.getActiveWorkflow() }
         };
       }
     });

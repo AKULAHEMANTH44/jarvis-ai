@@ -30,6 +30,11 @@ export class HandTrackingService {
   private lastError: string | null = null;
   private minConfidence: number = 0.5;
   private permissionStatus: CameraPermissionStatus = 'unknown';
+  private lastResult: HandLandmarkerResult | null = null;
+
+  public getLastResult(): HandLandmarkerResult | null {
+    return this.lastResult;
+  }
 
   public getLastError(): string | null {
     return this.lastError;
@@ -454,6 +459,7 @@ export class HandTrackingService {
       this.lastVideoTime = this.videoElement.currentTime;
       try {
         const results = this.handLandmarker.detectForVideo(this.videoElement, now);
+        this.lastResult = results;
         if (this.isRunning && this.onResultsCallback) {
           this.onResultsCallback(results, this.fps);
         }

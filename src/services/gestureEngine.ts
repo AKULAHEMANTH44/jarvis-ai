@@ -7,6 +7,7 @@ import {
   GestureType,
   Landmark3D
 } from '../types/gesture';
+import { customGestureService } from './customGestureService';
 
 export const DEFAULT_CALIBRATION: GestureCalibrationSettings = {
   pinchThreshold: 0.055,
@@ -373,6 +374,7 @@ export class GestureEngine {
     let deltaTranslation: { x: number; y: number; z: number } | undefined = undefined;
     let currentTwoHandDistance: number | undefined = undefined;
     let dispersionControl: DispersionControlTelemetry | undefined = undefined;
+    let customGestureMatch: { profileId: string; actionId: string; name: string } | undefined = undefined;
 
     const primaryHand = detectedHands[0];
 
@@ -456,6 +458,20 @@ export class GestureEngine {
       // Clear two-hand distance delta tracking when returning to <=1 hand
       this.prevTwoHandDistance = null;
       this.smoothedTwoHandDistance = null;
+    }
+
+    // Priority 1.5: Custom Gesture Evaluation
+    if (activeGesture === 'NONE' && primaryHand) {
+      const customMatch = customGestureService.matchCustomGesture(primaryHand.landmarks);
+      if (customMatch && this.checkCooldown(`CUSTOM_${customMatch.profile.id}`, timestamp)) {
+        activeGesture = 'OPEN_PALM';
+        description = `Custom Gesture: ${customMatch.profile.name} (${customMatch.profile.actionId})`;
+        customGestureMatch = {
+          profileId: customMatch.profile.id,
+          actionId: customMatch.profile.actionId,
+          name: customMatch.profile.name
+        };
+      }
     }
 
     // Priority 2: Single-hand gesture evaluation
@@ -673,6 +689,7 @@ export class GestureEngine {
       dispersionControl,
       angularVelocity,
       rotationDirection,
+      customGestureMatch,
       timestamp
     };
   }

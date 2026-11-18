@@ -11,6 +11,8 @@ import { SystemMonitorPanel } from './SystemMonitorPanel';
 import { MemoryInsightsPanel } from './MemoryInsightsPanel';
 import { LLMStatusPanel } from './LLMStatusPanel';
 import { OpticalGesturePanel } from './OpticalGesturePanel';
+import { CustomGestureStudioPanel } from './CustomGestureStudioPanel';
+import { DesktopSuperpowersPanel } from './DesktopSuperpowersPanel';
 import { VoiceCommandDock } from './VoiceCommandDock';
 import { HologramSceneManager } from '../../three/HologramScene';
 import {
@@ -136,7 +138,8 @@ export const CommandCenterDashboard: React.FC<CommandCenterDashboardProps> = ({
     setActiveNav(nav);
     if (nav === 'OPTICAL') onOpenGestureDrawer();
     else if (nav === 'AI_CORE') onOpenBrain();
-    else if (nav === 'AGENTS' || nav === 'TASKS' || nav === 'WORKFLOWS') onOpenTasks();
+    else if (nav === 'AGENTS' || nav === 'TASKS') onOpenTasks();
+    else if (nav === 'WORKFLOWS' || nav === 'DESKTOP') setActiveNav('DESKTOP');
     else if (nav === 'MEMORY') onOpenMemory();
     else if (nav === 'CONVERSATIONS' || nav === 'KNOWLEDGE') onOpenBrain();
     else if (nav === 'TOOLS' || nav === 'PERMISSIONS') onOpenPermissions();
@@ -173,8 +176,19 @@ export const CommandCenterDashboard: React.FC<CommandCenterDashboardProps> = ({
 
         {/* Structured Dashboard Grid Viewport */}
         <div className="flex-1 overflow-y-auto p-3.5 bg-[#02060c] space-y-3.5 no-scrollbar">
-          {/* Top Row: AI Core + Optical/Gesture (~25%), Holographic Core Panel (~50%), Live Intelligence Feed (~25%) */}
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 items-start">
+          {activeNav === 'DESKTOP' ? (
+            <DesktopSuperpowersPanel
+              onApprovePermission={onApprovePermission}
+              onDenyPermission={onDenyPermission}
+              onCancelPermission={onCancelPermission}
+              pendingPermission={intelligenceState.pendingPermission}
+              recentTools={recentTools}
+              onClose={() => setActiveNav('DASHBOARD')}
+            />
+          ) : (
+            <>
+              {/* Top Row: AI Core + Optical/Gesture (~25%), Holographic Core Panel (~50%), Live Intelligence Feed (~25%) */}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 items-start">
             <div className="lg:col-span-3 space-y-3.5">
               <AICoreOverview
                 intelligenceStatus={intelligenceState.status}
@@ -196,6 +210,15 @@ export const CommandCenterDashboard: React.FC<CommandCenterDashboardProps> = ({
                 videoRef={videoRef}
                 onToggleCamera={onToggleCamera}
                 onOpenGestureDrawer={onOpenGestureDrawer}
+              />
+              <CustomGestureStudioPanel
+                gestureResult={gestureResult}
+                onActionTriggered={(actionId) => {
+                  if (actionId === 'NEXT_MODEL') onModelChange(sceneManagerRef.current?.nextModel() || currentModelId);
+                  else if (actionId === 'PREV_MODEL') onModelChange(sceneManagerRef.current?.prevModel() || currentModelId);
+                  else if (actionId === 'TRIGGER_SHOCKWAVE') sceneManagerRef.current?.triggerShockwave();
+                  else if (actionId === 'RESET_CAMERA') sceneManagerRef.current?.resetCamera();
+                }}
               />
             </div>
             <div className="lg:col-span-6">
@@ -285,6 +308,8 @@ export const CommandCenterDashboard: React.FC<CommandCenterDashboardProps> = ({
               />
             </div>
           </div>
+          </>
+          )}
         </div>
       </div>
 
