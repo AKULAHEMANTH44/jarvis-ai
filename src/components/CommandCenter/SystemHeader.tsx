@@ -6,9 +6,11 @@ import { IntelligenceStatus } from '../../types/assistant';
 interface SystemHeaderProps {
   fps: number;
   intelligenceStatus: IntelligenceStatus;
+  overallHealth?: 'READY' | 'DEGRADED' | 'LIMITED';
   pendingPermissionCount: number;
   onOpenAIConfig: () => void;
   onOpenPermissions: () => void;
+  onOpenHealth?: () => void;
   searchQuery: string;
   onSearchChange: (q: string) => void;
 }
@@ -16,14 +18,16 @@ interface SystemHeaderProps {
 export const SystemHeader: React.FC<SystemHeaderProps> = ({
   fps,
   intelligenceStatus,
+  overallHealth = 'READY',
   pendingPermissionCount,
   onOpenAIConfig,
   onOpenPermissions,
+  onOpenHealth,
   searchQuery,
   onSearchChange
 }) => {
   const [timeStr, setTimeStr] = useState<string>(() => new Date().toLocaleTimeString());
-  const [dateStr, setDateStr] = useState<string>(() =>
+  const [dateStr] = useState<string>(() =>
     new Date().toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
   );
   const [isMuted, setIsMuted] = useState<boolean>(false);
@@ -56,16 +60,49 @@ export const SystemHeader: React.FC<SystemHeaderProps> = ({
     }
   };
 
+  const statusLabel =
+    pendingPermissionCount > 0 || intelligenceStatus === 'AWAITING_APPROVAL'
+      ? 'AWAITING APPROVAL'
+      : intelligenceStatus === 'ERROR'
+      ? 'ATTENTION REQUIRED'
+      : intelligenceStatus === 'EXECUTING'
+      ? 'EXECUTING'
+      : intelligenceStatus === 'UNDERSTANDING' ||
+        intelligenceStatus === 'ANALYZING' ||
+        intelligenceStatus === 'PLANNING' ||
+        intelligenceStatus === 'VERIFYING'
+      ? intelligenceStatus
+      : overallHealth === 'DEGRADED'
+      ? 'SYSTEM DEGRADED'
+      : overallHealth === 'LIMITED'
+      ? 'LIMITED MODE'
+      : 'SYSTEM READY';
+
+  const badgeTone =
+    intelligenceStatus === 'ERROR'
+      ? 'border-rose-500/45 bg-rose-950/40 text-rose-200'
+      : pendingPermissionCount > 0 || overallHealth !== 'READY'
+      ? 'border-amber-500/45 bg-amber-950/35 text-amber-200'
+      : 'border-cyan-500/30 bg-cyan-950/40 text-cyan-200';
+
   return (
     <header className="h-14 px-4 bg-[#02060e]/90 border-b border-cyan-500/25 flex items-center justify-between gap-4 select-none z-20 shrink-0">
       {/* System Status & DateTime */}
       <div className="flex items-center gap-4 min-w-0">
-        <div className="flex items-center gap-2 px-2.5 py-1 rounded bg-cyan-950/40 border border-cyan-500/30 text-cyan-200 text-xs font-mono">
-          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-          <span className="font-orbitron font-bold tracking-wider">SYSTEM NOMINAL</span>
+        <button
+          type="button"
+          onClick={() => {
+            audioService.playChirp(1300);
+            onOpenHealth?.();
+          }}
+          aria-label={`System Health Status: ${statusLabel}`}
+          className={`flex items-center gap-2 px-2.5 py-1 rounded border text-xs font-mono transition-colors ${badgeTone}`}
+        >
+          <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+          <span className="font-orbitron font-bold tracking-wider truncate">{statusLabel}</span>
           <span className="text-cyan-500/40" aria-hidden="true">·</span>
           <span className="tabular-nums">{fps} FPS</span>
-        </div>
+        </button>
 
         <div className="hidden md:flex items-center gap-2 text-xs font-mono text-cyan-300/80">
           <span className="tabular-nums">{dateStr}</span>
@@ -81,6 +118,7 @@ export const SystemHeader: React.FC<SystemHeaderProps> = ({
           type="text"
           value={searchQuery}
           onChange={(e) => onSearchChange(e.target.value)}
+          aria-label="Global Command Center Search"
           placeholder="Search commands, agents, memory, files..."
           className="w-full bg-black/60 border border-cyan-500/30 rounded-lg pl-9 pr-3 py-1.5 text-xs font-mono text-white placeholder-cyan-500/50 focus:outline-none focus:border-cyan-400"
         />
@@ -95,6 +133,7 @@ export const SystemHeader: React.FC<SystemHeaderProps> = ({
             audioService.playChirp(1300);
             onOpenPermissions();
           }}
+          aria-label="Permissions and Notifications"
           title="Permissions & Notifications"
           className="relative p-2 rounded-lg border border-cyan-500/30 bg-black/50 text-cyan-300 hover:text-white hover:border-cyan-400 transition-colors"
         >
@@ -113,6 +152,7 @@ export const SystemHeader: React.FC<SystemHeaderProps> = ({
             audioService.playChirp(1300);
             onOpenAIConfig();
           }}
+          aria-label="AI Provider Settings"
           title="AI Provider Settings"
           className="p-2 rounded-lg border border-cyan-500/30 bg-black/50 text-cyan-300 hover:text-white hover:border-cyan-400 transition-colors"
         >
@@ -123,6 +163,7 @@ export const SystemHeader: React.FC<SystemHeaderProps> = ({
         <button
           type="button"
           onClick={toggleMute}
+          aria-label={isMuted ? 'Unmute Sound Effects' : 'Mute Sound Effects'}
           title={isMuted ? 'Unmute Sound' : 'Mute Sound'}
           className={`p-2 rounded-lg border transition-colors ${
             isMuted
@@ -137,6 +178,7 @@ export const SystemHeader: React.FC<SystemHeaderProps> = ({
         <button
           type="button"
           onClick={toggleFullscreen}
+          aria-label={isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen'}
           title={isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen'}
           className="hidden sm:flex p-2 rounded-lg border border-cyan-500/30 bg-black/50 text-cyan-300 hover:text-white transition-colors"
         >

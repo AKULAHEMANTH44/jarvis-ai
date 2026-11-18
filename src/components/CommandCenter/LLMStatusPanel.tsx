@@ -15,6 +15,7 @@ export const LLMStatusPanel: React.FC<LLMStatusPanelProps> = ({
   onOpenAIConfig
 }) => {
   const [backendStatus, setBackendStatus] = useState<BackendLLMStatusResponse | null>(null);
+  const [backendProbeFailed, setBackendProbeFailed] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [currentMode, setCurrentMode] = useState<LLMMode>(
     contextualAI.getConfig().backendMode || 'AUTO'
@@ -25,6 +26,7 @@ export const LLMStatusPanel: React.FC<LLMStatusPanelProps> = ({
     try {
       const status = await contextualAI.getBackendStatus(currentMode);
       setBackendStatus(status);
+      setBackendProbeFailed(!status);
       if (status?.mode) {
         setCurrentMode(status.mode);
       }
@@ -34,8 +36,8 @@ export const LLMStatusPanel: React.FC<LLMStatusPanelProps> = ({
   };
 
   useEffect(() => {
-    fetchStatus();
-    const interval = setInterval(fetchStatus, 30000);
+    void fetchStatus();
+    const interval = setInterval(() => void fetchStatus(), 30000);
     return () => clearInterval(interval);
   }, []);
 
@@ -56,7 +58,7 @@ export const LLMStatusPanel: React.FC<LLMStatusPanelProps> = ({
       case 'connected':
         return 'text-emerald-400 bg-emerald-950/60 border-emerald-500/40';
       case 'rate_limited':
-        return 'text-amber-400 bg-amber-950/60 border-amber-500/40 animate-pulse';
+        return 'text-amber-400 bg-amber-950/60 border-amber-500/40';
       case 'not_configured':
         return 'text-zinc-400 bg-zinc-900/60 border-zinc-700/40';
       case 'error':
@@ -69,13 +71,13 @@ export const LLMStatusPanel: React.FC<LLMStatusPanelProps> = ({
   const getStatusDot = (status?: string) => {
     switch (status) {
       case 'connected':
-        return 'bg-emerald-400 animate-pulse shadow-[0_0_8px_#34d399]';
+        return 'bg-emerald-400';
       case 'rate_limited':
-        return 'bg-amber-400 animate-ping';
+        return 'bg-amber-400';
       case 'not_configured':
         return 'bg-zinc-600';
       case 'error':
-        return 'bg-rose-500 shadow-[0_0_8px_#f43f5e]';
+        return 'bg-rose-500';
       default:
         return 'bg-cyan-500';
     }
@@ -225,14 +227,25 @@ export const LLMStatusPanel: React.FC<LLMStatusPanelProps> = ({
         </div>
       </div>
 
-      {/* Notice if neither key is configured */}
-      {backendStatus && !isGeminiConnected && !isGroqConnected && (
+      {/* Notice if backend unreachable or neither key is configured */}
+      {backendProbeFailed ? (
         <div className="flex items-center gap-1.5 text-[8px] text-amber-300/90 bg-amber-950/30 border border-amber-500/30 rounded px-2 py-1">
           <ShieldAlert className="w-3 h-3 text-amber-400 shrink-0" />
           <span className="truncate">
-            Configure GEMINI_API_KEY / GROQ_API_KEY in server/.env for live cloud intelligence.
+            Backend /api/llm/status unreachable. Local autonomous fallback active.
           </span>
         </div>
+      ) : (
+        backendStatus &&
+        !isGeminiConnected &&
+        !isGroqConnected && (
+          <div className="flex items-center gap-1.5 text-[8px] text-amber-300/90 bg-amber-950/30 border border-amber-500/30 rounded px-2 py-1">
+            <ShieldAlert className="w-3 h-3 text-amber-400 shrink-0" />
+            <span className="truncate">
+              Configure GEMINI_API_KEY / GROQ_API_KEY in server/.env for live cloud intelligence.
+            </span>
+          </div>
+        )
       )}
     </div>
   );

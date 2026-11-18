@@ -41,6 +41,8 @@ interface ISpeechRecognition extends EventTarget {
   onend: (() => void) | null;
 }
 
+export type VoiceLifecycleState = 'IDLE' | 'LISTENING' | 'PROCESSING' | 'SPEAKING' | 'ERROR';
+
 export interface VoiceStartResult {
   started: boolean;
   micGranted: boolean;
@@ -51,9 +53,11 @@ export interface VoiceStartResult {
 class SpeechService {
   private recognition: ISpeechRecognition | null = null;
   private isListening: boolean = false;
+  private isProcessing: boolean = false;
   private commands: VoiceCommand[] = [];
   private onMessageCallback: ((msg: AssistantMessage) => void) | null = null;
   private onStatusChangeCallback: ((active: boolean, error?: string) => void) | null = null;
+  private onLifecycleChangeCallback: ((state: VoiceLifecycleState, detail?: string | null) => void) | null = null;
   private unmatchedTranscriptHandler:
     | ((rawTranscript: string, source: 'VOICE' | 'CONSOLE') => Promise<string | null> | string | null)
     | null = null;
@@ -61,14 +65,34 @@ class SpeechService {
   private onCancelCallback: (() => void) | null = null;
   private selectedVoice: SpeechSynthesisVoice | null = null;
   private isSpeaking: boolean = false;
+  private isReplacingSpeech: boolean = false;
   private lastSpeakEndedAt: number = 0;
   private restartTimeout: number | null = null;
   private lastError: string | null = null;
+  private lifecycleState: VoiceLifecycleState = 'IDLE';
   private lastVoiceTranscript: string = '';
   private lastVoiceTranscriptAt: number = 0;
+  private activeProcessSeq: number = 0;
 
   constructor() {
     this.initSpeechSynthesis();
+  }
+
+  private computeLifecycleState(): VoiceLifecycleState {
+    if (this.isSpeaking) return 'SPEAKING';
+    if (this.isProcessing) return 'PROCESSING';
+    if (this.isListening) return 'LISTENING';
+    if (this.lastError) return 'ERROR';
+    return 'IDLE';
+  }
+
+  private syncLifecycleState(detailOverride?: string | null) {
+    const next = this.computeLifecycleState();
+    const detail = detailOverride !== undefined ? detailOverride : this.lastError;
+    if (next !== this.lifecycleState || detailOverride !== undefined) {
+      this.lifecycleState = next;
+      this.onLifecycleChangeCallback?.(next, detail);
+    }
   }
 
   private initSpeechSynthesis() {
@@ -91,12 +115,29 @@ class SpeechService {
     this.commands = commands;
   }
 
-  public setMessageCallback(cb: (msg: AssistantMessage) => void) {
+  public setMessageCallback(cb: ((msg: AssistantMessage) => void) | null) {
     this.onMessageCallback = cb;
   }
 
-  public setStatusChangeCallback(cb: (active: boolean, error?: string) => void) {
+  public setStatusChangeCallback(cb: ((active: boolean, error?: string) => void) | null) {
     this.onStatusChangeCallback = cb;
+  }
+
+  public setLifecycleCallback(cb: ((state: VoiceLifecycleState, detail?: string | null) => void) | null) {
+    this.onLifecycleChangeCallback = cb;
+    cb?.(this.computeLifecycleState(), this.lastError);
+  }
+
+  public getLifecycleState(): VoiceLifecycleState {
+    return this.computeLifecycleState();
+  }
+
+  public setProcessingState(active: boolean) {
+    this.isProcessing = active;
+    if (active) {
+      this.lastError = null;
+    }
+    this.syncLifecycleState();
   }
 
   public setUnmatchedTranscriptHandler(
@@ -116,8 +157,11 @@ class SpeechService {
   }
 
   public interruptAndCancel() {
+    this.activeProcessSeq += 1;
+    this.isProcessing = false;
     this.stopSpeaking();
     this.onCancelCallback?.();
+    this.syncLifecycleState(null);
   }
 
   public findMatchingCommand(rawTranscript: string): VoiceCommand | null {
@@ -154,7 +198,9 @@ class SpeechService {
   public getSpeechStateSnapshot() {
     return {
       isListening: this.isListening,
+      isProcessing: this.isProcessing,
       isSpeaking: this.isSpeaking,
+      lifecycleState: this.computeLifecycleState(),
       lastError: this.lastError,
       lastTranscript: this.lastVoiceTranscript
     };
@@ -167,13 +213,16 @@ class SpeechService {
   }
 
   public speak(text: string, onEnd?: () => void) {
-    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window) || !text.trim()) {
       if (onEnd) onEnd();
       return;
     }
 
     try {
+      this.isReplacingSpeech = true;
       window.speechSynthesis.cancel();
+      this.isReplacingSpeech = false;
+
       const utterance = new SpeechSynthesisUtterance(text);
       if (this.selectedVoice) {
         utterance.voice = this.selectedVoice;
@@ -184,35 +233,51 @@ class SpeechService {
 
       utterance.onstart = () => {
         this.isSpeaking = true;
+        this.syncLifecycleState();
       };
       utterance.onend = () => {
+        if (this.isReplacingSpeech) return;
         this.isSpeaking = false;
         this.lastSpeakEndedAt = Date.now();
+        this.syncLifecycleState();
         if (onEnd) onEnd();
       };
       utterance.onerror = () => {
+        if (this.isReplacingSpeech) return;
         this.isSpeaking = false;
         this.lastSpeakEndedAt = Date.now();
+        this.syncLifecycleState();
         if (onEnd) onEnd();
       };
 
+      this.isSpeaking = true;
+      this.syncLifecycleState();
       window.speechSynthesis.speak(utterance);
     } catch (e) {
       console.warn('Speech synthesis error:', e);
+      this.isReplacingSpeech = false;
       this.isSpeaking = false;
       this.lastSpeakEndedAt = Date.now();
+      this.syncLifecycleState();
       if (onEnd) onEnd();
     }
   }
 
   public stopSpeaking() {
+    this.isReplacingSpeech = true;
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-      window.speechSynthesis.cancel();
+      try {
+        window.speechSynthesis.cancel();
+      } catch {
+        // ignore
+      }
     }
+    this.isReplacingSpeech = false;
     if (this.isSpeaking) {
       this.lastSpeakEndedAt = Date.now();
     }
     this.isSpeaking = false;
+    this.syncLifecycleState();
   }
 
   public isCurrentlySpeaking(): boolean {
@@ -250,6 +315,7 @@ class SpeechService {
       this.lastError = msg;
       this.isListening = false;
       this.onStatusChangeCallback?.(false, msg);
+      this.syncLifecycleState(msg);
       return {
         started: false,
         micGranted: false,
@@ -260,6 +326,21 @@ class SpeechService {
 
     if (typeof window === 'undefined') {
       return { started: false, micGranted: false, recognitionSupported: false, error: 'Browser window unavailable.' };
+    }
+
+    const recognitionSupported = this.isSpeechRecognitionSupported();
+    if (!recognitionSupported) {
+      const msg = 'Browser Web Speech Recognition API not supported here (try Chrome/Edge). Use the Vocal Console text input below.';
+      this.lastError = msg;
+      this.isListening = false;
+      this.onStatusChangeCallback?.(false, msg);
+      this.syncLifecycleState(msg);
+      return {
+        started: false,
+        micGranted: false,
+        recognitionSupported: false,
+        error: msg
+      };
     }
 
     let micStream: MediaStream | null = null;
@@ -278,10 +359,11 @@ class SpeechService {
         this.lastError = msg;
         this.isListening = false;
         this.onStatusChangeCallback?.(false, msg);
+        this.syncLifecycleState(msg);
         return {
           started: false,
           micGranted: false,
-          recognitionSupported: this.isSpeechRecognitionSupported(),
+          recognitionSupported: true,
           error: msg
         };
       }
@@ -289,32 +371,24 @@ class SpeechService {
       const msg = 'MediaDevices audio API unavailable. Ensure HTTPS or localhost.';
       this.lastError = msg;
       this.onStatusChangeCallback?.(false, msg);
+      this.syncLifecycleState(msg);
       return {
         started: false,
         micGranted: false,
-        recognitionSupported: this.isSpeechRecognitionSupported(),
-        error: msg
-      };
-    }
-
-    const recognitionSupported = this.isSpeechRecognitionSupported();
-    if (!recognitionSupported) {
-      // Keep mic stream disconnected if speech recognition isn't supported, or allow waveform + console
-      audioService.disconnectMicrophoneStream();
-      const msg = 'Browser Web Speech Recognition API not supported here (try Chrome/Edge). Use the Vocal Console text input below.';
-      this.lastError = msg;
-      this.isListening = false;
-      this.onStatusChangeCallback?.(false, msg);
-      return {
-        started: false,
-        micGranted: true,
-        recognitionSupported: false,
+        recognitionSupported: true,
         error: msg
       };
     }
 
     const started = this.startListening();
     if (!started) {
+      micStream?.getTracks?.().forEach((t) => {
+        try {
+          t.stop();
+        } catch {
+          // ignore
+        }
+      });
       audioService.disconnectMicrophoneStream();
       return {
         started: false,
@@ -338,6 +412,7 @@ class SpeechService {
     if (!SpeechRecognitionClass) {
       this.lastError = 'Speech Recognition API not supported in this browser environment.';
       console.warn(this.lastError);
+      this.syncLifecycleState(this.lastError);
       return false;
     }
 
@@ -350,14 +425,15 @@ class SpeechService {
       this.recognition.lang = 'en-US';
 
       this.recognition.onresult = (event: SpeechRecognitionEvent) => {
-        if (this.isSpeaking || Date.now() - this.lastSpeakEndedAt < 350) return;
+        if (this.isSpeaking || Date.now() - this.lastSpeakEndedAt < 450) return;
 
         const lastResult = event.results[event.results.length - 1];
-        if (lastResult.isFinal) {
-          const rawTranscript = lastResult[0].transcript.trim();
+        if (lastResult?.isFinal) {
+          const rawTranscript = lastResult[0]?.transcript?.trim() || '';
+          if (!rawTranscript) return;
           const normalized = rawTranscript.toLowerCase();
           const now = Date.now();
-          if (normalized && normalized === this.lastVoiceTranscript && now - this.lastVoiceTranscriptAt < 650) {
+          if (normalized === this.lastVoiceTranscript && now - this.lastVoiceTranscriptAt < 750) {
             return;
           }
           this.lastVoiceTranscript = normalized;
@@ -372,10 +448,15 @@ class SpeechService {
           this.lastError = 'Microphone / speech recognition permission denied by browser.';
           this.stopListening();
           this.onStatusChangeCallback?.(false, this.lastError);
+          this.syncLifecycleState(this.lastError);
         } else if (event.error === 'audio-capture') {
           this.lastError = 'No audio capture device detected.';
           this.stopListening();
           this.onStatusChangeCallback?.(false, this.lastError);
+          this.syncLifecycleState(this.lastError);
+        } else if (event.error && event.error !== 'no-speech' && event.error !== 'aborted') {
+          this.lastError = `Voice recognition event: ${event.error}`;
+          this.syncLifecycleState(this.lastError);
         }
       };
 
@@ -398,12 +479,14 @@ class SpeechService {
       this.isListening = true;
       this.lastError = null;
       this.onStatusChangeCallback?.(true);
+      this.syncLifecycleState(null);
       return true;
     } catch (err) {
       console.warn('Speech recognition unavailable:', err);
       this.lastError = 'Failed to start speech recognition engine.';
       this.isListening = false;
       this.onStatusChangeCallback?.(false, this.lastError);
+      this.syncLifecycleState(this.lastError);
       return false;
     }
   }
@@ -416,6 +499,9 @@ class SpeechService {
     }
     if (this.recognition) {
       try {
+        this.recognition.onresult = null;
+        this.recognition.onerror = null;
+        this.recognition.onend = null;
         this.recognition.stop();
       } catch {
         // ignore
@@ -424,6 +510,28 @@ class SpeechService {
     }
     audioService.disconnectMicrophoneStream();
     this.onStatusChangeCallback?.(false);
+    this.syncLifecycleState();
+  }
+
+  public dispose() {
+    this.activeProcessSeq += 1;
+    this.isProcessing = false;
+    this.stopListening();
+    this.stopSpeaking();
+    this.lastError = null;
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      try {
+        window.speechSynthesis.onvoiceschanged = null;
+      } catch {
+        // ignore
+      }
+    }
+    this.onMessageCallback = null;
+    this.onStatusChangeCallback = null;
+    this.onLifecycleChangeCallback = null;
+    this.unmatchedTranscriptHandler = null;
+    this.onCommandExecutedCallback = null;
+    this.onCancelCallback = null;
   }
 
   public isListeningActive(): boolean {
@@ -432,7 +540,8 @@ class SpeechService {
 
   public handleTranscript(rawTranscript: string, source: 'VOICE' | 'CONSOLE' = 'CONSOLE') {
     if (!rawTranscript || !rawTranscript.trim()) return;
-    const clean = rawTranscript.toLowerCase().replace(/[.,!?;:]/g, '');
+    const trimmed = rawTranscript.trim();
+    const clean = trimmed.toLowerCase().replace(/[.,!?;:]/g, '');
 
     if (clean === 'stop speaking' || clean === 'cancel request' || clean === 'stop thinking') {
       this.interruptAndCancel();
@@ -442,18 +551,22 @@ class SpeechService {
       this.onMessageCallback({
         id: Math.random().toString(36).substring(7),
         sender: 'USER',
-        text: rawTranscript,
+        text: trimmed,
         timestamp: new Date().toLocaleTimeString(),
         type: 'COMMAND'
       });
     }
 
-    const bestCmd = this.findMatchingCommand(rawTranscript);
+    const bestCmd = this.findMatchingCommand(trimmed);
 
     if (bestCmd) {
+      const seq = ++this.activeProcessSeq;
       const emitOutcome = (ok: boolean) => {
+        if (seq !== this.activeProcessSeq) return;
+        this.isProcessing = false;
+        this.syncLifecycleState();
         if (ok) {
-          this.onCommandExecutedCallback?.(bestCmd, rawTranscript);
+          this.onCommandExecutedCallback?.(bestCmd, trimmed);
         }
         const responseText = ok
           ? bestCmd.feedbackText
@@ -473,6 +586,8 @@ class SpeechService {
       try {
         const result = bestCmd.action(clean);
         if (result instanceof Promise) {
+          this.isProcessing = true;
+          this.syncLifecycleState();
           void result
             .then((resolved) => emitOutcome(resolved !== false))
             .catch(() => emitOutcome(false));
@@ -511,18 +626,33 @@ class SpeechService {
     };
 
     if (this.unmatchedTranscriptHandler) {
+      const seq = ++this.activeProcessSeq;
       try {
-        const handled = this.unmatchedTranscriptHandler(rawTranscript, source);
+        const handled = this.unmatchedTranscriptHandler(trimmed, source);
         if (handled instanceof Promise) {
+          this.isProcessing = true;
+          this.syncLifecycleState();
           void handled
-            .then((reply) => emitFallback(reply && reply.trim() ? reply : getBuiltinFallback()))
-            .catch(() => emitFallback(getBuiltinFallback()));
+            .then((reply) => {
+              if (seq !== this.activeProcessSeq) return;
+              this.isProcessing = false;
+              this.syncLifecycleState();
+              emitFallback(reply && reply.trim() ? reply : getBuiltinFallback());
+            })
+            .catch(() => {
+              if (seq !== this.activeProcessSeq) return;
+              this.isProcessing = false;
+              this.lastError = 'Voice command processing failed.';
+              this.syncLifecycleState(this.lastError);
+              emitFallback(getBuiltinFallback());
+            });
         } else {
           emitFallback(handled && handled.trim() ? handled : getBuiltinFallback());
         }
         return;
       } catch {
-        // fall through to built-in fallback
+        this.isProcessing = false;
+        this.syncLifecycleState();
       }
     }
 

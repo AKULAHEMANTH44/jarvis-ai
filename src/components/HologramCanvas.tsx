@@ -61,6 +61,7 @@ export const HologramCanvas: React.FC<HologramCanvasProps> = ({
   const mountRef = useRef<HTMLDivElement | null>(null);
   const dragDepthRef = useRef<number>(0);
   const lastHoverCheckRef = useRef<number>(0);
+  const dropTimerRef = useRef<number | null>(null);
   const hoveredComponentRef = useRef<{ instanceId: string; componentId: string } | null>(null);
   const [isDragOver, setIsDragOver] = useState<boolean>(false);
   const [isImportingDrop, setIsImportingDrop] = useState<boolean>(false);
@@ -93,6 +94,10 @@ export const HologramCanvas: React.FC<HologramCanvasProps> = ({
     sceneManagerRef.current = manager;
 
     return () => {
+      if (dropTimerRef.current !== null) {
+        clearTimeout(dropTimerRef.current);
+        dropTimerRef.current = null;
+      }
       manager.destroy();
       sceneManagerRef.current = null;
     };
@@ -308,13 +313,15 @@ export const HologramCanvas: React.FC<HologramCanvasProps> = ({
           'Unsupported file format. Drop .glb, .gltf (+companion .bin/textures), .obj, .stl, or image files.';
         setDropError(msg);
         onImportError?.(msg);
-        setTimeout(() => setDropError(null), 4500);
+        if (dropTimerRef.current !== null) clearTimeout(dropTimerRef.current);
+        dropTimerRef.current = window.setTimeout(() => setDropError(null), 4500);
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unable to load dropped 3D asset.';
       setDropError(msg);
       onImportError?.(msg);
-      setTimeout(() => setDropError(null), 5000);
+      if (dropTimerRef.current !== null) clearTimeout(dropTimerRef.current);
+      dropTimerRef.current = window.setTimeout(() => setDropError(null), 5000);
     } finally {
       setIsImportingDrop(false);
     }
@@ -323,6 +330,8 @@ export const HologramCanvas: React.FC<HologramCanvasProps> = ({
   return (
     <div
       ref={mountRef}
+      role="region"
+      aria-label="JARVIS 3D Holographic Viewport"
       data-testid="hologram-canvas-dropzone"
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}

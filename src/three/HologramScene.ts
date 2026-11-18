@@ -48,6 +48,14 @@ function detectSoftwareWebGL(): boolean {
   }
 }
 
+export type HologramAssistantState =
+  | 'IDLE'
+  | 'LISTENING'
+  | 'THINKING'
+  | 'SPEAKING'
+  | 'EXECUTING'
+  | 'ERROR';
+
 export interface ComponentHitInfo {
   instanceId: string;
   componentId: string;
@@ -56,6 +64,7 @@ export interface ComponentHitInfo {
 }
 
 export class HologramSceneManager {
+  private assistantState: HologramAssistantState = 'IDLE';
   private container: HTMLElement;
   private renderer: THREE.WebGLRenderer;
   private scene: THREE.Scene;
@@ -244,6 +253,7 @@ export class HologramSceneManager {
     if (typeof window !== 'undefined') {
       (window as unknown as Record<string, unknown>).__JARVIS_SCENE__ = {
         getModelId: () => this.getModelId(),
+        getAssistantState: () => this.assistantState,
         getDispersion: () => this.spatialManager.getSelected()?.visionSphereObj?.getDispersion() ?? this.lastDispersionAmount,
         getAngularVelocity: () => this.getAngularVelocity(),
         getStates: () => this.getSpatialStates(),
@@ -724,10 +734,29 @@ export class HologramSceneManager {
     return this.spatialManager.triggerRotate360(id);
   }
 
+  public getAssistantState(): HologramAssistantState {
+    return this.assistantState;
+  }
+
+  public setAssistantState(state: HologramAssistantState) {
+    if (this.assistantState === state) return;
+    this.assistantState = state;
+    this.setCoreActivity({
+      isListening: state === 'LISTENING',
+      isSpeaking: state === 'SPEAKING',
+      isProcessing: state === 'THINKING' || state === 'EXECUTING',
+      isExecuting: state === 'EXECUTING',
+      isError: state === 'ERROR',
+      energyBoost: state === 'EXECUTING' ? 0.5 : state === 'ERROR' ? 0.35 : 0.15
+    });
+  }
+
   public setCoreActivity(activity: {
     isListening?: boolean;
     isSpeaking?: boolean;
     isProcessing?: boolean;
+    isExecuting?: boolean;
+    isError?: boolean;
     energyBoost?: number;
   }) {
     this.ringGimbals.setCoreActivity(activity);
@@ -1347,7 +1376,7 @@ export class HologramSceneManager {
       isReconstructing,
       isTrackingLost: this.isTrackingLostFeedback
     });
-    this.ringGimbals.update(elapsedTime, speed);
+    this.ringGimbals.update(elapsedTime, speed, delta);
     this.particleField.update(elapsedTime, this.activeHandCentroid, delta);
     this.shockwave.update(delta);
 
@@ -1386,11 +1415,16 @@ export class HologramSceneManager {
       this.orbitControls = null;
     }
 
+    if (typeof window !== 'undefined') {
+      delete (window as unknown as Record<string, unknown>).__JARVIS_SCENE__;
+    }
+
     this.disposeComposer();
     this.spatialManager.clearAll();
     this.ringGimbals.dispose();
     this.particleField.dispose();
     this.shockwave.dispose();
+    this.holographicHand.dispose();
     disposeObject3DResources(this.sliceFrame);
     disposeObject3DResources(this.laserReticle);
     this.scene.clear();

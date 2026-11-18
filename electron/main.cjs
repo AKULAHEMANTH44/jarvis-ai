@@ -181,10 +181,11 @@ function isTrustedSender(event) {
   try {
     const senderUrl = event?.senderFrame?.url || '';
     if (!senderUrl) return false;
+    const parsed = new URL(senderUrl);
+    if (parsed.protocol === 'file:') return true;
     return (
-      senderUrl.startsWith('http://localhost:3000') ||
-      senderUrl.startsWith('http://127.0.0.1:3000') ||
-      senderUrl.startsWith('file://')
+      parsed.origin === 'http://localhost:3000' ||
+      parsed.origin === 'http://127.0.0.1:3000'
     );
   } catch {
     return false;
@@ -424,8 +425,21 @@ ipcMain.handle('jarvis:launchApp', async (event, payload) => {
 
 ipcMain.handle('jarvis:openFile', async (event, { filePath }) => {
   if (!isTrustedSender(event)) return { ok: false, verified: false, error: 'UNTRUSTED_IPC_SENDER', summary: 'Untrusted IPC sender.' };
+  if (permissionConfig.capabilities?.FOLDER_ACCESS?.decision === 'DENIED') {
+    return {
+      ok: false,
+      action: 'FILE_ACCESS',
+      target: String(filePath || ''),
+      verified: false,
+      error: 'PERMISSION_DENIED_BY_POLICY',
+      summary: 'Folder & File Access is disabled in JARVIS persistent permissions.'
+    };
+  }
   const val = validatePath(filePath);
   if (!val.valid) return { ok: false, verified: false, error: val.error, summary: val.error };
+  if (isDevSecretFile(val.resolved)) {
+    return { ok: false, verified: false, error: 'SECRET_FILE_BLOCKED', summary: 'Opening secret or credential files is blocked for safety.' };
+  }
   if (!fs.existsSync(val.resolved)) return { ok: false, verified: false, error: 'FILE_NOT_FOUND', summary: 'File does not exist on disk.' };
   if (fs.statSync(val.resolved).isDirectory()) return { ok: false, verified: false, error: 'IS_DIRECTORY', summary: 'Target is a directory.' };
 
@@ -668,6 +682,18 @@ ipcMain.handle('jarvis:listFolder', async (event, payload) => {
   }
 });
 
+const DEV_SECRET_PATTERNS = [/^\.env($|\.)/i, /^secrets?(\..*)?\.json$/i, /^credentials?(\..*)?\.json$/i, /service[-_]?account.*\.json$/i, /^id_(rsa|ed25519|ecdsa|dsa)(\.pub)?$/i, /^\.(npmrc|pypirc|netrc)$/i];
+const DEV_SECRET_EXTS = new Set(['pem', 'key', 'p12', 'pfx', 'jks', 'keystore', 'kdbx']);
+const DEV_ALLOWED_TOOLS = new Set(['npm', 'npx', 'node', 'python', 'pytest', 'tsc', 'git']);
+const devBackups = new Map();
+const devRunningTasks = new Map();
+
+function isDevSecretFile(p) {
+  const base = path.basename(String(p || ''));
+  const ext = path.extname(base).replace(/^\./, '').toLowerCase();
+  return DEV_SECRET_PATTERNS.some((re) => re.test(base)) || DEV_SECRET_EXTS.has(ext);
+}
+
 ipcMain.handle('jarvis:readFile', async (event, payload) => {
   if (!isTrustedSender(event)) return { ok: false, error: 'UNTRUSTED_IPC_SENDER' };
   if (permissionConfig.capabilities?.FOLDER_ACCESS?.decision === 'DENIED') {
@@ -676,6 +702,7 @@ ipcMain.handle('jarvis:readFile', async (event, payload) => {
   const { filePath } = payload || {};
   const val = validatePath(filePath);
   if (!val.valid) return { ok: false, error: val.error };
+  if (isDevSecretFile(val.resolved)) return { ok: false, error: 'SECRET_FILE_BLOCKED' };
   if (!fs.existsSync(val.resolved)) return { ok: false, error: 'FILE_NOT_FOUND' };
   const stat = fs.statSync(val.resolved);
   if (stat.isDirectory()) return { ok: false, error: 'IS_DIRECTORY' };
@@ -702,6 +729,7 @@ ipcMain.handle('jarvis:createFile', async (event, payload) => {
   const { filePath, content, overwrite } = payload || {};
   const val = validatePath(filePath);
   if (!val.valid) return { ok: false, error: val.error };
+  if (isDevSecretFile(val.resolved)) return { ok: false, error: 'SECRET_FILE_BLOCKED' };
   const ext = path.extname(val.resolved).replace(/^\./, '').toLowerCase();
   if (BLOCKED_FILE_EXTENSIONS.has(ext) || BLOCKED_BINARIES.has(ext)) {
     return { ok: false, error: 'BLOCKED_EXTENSION' };
@@ -718,18 +746,6 @@ ipcMain.handle('jarvis:createFile', async (event, payload) => {
 });
 
 // Batch 5 — Electron Dev Studio Secure IPC Handlers
-const DEV_SECRET_PATTERNS = [/^\.env($|\.)/i, /^secrets?(\..*)?\.json$/i, /^credentials?(\..*)?\.json$/i, /service[-_]?account.*\.json$/i, /^id_(rsa|ed25519)/i, /^\.(npmrc|pypirc|netrc)$/i];
-const DEV_SECRET_EXTS = new Set(['pem', 'key', 'p12', 'pfx', 'jks', 'keystore']);
-const DEV_ALLOWED_TOOLS = new Set(['npm', 'npx', 'node', 'python', 'pytest', 'tsc', 'git']);
-const devBackups = new Map();
-const devRunningTasks = new Map();
-
-function isDevSecretFile(p) {
-  const base = path.basename(String(p || ''));
-  const ext = path.extname(base).replace(/^\./, '').toLowerCase();
-  return DEV_SECRET_PATTERNS.some((re) => re.test(base)) || DEV_SECRET_EXTS.has(ext);
-}
-
 ipcMain.handle('jarvis:devInspectProject', async (event, payload) => {
   if (!isTrustedSender(event)) return { ok: false, error: 'UNTRUSTED_IPC_SENDER' };
   if (permissionConfig.capabilities?.FOLDER_ACCESS?.decision === 'DENIED') {
@@ -774,6 +790,9 @@ ipcMain.handle('jarvis:devInspectProject', async (event, payload) => {
 
 ipcMain.handle('jarvis:devReadSource', async (event, payload) => {
   if (!isTrustedSender(event)) return { ok: false, error: 'UNTRUSTED_IPC_SENDER' };
+  if (permissionConfig.capabilities?.FOLDER_ACCESS?.decision === 'DENIED') {
+    return { ok: false, error: 'PERMISSION_DENIED_BY_POLICY' };
+  }
   const { projectPath, filePath } = payload || {};
   const projVal = validatePath(projectPath);
   if (!projVal.valid) return { ok: false, error: projVal.error };
@@ -796,6 +815,9 @@ ipcMain.handle('jarvis:devReadSource', async (event, payload) => {
 
 ipcMain.handle('jarvis:devApplyPatch', async (event, payload) => {
   if (!isTrustedSender(event)) return { ok: false, error: 'UNTRUSTED_IPC_SENDER' };
+  if (permissionConfig.capabilities?.FOLDER_ACCESS?.decision === 'DENIED') {
+    return { ok: false, error: 'PERMISSION_DENIED_BY_POLICY' };
+  }
   const { projectPath, filePath, proposedContent, overwrite } = payload || {};
   const projVal = validatePath(projectPath);
   if (!projVal.valid) return { ok: false, error: projVal.error };
@@ -819,19 +841,28 @@ ipcMain.handle('jarvis:devApplyPatch', async (event, payload) => {
 
 ipcMain.handle('jarvis:devRollbackPatch', async (event, payload) => {
   if (!isTrustedSender(event)) return { ok: false, error: 'UNTRUSTED_IPC_SENDER' };
+  if (permissionConfig.capabilities?.FOLDER_ACCESS?.decision === 'DENIED') {
+    return { ok: false, error: 'PERMISSION_DENIED_BY_POLICY' };
+  }
   const rec = devBackups.get(payload?.patchId);
   if (!rec || rec.rolledBack) return { ok: false, error: 'BACKUP_NOT_FOUND_OR_USED' };
+  const val = validatePath(rec.filePath);
+  if (!val.valid) return { ok: false, error: val.error || 'ROLLBACK_PATH_NO_LONGER_AUTHORIZED' };
+  if (isDevSecretFile(val.resolved)) return { ok: false, error: 'SECRET_FILE_BLOCKED' };
   if (rec.existedBefore && rec.originalContent !== null) {
-    fs.writeFileSync(rec.filePath, rec.originalContent, { encoding: 'utf8', mode: 0o644 });
-  } else if (fs.existsSync(rec.filePath)) {
-    fs.unlinkSync(rec.filePath);
+    fs.writeFileSync(val.resolved, rec.originalContent, { encoding: 'utf8', mode: 0o644 });
+  } else if (fs.existsSync(val.resolved)) {
+    fs.unlinkSync(val.resolved);
   }
   rec.rolledBack = true;
-  return { ok: true, patchId: rec.patchId, filePath: rec.filePath };
+  return { ok: true, patchId: rec.patchId, filePath: val.resolved };
 });
 
 ipcMain.handle('jarvis:devRunCommand', async (event, payload) => {
   if (!isTrustedSender(event)) return { ok: false, error: 'UNTRUSTED_IPC_SENDER' };
+  if (permissionConfig.capabilities?.FOLDER_ACCESS?.decision === 'DENIED') {
+    return { ok: false, error: 'PERMISSION_DENIED_BY_POLICY' };
+  }
   const { projectPath, tool, args, taskId } = payload || {};
   const val = validatePath(projectPath);
   if (!val.valid) return { ok: false, error: val.error };

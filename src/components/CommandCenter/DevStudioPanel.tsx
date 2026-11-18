@@ -87,6 +87,7 @@ export const DevStudioPanel: React.FC<DevStudioPanelProps> = ({
   const [understandQuestion, setUnderstandQuestion] = useState('Explain the architecture and key entry points.');
   const [understandAnswer, setUnderstandAnswer] = useState<string>('');
   const [useExternalAIExplain, setUseExternalAIExplain] = useState(false);
+  const [pendingExternalUploadPerm, setPendingExternalUploadPerm] = useState<PermissionRequest | null>(null);
   const [isAnalyzingCode, setIsAnalyzingCode] = useState(false);
 
   // Code Generation state
@@ -192,32 +193,15 @@ export const DevStudioPanel: React.FC<DevStudioPanelProps> = ({
     setActiveTab('UNDERSTAND');
   };
 
-  const handleUnderstandCode = async () => {
-    if (!projectPathInput.trim()) {
-      setStatusMsg('Inspect an approved project folder first.');
-      return;
-    }
+  const executeCodeUnderstanding = async (extPermId?: string) => {
     setIsAnalyzingCode(true);
     setStatusMsg(null);
     try {
-      let extPermId: string | undefined;
-      if (useExternalAIExplain) {
-        const perm = devStudioService.requestExternalAIUploadPermission(
-          projectPathInput.trim(),
-          selectedSource ? 1 : 4,
-          12000
-        );
-        const approved = permissionManager.approveOnce(perm.id);
-        if (approved?.status === 'APPROVED') {
-          extPermId = approved.id;
-        }
-      }
-
       const res = await devStudioService.understandCodeOrProject({
         projectPath: projectPathInput.trim(),
         question: understandQuestion,
         focusFilePath: selectedSource?.path,
-        useExternalAI: useExternalAIExplain,
+        useExternalAI: Boolean(extPermId),
         externalUploadPermissionId: extPermId
       });
       setUnderstandAnswer(res.summary);
@@ -225,6 +209,41 @@ export const DevStudioPanel: React.FC<DevStudioPanelProps> = ({
     } finally {
       setIsAnalyzingCode(false);
     }
+  };
+
+  const handleUnderstandCode = async () => {
+    if (!projectPathInput.trim()) {
+      setStatusMsg('Inspect an approved project folder first.');
+      return;
+    }
+    if (useExternalAIExplain) {
+      const perm = devStudioService.requestExternalAIUploadPermission(
+        projectPathInput.trim(),
+        selectedSource ? 1 : 4,
+        12000
+      );
+      setPendingExternalUploadPerm(perm);
+      setStatusMsg('Explicit user approval required before uploading bounded non-secret project context.');
+      return;
+    }
+    setPendingExternalUploadPerm(null);
+    await executeCodeUnderstanding();
+  };
+
+  const handleConfirmExternalUpload = async () => {
+    if (!pendingExternalUploadPerm) return;
+    const approved = permissionManager.approveOnce(pendingExternalUploadPerm.id);
+    setPendingExternalUploadPerm(null);
+    if (approved?.status === 'APPROVED') {
+      await executeCodeUnderstanding(approved.id);
+    }
+  };
+
+  const handleCancelExternalUpload = () => {
+    if (!pendingExternalUploadPerm) return;
+    permissionManager.cancel(pendingExternalUploadPerm.id, 'External AI upload cancelled by user.');
+    setPendingExternalUploadPerm(null);
+    setStatusMsg('External AI code upload cancelled.');
   };
 
   const handleGenerateCode = async () => {
@@ -664,6 +683,30 @@ export const DevStudioPanel: React.FC<DevStudioPanelProps> = ({
                 {isAnalyzingCode ? 'Analyzing...' : 'Analyze & Explain'}
               </button>
             </div>
+            {pendingExternalUploadPerm && (
+              <div className="p-3 rounded-lg border border-amber-400/50 bg-amber-950/25 flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
+                <div className="text-amber-100">
+                  <span className="font-orbitron font-bold text-amber-300">EXTERNAL AI UPLOAD CONFIRMATION: </span>
+                  {pendingExternalUploadPerm.reason}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void handleConfirmExternalUpload()}
+                    className="px-3 py-1 rounded border border-emerald-400/60 bg-emerald-900/40 hover:bg-emerald-800/60 text-emerald-200 font-orbitron text-[11px]"
+                  >
+                    APPROVE UPLOAD ONCE
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleCancelExternalUpload}
+                    className="px-2.5 py-1 rounded border border-cyan-500/30 text-cyan-300 hover:bg-cyan-950/50 font-orbitron text-[11px]"
+                  >
+                    CANCEL
+                  </button>
+                </div>
+              </div>
+            )}
             {understandAnswer && (
               <pre className="p-3 rounded border border-cyan-500/20 bg-[#040b16] text-xs text-cyan-100 font-mono whitespace-pre-wrap max-h-64 overflow-y-auto">
                 {understandAnswer}

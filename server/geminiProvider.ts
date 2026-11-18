@@ -120,9 +120,25 @@ export class GeminiProvider {
     return { systemInstruction, contents };
   }
 
-  private classifyError(err: unknown, start: number, model: string): GeminiCallResult {
+  private classifyError(err: unknown, start: number, model: string, timedOut = false): GeminiCallResult {
     const durationMs = Date.now() - start;
     const errorMessage = err instanceof Error ? err.message : String(err);
+
+    if (timedOut) {
+      this.lastHealthCheck = {
+        timestamp: Date.now(),
+        ok: false,
+        message: 'Request timed out'
+      };
+      return {
+        ok: false,
+        text: '',
+        model,
+        error: `Gemini timeout: request exceeded ${Math.round(durationMs / 1000)}s.`,
+        durationMs
+      };
+    }
+
     const isAbort =
       (err instanceof Error && err.name === 'AbortError') ||
       errorMessage.toLowerCase().includes('aborted');
@@ -137,6 +153,10 @@ export class GeminiProvider {
       };
     }
 
+    const isAuthError =
+      /\b(401|403)\b/.test(errorMessage) ||
+      /api[_\s]?key|unauthorized|permission[_\s]?denied|unauthenticated/i.test(errorMessage);
+
     const isRateLimit =
       errorMessage.includes('429') ||
       errorMessage.toLowerCase().includes('resource_exhausted') ||
@@ -146,7 +166,11 @@ export class GeminiProvider {
     this.lastHealthCheck = {
       timestamp: Date.now(),
       ok: false,
-      message: isRateLimit ? 'Rate limit exceeded (429)' : errorMessage
+      message: isAuthError
+        ? 'Invalid or unauthorized API key'
+        : isRateLimit
+        ? 'Rate limit exceeded (429)'
+        : errorMessage
     };
 
     return {
@@ -154,9 +178,65 @@ export class GeminiProvider {
       text: '',
       model,
       isRateLimit,
-      error: isRateLimit ? `Gemini rate limit exceeded: ${errorMessage}` : `Gemini error: ${errorMessage}`,
+      error: isAuthError
+        ? `Gemini authentication error: ${errorMessage}`
+        : isRateLimit
+        ? `Gemini rate limit exceeded: ${errorMessage}`
+        : `Gemini error: ${errorMessage}`,
       durationMs
     };
+  }
+
+  private raceWithTimeoutAndAbort<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    signal?: AbortSignal
+  ): Promise<{ value: T; timedOut: false }> {
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        const abortErr = new Error('Aborted');
+        abortErr.name = 'AbortError';
+        reject(abortErr);
+        return;
+      }
+
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener('abort', onAbort);
+        const timeoutErr = new Error('GEMINI_TIMEOUT');
+        timeoutErr.name = 'TimeoutError';
+        reject(timeoutErr);
+      }, timeoutMs);
+
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        const abortErr = new Error('Aborted');
+        abortErr.name = 'AbortError';
+        reject(abortErr);
+      };
+
+      signal?.addEventListener('abort', onAbort, { once: true });
+
+      promise
+        .then((value) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          signal?.removeEventListener('abort', onAbort);
+          resolve({ value, timedOut: false });
+        })
+        .catch((err) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          signal?.removeEventListener('abort', onAbort);
+          reject(err);
+        });
+    });
   }
 
   public async generate(options: GeminiCallOptions): Promise<GeminiCallResult> {
@@ -188,19 +268,28 @@ export class GeminiProvider {
     try {
       const { systemInstruction, contents } = this.buildContentsAndSystem(options);
 
-      const response = await client.models.generateContent({
-        model,
-        contents,
-        config: {
-          systemInstruction: systemInstruction ? { parts: [{ text: systemInstruction }] } : undefined,
-          temperature: typeof options.temperature === 'number' ? options.temperature : 0.7,
-          maxOutputTokens: options.maxTokens || 2048
-        }
-      });
+      const { value: response } = await this.raceWithTimeoutAndAbort(
+        client.models.generateContent({
+          model,
+          contents,
+          config: {
+            systemInstruction: systemInstruction ? { parts: [{ text: systemInstruction }] } : undefined,
+            temperature: typeof options.temperature === 'number' ? options.temperature : 0.7,
+            maxOutputTokens: options.maxTokens || 2048
+          }
+        }),
+        25000,
+        options.signal
+      );
 
       const text = response.text?.trim() || '';
 
       if (!text) {
+        this.lastHealthCheck = {
+          timestamp: Date.now(),
+          ok: false,
+          message: 'Empty response candidate'
+        };
         return {
           ok: false,
           text: '',
@@ -219,7 +308,8 @@ export class GeminiProvider {
         durationMs: Date.now() - start
       };
     } catch (err: unknown) {
-      return this.classifyError(err, start, model);
+      const timedOut = err instanceof Error && err.name === 'TimeoutError';
+      return this.classifyError(err, start, model, timedOut);
     }
   }
 
@@ -263,15 +353,19 @@ export class GeminiProvider {
         return single;
       }
 
-      const stream = await client.models.generateContentStream({
-        model,
-        contents,
-        config: {
-          systemInstruction: systemInstruction ? { parts: [{ text: systemInstruction }] } : undefined,
-          temperature: typeof options.temperature === 'number' ? options.temperature : 0.7,
-          maxOutputTokens: options.maxTokens || 2048
-        }
-      });
+      const { value: stream } = await this.raceWithTimeoutAndAbort(
+        client.models.generateContentStream({
+          model,
+          contents,
+          config: {
+            systemInstruction: systemInstruction ? { parts: [{ text: systemInstruction }] } : undefined,
+            temperature: typeof options.temperature === 'number' ? options.temperature : 0.7,
+            maxOutputTokens: options.maxTokens || 2048
+          }
+        }),
+        30000,
+        options.signal
+      );
 
       let fullText = '';
       for await (const chunk of stream) {
@@ -294,6 +388,11 @@ export class GeminiProvider {
 
       const cleaned = fullText.trim();
       if (!cleaned) {
+        this.lastHealthCheck = {
+          timestamp: Date.now(),
+          ok: false,
+          message: 'Empty stream response'
+        };
         return {
           ok: false,
           text: '',
@@ -311,7 +410,8 @@ export class GeminiProvider {
         durationMs: Date.now() - start
       };
     } catch (err: unknown) {
-      return this.classifyError(err, start, model);
+      const timedOut = err instanceof Error && err.name === 'TimeoutError';
+      return this.classifyError(err, start, model, timedOut);
     }
   }
 

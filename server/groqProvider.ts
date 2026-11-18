@@ -138,10 +138,15 @@ export class GroqProvider {
         }
 
         const isRateLimit = response.status === 429;
+        const isAuthError = response.status === 401 || response.status === 403;
         this.lastHealthCheck = {
           timestamp: Date.now(),
           ok: false,
-          message: isRateLimit ? 'Rate limit exceeded (429)' : parsedMessage
+          message: isAuthError
+            ? 'Invalid or unauthorized API key'
+            : isRateLimit
+            ? 'Rate limit exceeded (429)'
+            : parsedMessage
         };
 
         return {
@@ -149,7 +154,9 @@ export class GroqProvider {
           text: '',
           model,
           isRateLimit,
-          error: isRateLimit
+          error: isAuthError
+            ? `Groq authentication error (${response.status}): ${parsedMessage}`
+            : isRateLimit
             ? `Groq rate limit exceeded: ${parsedMessage}`
             : `Groq error (${response.status}): ${parsedMessage}`,
           durationMs
@@ -160,6 +167,11 @@ export class GroqProvider {
       const text = data.choices?.[0]?.message?.content?.trim() || '';
 
       if (!text) {
+        this.lastHealthCheck = {
+          timestamp: Date.now(),
+          ok: false,
+          message: 'Empty response content'
+        };
         return {
           ok: false,
           text: '',

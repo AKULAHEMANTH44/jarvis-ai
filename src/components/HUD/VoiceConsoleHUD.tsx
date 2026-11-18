@@ -3,6 +3,7 @@ import { HolographicPanel } from '../Common/HolographicPanel';
 import { AssistantMessage, IntelligenceStatus } from '../../types/assistant';
 import { Volume2, Send, Terminal, Trash2, Mic, MicOff, X, Brain, Square } from 'lucide-react';
 import { audioService } from '../../services/soundFx';
+import { VoiceLifecycleState } from '../../services/speechService';
 
 interface VoiceConsoleHUDProps {
   messages: AssistantMessage[];
@@ -10,6 +11,7 @@ interface VoiceConsoleHUDProps {
   isListening: boolean;
   isSpeaking: boolean;
   isProcessing?: boolean;
+  voiceLifecycleState?: VoiceLifecycleState;
   intelligenceStatus?: IntelligenceStatus;
   voiceError?: string | null;
   onToggleVoice?: () => void;
@@ -25,6 +27,7 @@ export const VoiceConsoleHUD: React.FC<VoiceConsoleHUDProps> = ({
   isListening,
   isSpeaking,
   isProcessing = false,
+  voiceLifecycleState,
   intelligenceStatus = 'STANDBY',
   voiceError = null,
   onToggleVoice,
@@ -35,6 +38,18 @@ export const VoiceConsoleHUD: React.FC<VoiceConsoleHUDProps> = ({
 }) => {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [inputValue, setInputValue] = React.useState<string>('');
+
+  const lifecycle: VoiceLifecycleState =
+    voiceLifecycleState ||
+    (isSpeaking
+      ? 'SPEAKING'
+      : isProcessing
+      ? 'PROCESSING'
+      : isListening
+      ? 'LISTENING'
+      : voiceError
+      ? 'ERROR'
+      : 'IDLE');
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -67,11 +82,26 @@ export const VoiceConsoleHUD: React.FC<VoiceConsoleHUDProps> = ({
     <div className="w-full flex flex-col space-y-2">
       <HolographicPanel
         title="J.A.R.V.I.S. VOCAL CONSOLE"
-        subtitle={`SPEECH & INTELLIGENCE STREAM · ${messages.length} ENTRIES`}
+        subtitle={`VOICE: ${lifecycle} · ${messages.length} ENTRIES`}
         reactive={isListening || isSpeaking || isProcessing}
         icon={<Terminal className="w-4 h-4 text-cyan-400" />}
         headerRight={
-          <div className="flex items-center space-x-1.5 font-mono text-[10px]">
+          <div className="flex items-center space-x-1.5 font-mono text-[10px]" aria-live="polite">
+            <span
+              className={`px-1.5 py-0.5 rounded border font-bold ${
+                lifecycle === 'LISTENING'
+                  ? 'border-emerald-400/50 bg-emerald-950/40 text-emerald-200'
+                  : lifecycle === 'PROCESSING'
+                  ? 'border-amber-400/50 bg-amber-950/40 text-amber-200'
+                  : lifecycle === 'SPEAKING'
+                  ? 'border-cyan-400/50 bg-cyan-950/40 text-cyan-200'
+                  : lifecycle === 'ERROR'
+                  ? 'border-rose-400/50 bg-rose-950/40 text-rose-200'
+                  : 'border-cyan-500/30 bg-black/50 text-cyan-300/80'
+              }`}
+            >
+              {lifecycle}
+            </span>
             {(isProcessing || (intelligenceStatus !== 'STANDBY' && intelligenceStatus !== 'LISTENING')) && (
               <span className="px-1.5 py-0.5 rounded border border-amber-400/50 bg-amber-950/40 text-amber-200 font-bold">
                 {intelligenceStatus}
@@ -84,6 +114,7 @@ export const VoiceConsoleHUD: React.FC<VoiceConsoleHUDProps> = ({
                   audioService.playChirp(900);
                   onCancelRequest();
                 }}
+                aria-label="Cancel Active AI Request"
                 title="Cancel Active AI Request"
                 className="flex items-center space-x-1 px-1.5 py-0.5 rounded border border-red-400/60 bg-red-950/50 text-red-200 hover:bg-red-900/60"
               >
@@ -104,6 +135,7 @@ export const VoiceConsoleHUD: React.FC<VoiceConsoleHUDProps> = ({
                   audioService.playChirp(1300);
                   onOpenBrain();
                 }}
+                aria-label="Open AI Intelligence Brain"
                 title="Open AI Intelligence Brain"
                 className="flex items-center space-x-1 px-2 py-0.5 rounded border border-cyan-500/40 bg-cyan-950/40 text-cyan-200 hover:text-white"
               >
@@ -162,6 +194,11 @@ export const VoiceConsoleHUD: React.FC<VoiceConsoleHUDProps> = ({
           </div>
         }
       >
+        {voiceError && (
+          <div role="alert" className="mb-2 px-2.5 py-1.5 rounded border border-rose-500/40 bg-rose-950/40 text-rose-200 text-[10px] font-mono">
+            {voiceError}
+          </div>
+        )}
         {/* Message Log */}
         <div
           ref={scrollRef}

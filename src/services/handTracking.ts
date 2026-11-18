@@ -26,6 +26,8 @@ export class HandTrackingService {
   private onPermissionChangeCallback: ((status: CameraPermissionStatus) => void) | null = null;
   private onInterruptionCallback: ((reason: string) => void) | null = null;
   private trackEndedCleanup: (() => void) | null = null;
+  private permissionStatusRef: PermissionStatus | null = null;
+  private abortedStart: boolean = false;
   private isInitializing: boolean = false;
   private lastError: string | null = null;
   private minConfidence: number = 0.5;
@@ -97,6 +99,10 @@ export class HandTrackingService {
     }
     try {
       const status = await navigator.permissions.query({ name: 'camera' as PermissionName });
+      if (this.permissionStatusRef && this.permissionStatusRef !== status) {
+        this.permissionStatusRef.onchange = null;
+      }
+      this.permissionStatusRef = status;
       if (!this.isRunning) {
         this.setPermissionStatus(status.state);
       }
@@ -307,6 +313,7 @@ export class HandTrackingService {
     }
 
     this.isStarting = true;
+    this.abortedStart = false;
     this.videoElement = videoEl;
     this.onResultsCallback = onResults;
     this.lastError = null;
@@ -367,6 +374,11 @@ export class HandTrackingService {
         }
       }
 
+      if (this.abortedStart) {
+        this.stop();
+        return false;
+      }
+
       this.attachStreamInterruptionHandlers(this.stream);
 
       try {
@@ -396,6 +408,11 @@ export class HandTrackingService {
           });
         }
 
+        if (this.abortedStart) {
+          this.stop();
+          return false;
+        }
+
         if (typeof this.videoElement.play === 'function') {
           await this.videoElement.play();
         }
@@ -408,6 +425,10 @@ export class HandTrackingService {
       }
 
       const initialized = await this.initialize();
+      if (this.abortedStart) {
+        this.stop();
+        return false;
+      }
       if (!initialized || !this.handLandmarker) {
         console.warn('Cannot start tracking: HandLandmarker not initialized.');
         const initErr = this.lastError || 'Unable to initialize MediaPipe HandLandmarker model.';
@@ -476,6 +497,7 @@ export class HandTrackingService {
   };
 
   public stop() {
+    this.abortedStart = true;
     this.isRunning = false;
     this.onResultsCallback = null;
     if (this.animationFrameId !== null) {
@@ -514,6 +536,26 @@ export class HandTrackingService {
     if (this.permissionStatus === 'active') {
       this.setPermissionStatus('granted');
     }
+  }
+
+  public dispose() {
+    this.stop();
+    if (this.permissionStatusRef) {
+      this.permissionStatusRef.onchange = null;
+      this.permissionStatusRef = null;
+    }
+    this.onPermissionChangeCallback = null;
+    this.onInterruptionCallback = null;
+    if (this.handLandmarker) {
+      try {
+        this.handLandmarker.close();
+      } catch {
+        // ignore
+      }
+      this.handLandmarker = null;
+    }
+    this.videoElement = null;
+    this.lastResult = null;
   }
 
   public getFps(): number {

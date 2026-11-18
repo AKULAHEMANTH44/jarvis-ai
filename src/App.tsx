@@ -13,7 +13,8 @@ import { AIConfigModal } from './components/HUD/AIConfigModal';
 import { IntelligenceHUD, IntelligenceTabId } from './components/HUD/IntelligenceHUD';
 import { PermissionSetupWizard } from './components/HUD/PermissionSetupWizard';
 import { CommandCenterDashboard } from './components/CommandCenter/CommandCenterDashboard';
-import { HologramSceneManager } from './three/HologramScene';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import { HologramSceneManager, HologramAssistantState } from './three/HologramScene';
 import {
   CameraControlMode,
   ComponentLabel2D,
@@ -43,7 +44,7 @@ import { CameraPermissionStatus, handTrackingService } from './services/handTrac
 import { gestureEngine } from './services/gestureEngine';
 import { spatialInteractionController } from './services/spatialInteractionController';
 import { audioService } from './services/soundFx';
-import { speechService } from './services/speechService';
+import { speechService, VoiceLifecycleState } from './services/speechService';
 import { desktopBridge } from './services/desktopBridge';
 import { automationEngine } from './services/automationEngine';
 import { contextualAI } from './services/contextualAI';
@@ -54,6 +55,7 @@ import { suggestionEngine } from './services/suggestionEngine';
 import { fileAccessService } from './services/fileAccessService';
 import { musicService } from './services/musicService';
 import { permissionPolicy } from './services/permissionPolicy';
+import { systemHealthService, SystemHealthSnapshot } from './services/systemHealthService';
 import {
   HudDrawerId,
   HudLayoutState,
@@ -241,10 +243,14 @@ export const App: React.FC = () => {
   const [fps, setFps] = useState<number>(60);
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
-  // Voice Assistant State
+  // Voice Assistant & System Health State
   const [isVoiceActive, setIsVoiceActive] = useState<boolean>(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [isSpeaking, setIsSpeaking] = useState<boolean>(false);
+  const [voiceLifecycle, setVoiceLifecycle] = useState<VoiceLifecycleState>('IDLE');
+  const [systemHealth, setSystemHealth] = useState<SystemHealthSnapshot>(() =>
+    systemHealthService.getSnapshot()
+  );
   const [messages, setMessages] = useState<AssistantMessage[]>([
     {
       id: 'init-1',
@@ -402,6 +408,20 @@ export const App: React.FC = () => {
       setIsVoiceActive(active);
       setVoiceError(err || null);
     });
+    speechService.setLifecycleCallback((state, detail) => {
+      setVoiceLifecycle(state);
+      setIsSpeaking(state === 'SPEAKING');
+      if (state === 'ERROR' && detail) {
+        setVoiceError(detail);
+      }
+    });
+    const unsubHealth = systemHealthService.subscribe(() => {
+      setSystemHealth(systemHealthService.getSnapshot());
+    });
+    void systemHealthService.probeAll({
+      hasActiveSceneManager: Boolean(sceneManagerRef.current),
+      probeBackend: true
+    });
     handTrackingService.setPermissionChangeCallback((status) => {
       setCameraPermissionStatus(status);
     });
@@ -436,10 +456,9 @@ export const App: React.FC = () => {
       }
     });
     return () => {
-      handTrackingService.setPermissionChangeCallback(null);
-      handTrackingService.setInterruptionCallback(null);
-      handTrackingService.stop();
-      speechService.stopListening();
+      unsubHealth();
+      handTrackingService.dispose();
+      speechService.dispose();
       fileAccessService.setHostCallbacks({});
       fileAccessService.disposeAllPreviewUrls();
       musicService.stop();
@@ -1886,23 +1905,39 @@ export const App: React.FC = () => {
     syncSpatialStates
   ]);
 
-  // Audio Speech state watcher & Reactive Core Synchronization
+  // Synchronize unified assistant state -> Three.js Reactive Hologram Core (event-driven, zero polling)
   useEffect(() => {
-    const timer = setInterval(() => {
-      setIsSpeaking(speechService.isCurrentlySpeaking());
-    }, 100);
-    return () => clearInterval(timer);
-  }, []);
+    const scene = sceneManagerRef.current;
+    if (!scene) return;
 
-  useEffect(() => {
-    if (sceneManagerRef.current) {
-      sceneManagerRef.current.setCoreActivity({
-        isListening: isVoiceActive,
-        isSpeaking,
-        isProcessing: isProcessingCommand
-      });
+    let assistantState: HologramAssistantState = 'IDLE';
+    if (intelligenceState.status === 'ERROR' || voiceLifecycle === 'ERROR') {
+      assistantState = 'ERROR';
+    } else if (intelligenceState.status === 'EXECUTING') {
+      assistantState = 'EXECUTING';
+    } else if (isSpeaking || voiceLifecycle === 'SPEAKING' || intelligenceState.status === 'RESPONDING') {
+      assistantState = 'SPEAKING';
+    } else if (
+      isProcessingCommand ||
+      voiceLifecycle === 'PROCESSING' ||
+      intelligenceState.status === 'UNDERSTANDING' ||
+      intelligenceState.status === 'ANALYZING' ||
+      intelligenceState.status === 'PLANNING' ||
+      intelligenceState.status === 'VERIFYING'
+    ) {
+      assistantState = 'THINKING';
+    } else if (isVoiceActive || voiceLifecycle === 'LISTENING' || intelligenceState.status === 'LISTENING') {
+      assistantState = 'LISTENING';
     }
-  }, [isVoiceActive, isSpeaking, isProcessingCommand]);
+
+    scene.setAssistantState(assistantState);
+  }, [
+    intelligenceState.status,
+    isProcessingCommand,
+    isSpeaking,
+    isVoiceActive,
+    voiceLifecycle
+  ]);
 
   // Sync Right Drawer sub-tabs deterministically when activeDrawer changes
   useEffect(() => {
@@ -2346,101 +2381,111 @@ export const App: React.FC = () => {
 
       {/* CommandCenter Dashboard Interface */}
       {mode !== 'STANDBY' && (
-        <CommandCenterDashboard
-          currentModelId={currentModelId}
-          visualSettings={visualSettings}
-          sceneManagerRef={sceneManagerRef}
-          onModelChange={handleSelectModel}
-          onSelectObject={(id) => {
-            setSelectedObjectId(id);
-            syncSpatialStates();
-            syncVisualDisplayToSelected();
-          }}
-          onSelectComponent={handleSelectComponent}
-          onHighlightComponent={handleHighlightComponent}
-          onTransformStart={() => {
-            setIsCanvasInteracting(true);
-            pendingCanvasBeforeRef.current = captureUndoState();
-          }}
-          onTransformChange={() => {
-            const before = pendingCanvasBeforeRef.current;
-            syncSpatialStates();
-            if (before) {
-              recordHistoryTransition(before, 'Interactive Viewport Transform', 'canvas-transform');
+        <ErrorBoundary name="Command Center">
+          <CommandCenterDashboard
+            currentModelId={currentModelId}
+            visualSettings={visualSettings}
+            sceneManagerRef={sceneManagerRef}
+            onModelChange={handleSelectModel}
+            onSelectObject={(id) => {
+              setSelectedObjectId(id);
+              syncSpatialStates();
+              syncVisualDisplayToSelected();
+            }}
+            onSelectComponent={handleSelectComponent}
+            onHighlightComponent={handleHighlightComponent}
+            onTransformStart={() => {
+              setIsCanvasInteracting(true);
               pendingCanvasBeforeRef.current = captureUndoState();
+            }}
+            onTransformChange={() => {
+              const before = pendingCanvasBeforeRef.current;
+              syncSpatialStates();
+              if (before) {
+                recordHistoryTransition(before, 'Interactive Viewport Transform', 'canvas-transform');
+                pendingCanvasBeforeRef.current = captureUndoState();
+              }
+            }}
+            onImportMeshFiles={handleImportMeshFiles}
+            onReconstructImages={handleReconstructImages}
+            onImportError={(msg) => {
+              setLabError(msg);
+              appendMessage('JARVIS', msg, 'ALERT');
+            }}
+            cameraControlMode={cameraControlMode}
+            laserTarget={laserTarget}
+            componentLabels={componentLabels}
+            activeGestureFeedback={activeGestureFeedback}
+            spatialFeedback={spatialFeedback}
+            isTrackingLost={isTrackingLost}
+            autostart={autostart}
+            fps={fps}
+            isCameraActive={isCameraActive}
+            cameraError={cameraError}
+            cameraPermissionStatus={cameraPermissionStatus}
+            gestureResult={gestureResult}
+            mirrorX={calibration.mirrorX}
+            videoRef={videoRef}
+            onToggleCamera={() => void handleToggleCamera()}
+            onOpenGestureDrawer={() => {
+              setMode('WORKSPACE');
+              setHudState((prev) => toggleDrawerState(prev, 'GESTURE'));
+            }}
+            isVoiceActive={isVoiceActive}
+            voiceLifecycleState={voiceLifecycle}
+            onToggleVoice={handleToggleVoice}
+            intelligenceState={intelligenceState}
+            recentTools={recentTools}
+            isProcessingCommand={isProcessingCommand}
+            hasProviderKey={
+              contextualAI.hasApiKey() ||
+              systemHealth.backendStatus?.gemini?.status === 'connected' ||
+              systemHealth.backendStatus?.groq?.status === 'connected'
             }
-          }}
-          onImportMeshFiles={handleImportMeshFiles}
-          onReconstructImages={handleReconstructImages}
-          onImportError={(msg) => {
-            setLabError(msg);
-            appendMessage('JARVIS', msg, 'ALERT');
-          }}
-          cameraControlMode={cameraControlMode}
-          laserTarget={laserTarget}
-          componentLabels={componentLabels}
-          activeGestureFeedback={activeGestureFeedback}
-          spatialFeedback={spatialFeedback}
-          isTrackingLost={isTrackingLost}
-          autostart={autostart}
-          fps={fps}
-          isCameraActive={isCameraActive}
-          cameraError={cameraError}
-          cameraPermissionStatus={cameraPermissionStatus}
-          gestureResult={gestureResult}
-          mirrorX={calibration.mirrorX}
-          videoRef={videoRef}
-          onToggleCamera={() => void handleToggleCamera()}
-          onOpenGestureDrawer={() => {
-            setMode('WORKSPACE');
-            setHudState((prev) => toggleDrawerState(prev, 'GESTURE'));
-          }}
-          isVoiceActive={isVoiceActive}
-          onToggleVoice={handleToggleVoice}
-          intelligenceState={intelligenceState}
-          recentTools={recentTools}
-          isProcessingCommand={isProcessingCommand}
-          onCancelRequest={() => speechService.interruptAndCancel()}
-          onSendCommand={handleSendConsoleCommand}
-          onApprovePermission={(permId) => void intelligenceEngine.resolvePendingPermission('APPROVE_ONCE', permId)}
-          onDenyPermission={(permId) => void intelligenceEngine.resolvePendingPermission('DENY', permId)}
-          onCancelPermission={(permId) => void intelligenceEngine.resolvePendingPermission('CANCEL', permId)}
-          onOpenAIConfig={() => setIsAIConfigOpen(true)}
-          onOpenObjectLab={() => {
-            setMode('WORKSPACE');
-            setHudState((prev) => openDrawerState(prev, 'LAB'));
-            setRequestedWorkspaceTab({ tab: 'LAB', nonce: nextNonce() });
-          }}
-          onOpenTasks={() => {
-            setMode('WORKSPACE');
-            setHudState((prev) => openDrawerState(prev, 'TASKS'));
-            setTaskSubTab('AUTOMATION');
-            setRequestedTaskTab({ tab: 'AUTOMATION', nonce: nextNonce() });
-          }}
-          onOpenVoiceConsole={() => {
-            setMode('WORKSPACE');
-            setHudState((prev) => openDrawerState(prev, 'VOICE'));
-          }}
-          onOpenBrain={() => {
-            setMode('WORKSPACE');
-            setRequestedBrainTab({ tab: 'CHAT', nonce: nextNonce() });
-            setHudState((prev) => openDrawerState(prev, 'BRAIN'));
-          }}
-          onOpenPermissions={() => {
-            setMode('WORKSPACE');
-            setRequestedBrainTab({ tab: 'PERMISSIONS', nonce: nextNonce() });
-            setHudState((prev) => openDrawerState(prev, 'BRAIN'));
-          }}
-          onOpenMemory={() => {
-            setMode('WORKSPACE');
-            setRequestedBrainTab({ tab: 'MEMORY', nonce: nextNonce() });
-            setHudState((prev) => openDrawerState(prev, 'BRAIN'));
-          }}
-          onTriggerRescan={handleTriggerRescan}
-          memoryCount={memoryManager.getMemories().length}
-          isFocusMode={hudState.isFocusMode}
-          onToggleFocus={handleToggleFocusMode}
-        />
+            overallHealth={systemHealth.overallStatus}
+            onCancelRequest={() => speechService.interruptAndCancel()}
+            onSendCommand={handleSendConsoleCommand}
+            onApprovePermission={(permId) => void intelligenceEngine.resolvePendingPermission('APPROVE_ONCE', permId)}
+            onDenyPermission={(permId) => void intelligenceEngine.resolvePendingPermission('DENY', permId)}
+            onCancelPermission={(permId) => void intelligenceEngine.resolvePendingPermission('CANCEL', permId)}
+            onOpenAIConfig={() => setIsAIConfigOpen(true)}
+            onOpenObjectLab={() => {
+              setMode('WORKSPACE');
+              setHudState((prev) => openDrawerState(prev, 'LAB'));
+              setRequestedWorkspaceTab({ tab: 'LAB', nonce: nextNonce() });
+            }}
+            onOpenTasks={() => {
+              setMode('WORKSPACE');
+              setHudState((prev) => openDrawerState(prev, 'TASKS'));
+              setTaskSubTab('AUTOMATION');
+              setRequestedTaskTab({ tab: 'AUTOMATION', nonce: nextNonce() });
+            }}
+            onOpenVoiceConsole={() => {
+              setMode('WORKSPACE');
+              setHudState((prev) => openDrawerState(prev, 'VOICE'));
+            }}
+            onOpenBrain={() => {
+              setMode('WORKSPACE');
+              setRequestedBrainTab({ tab: 'CHAT', nonce: nextNonce() });
+              setHudState((prev) => openDrawerState(prev, 'BRAIN'));
+            }}
+            onOpenPermissions={() => {
+              setMode('WORKSPACE');
+              setRequestedBrainTab({ tab: 'PERMISSIONS', nonce: nextNonce() });
+              setHudState((prev) => openDrawerState(prev, 'BRAIN'));
+            }}
+            onOpenMemory={() => {
+              setMode('WORKSPACE');
+              setRequestedBrainTab({ tab: 'MEMORY', nonce: nextNonce() });
+              setHudState((prev) => openDrawerState(prev, 'BRAIN'));
+            }}
+            onOpenSetupWizard={() => setIsSetupWizardOpen(true)}
+            onTriggerRescan={handleTriggerRescan}
+            memoryCount={memoryManager.getMemories().length}
+            isFocusMode={hudState.isFocusMode}
+            onToggleFocus={handleToggleFocusMode}
+          />
+        </ErrorBoundary>
       )}
 
       {/* 3. Contextual Drawers & Floating Consoles (Overlay with pointer-events-none wrapper so 3D canvas remains unobstructed) */}
@@ -2721,23 +2766,26 @@ export const App: React.FC = () => {
               data-testid="voice-console-drawer"
               className="pointer-events-auto fixed bottom-20 left-1/2 -translate-x-1/2 w-[min(540px,94vw)] max-h-[52vh] overflow-y-auto rounded-xl animate-fade-in"
             >
-              <VoiceConsoleHUD
-                messages={messages}
-                onSendCommand={handleSendConsoleCommand}
-                isListening={isVoiceActive}
-                isSpeaking={isSpeaking}
-                isProcessing={isProcessingCommand}
-                intelligenceStatus={intelligenceState.status}
-                voiceError={voiceError}
-                onToggleVoice={handleToggleVoice}
-                onCancelRequest={() => speechService.interruptAndCancel()}
-                onOpenBrain={() => {
-                  setRequestedBrainTab({ tab: 'CHAT', nonce: nextNonce() });
-                  setHudState((prev) => openDrawerState(prev, 'BRAIN'));
-                }}
-                onClearHistory={() => setMessages((prev) => prev.slice(0, 1))}
-                onClose={() => setHudState(closeDrawerState)}
-              />
+              <ErrorBoundary name="Vocal Console" compact onReset={() => setHudState(closeDrawerState)}>
+                <VoiceConsoleHUD
+                  messages={messages}
+                  onSendCommand={handleSendConsoleCommand}
+                  isListening={isVoiceActive}
+                  isSpeaking={isSpeaking}
+                  isProcessing={isProcessingCommand}
+                  voiceLifecycleState={voiceLifecycle}
+                  intelligenceStatus={intelligenceState.status}
+                  voiceError={voiceError}
+                  onToggleVoice={handleToggleVoice}
+                  onCancelRequest={() => speechService.interruptAndCancel()}
+                  onOpenBrain={() => {
+                    setRequestedBrainTab({ tab: 'CHAT', nonce: nextNonce() });
+                    setHudState((prev) => openDrawerState(prev, 'BRAIN'));
+                  }}
+                  onClearHistory={() => setMessages((prev) => prev.slice(0, 1))}
+                  onClose={() => setHudState(closeDrawerState)}
+                />
+              </ErrorBoundary>
             </section>
           )}
 
@@ -2748,21 +2796,23 @@ export const App: React.FC = () => {
               data-testid="intelligence-brain-drawer"
               className="pointer-events-auto fixed bottom-20 left-1/2 -translate-x-1/2 w-[min(600px,94vw)] rounded-xl animate-fade-in"
             >
-              <IntelligenceHUD
-                intelligenceState={intelligenceState}
-                workspaceSnapshot={buildWorkspaceSnapshot()}
-                requestedTab={requestedBrainTab}
-                onSubmitPrompt={(prompt, attachments) => void handleSubmitBrainPrompt(prompt, attachments)}
-                onCancelRequest={() => speechService.interruptAndCancel()}
-                onOpenAIConfig={() => setIsAIConfigOpen(true)}
-                onOpenTasksDrawer={() => {
-                  setTaskSubTab('AUTOMATION');
-                  setRequestedTaskTab({ tab: 'AUTOMATION', nonce: nextNonce() });
-                  setHudState((prev) => openDrawerState(prev, 'TASKS'));
-                }}
-                onOpenSetupWizard={() => setIsSetupWizardOpen(true)}
-                onClose={() => setHudState(closeDrawerState)}
-              />
+              <ErrorBoundary name="Intelligence Brain" compact onReset={() => setHudState(closeDrawerState)}>
+                <IntelligenceHUD
+                  intelligenceState={intelligenceState}
+                  workspaceSnapshot={buildWorkspaceSnapshot()}
+                  requestedTab={requestedBrainTab}
+                  onSubmitPrompt={(prompt, attachments) => void handleSubmitBrainPrompt(prompt, attachments)}
+                  onCancelRequest={() => speechService.interruptAndCancel()}
+                  onOpenAIConfig={() => setIsAIConfigOpen(true)}
+                  onOpenTasksDrawer={() => {
+                    setTaskSubTab('AUTOMATION');
+                    setRequestedTaskTab({ tab: 'AUTOMATION', nonce: nextNonce() });
+                    setHudState((prev) => openDrawerState(prev, 'TASKS'));
+                  }}
+                  onOpenSetupWizard={() => setIsSetupWizardOpen(true)}
+                  onClose={() => setHudState(closeDrawerState)}
+                />
+              </ErrorBoundary>
             </section>
           )}
 

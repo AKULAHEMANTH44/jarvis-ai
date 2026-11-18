@@ -44,6 +44,54 @@ export const BLOCKED_FILE_EXTENSIONS = new Set([
   'exe', 'msi', 'bat', 'cmd', 'ps1', 'sh', 'vbs', 'vbe', 'dll', 'sys', 'com', 'app', 'dmg', 'pkg', 'deb', 'rpm'
 ]);
 
+const SENSITIVE_FILE_PATTERNS = [
+  /^\.env($|\.)/i,
+  /^secrets?(\..*)?\.json$/i,
+  /^credentials?(\..*)?\.json$/i,
+  /service[-_]?account.*\.json$/i,
+  /^id_(rsa|ed25519|ecdsa|dsa)(\.pub)?$/i,
+  /^\.(npmrc|pypirc|netrc)$/i
+];
+
+const SENSITIVE_FILE_EXTS = new Set(['pem', 'key', 'p12', 'pfx', 'jks', 'keystore', 'kdbx']);
+
+export function isSensitiveDesktopFilename(filePath: string): boolean {
+  const base = path.basename(String(filePath || '').trim());
+  const ext = path.extname(base).replace(/^\./, '').toLowerCase();
+  return SENSITIVE_FILE_PATTERNS.some((re) => re.test(base)) || SENSITIVE_FILE_EXTS.has(ext);
+}
+
+export function isBlockedInternalHostname(hostname: string): boolean {
+  const host = String(hostname || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+  if (!host) return true;
+  if (
+    host === 'localhost' ||
+    host === '0.0.0.0' ||
+    host === '::' ||
+    host === '::1' ||
+    host.endsWith('.local') ||
+    host.endsWith('.internal') ||
+    host.endsWith('.localhost')
+  ) {
+    return true;
+  }
+  const cleanHost = host.startsWith('::ffff:') ? host.slice(7) : host;
+  if (
+    /^127\./.test(cleanHost) ||
+    /^10\./.test(cleanHost) ||
+    /^192\.168\./.test(cleanHost) ||
+    /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(cleanHost) ||
+    /^169\.254\./.test(cleanHost) ||
+    /^0\./.test(cleanHost)
+  ) {
+    return true;
+  }
+  if (/^(fe80:|fc[0-9a-f]{2}:|fd[0-9a-f]{2}:)/i.test(host)) {
+    return true;
+  }
+  return false;
+}
+
 /**
  * Strict configurable allowlist of permitted Windows / Desktop applications.
  * No arbitrary binaries, scripts, or terminal shells (cmd.exe, powershell.exe, bash, etc.) are allowed.
@@ -1312,6 +1360,14 @@ export class DesktopAutomationService {
     }
 
     const target = val.normalizedPath;
+    if (isSensitiveDesktopFilename(target)) {
+      return {
+        ok: false,
+        path: target,
+        name: path.basename(target),
+        error: 'SECRET_FILE_BLOCKED: Reading secret or credential files is blocked for safety.'
+      };
+    }
     if (!fs.existsSync(target)) {
       return { ok: false, path: target, name: path.basename(target), error: 'File does not exist.' };
     }
@@ -1368,6 +1424,14 @@ export class DesktopAutomationService {
     }
 
     const target = val.normalizedPath;
+    if (isSensitiveDesktopFilename(target)) {
+      return {
+        ok: false,
+        path: target,
+        name: path.basename(target),
+        error: 'SECRET_FILE_BLOCKED: Writing or overwriting secret/credential files is blocked for safety.'
+      };
+    }
     const ext = path.extname(target).replace(/^\./, '').toLowerCase();
     if (BLOCKED_FILE_EXTENSIONS.has(ext)) {
       return { ok: false, path: target, name: path.basename(target), error: `Disallowed extension (.${ext}). Executable creation blocked.` };
@@ -1438,38 +1502,66 @@ export class DesktopAutomationService {
       return { ok: false, url: parsed.origin, error: 'URLs containing embedded credentials are blocked.' };
     }
 
-    const host = parsed.hostname.toLowerCase();
-    if (
-      host === 'localhost' ||
-      host === '127.0.0.1' ||
-      host === '0.0.0.0' ||
-      host === '::1' ||
-      host === '[::1]' ||
-      host.endsWith('.local') ||
-      /^10\./.test(host) ||
-      /^192\.168\./.test(host) ||
-      /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(host) ||
-      /^169\.254\./.test(host)
-    ) {
+    if (isBlockedInternalHostname(parsed.hostname)) {
       return { ok: false, url: rawUrl, error: 'Private or internal network inspection is blocked for safety.' };
     }
 
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 3500);
-      const res = await fetch(parsed.toString(), {
-        signal: controller.signal,
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) JARVIS/7.0' }
-      });
-      clearTimeout(timeout);
+      let currentUrl = parsed;
+      let res: Response | null = null;
+      for (let hop = 0; hop < 3; hop++) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 3500);
+        try {
+          res = await fetch(currentUrl.toString(), {
+            signal: controller.signal,
+            redirect: 'manual',
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) JARVIS/7.0' }
+          });
+        } finally {
+          clearTimeout(timeout);
+        }
+
+        if (res.status >= 300 && res.status < 400) {
+          const location = res.headers?.get?.('location');
+          if (!location) {
+            return { ok: false, url: currentUrl.toString(), error: `Redirect (HTTP ${res.status}) missing target location.` };
+          }
+          let nextUrl: URL;
+          try {
+            nextUrl = new URL(location, currentUrl);
+          } catch {
+            return { ok: false, url: currentUrl.toString(), error: 'Invalid redirect URL.' };
+          }
+          if (nextUrl.protocol !== 'https:' && nextUrl.protocol !== 'http:') {
+            return { ok: false, url: currentUrl.toString(), error: 'Redirect to non-HTTP(S) scheme is blocked for safety.' };
+          }
+          if (nextUrl.username || nextUrl.password) {
+            return { ok: false, url: currentUrl.toString(), error: 'Redirect containing embedded credentials is blocked for safety.' };
+          }
+          if (isBlockedInternalHostname(nextUrl.hostname)) {
+            return { ok: false, url: currentUrl.toString(), error: 'SSRF protection blocked redirect to private or internal network.' };
+          }
+          currentUrl = nextUrl;
+          continue;
+        }
+        break;
+      }
+
+      if (!res) {
+        return { ok: false, url: parsed.toString(), error: 'No HTTP response received.' };
+      }
+      if (res.status >= 300 && res.status < 400) {
+        return { ok: false, url: currentUrl.toString(), error: 'Too many redirects during web page inspection.' };
+      }
 
       if (!res.ok) {
-        return { ok: false, url: parsed.toString(), error: `HTTP error ${res.status}` };
+        return { ok: false, url: currentUrl.toString(), error: `HTTP error ${res.status}` };
       }
 
       const html = await res.text();
       const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
-      const title = titleMatch ? titleMatch[1].trim() : parsed.hostname;
+      const title = titleMatch ? titleMatch[1].trim() : currentUrl.hostname;
 
       const metaDescMatch = html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']+)["']/i);
       const description = metaDescMatch ? metaDescMatch[1].trim() : undefined;

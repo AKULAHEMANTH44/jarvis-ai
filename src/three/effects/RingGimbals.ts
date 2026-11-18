@@ -13,9 +13,20 @@ export class RingGimbalsEffect {
 
   private isListening: boolean = false;
   private isSpeaking: boolean = false;
+  private isProcessing: boolean = false;
+  private isExecuting: boolean = false;
+  private isError: boolean = false;
   private energyBoost: number = 0;
+  private smoothedStateBoost: number = 0;
+  private smoothedPulseAmp: number = 0.008;
+  private smoothedErrorBlend: number = 0;
   private ambientAttenuation: number = 1.0;
   private baseColorHex: number = 0x00f0ff;
+  private readonly _baseColor = new THREE.Color(0x00f0ff);
+  private readonly _targetColor = new THREE.Color(0x00f0ff);
+  private readonly _errorColor = new THREE.Color(0xff3b5c);
+  private readonly _warningColor = new THREE.Color(0xffaa33);
+  private readonly _execColor = new THREE.Color(0x38bdf8);
 
   // Phase F spatial interaction visual feedback
   private interactionRotationSpeed: number = 0;
@@ -26,6 +37,8 @@ export class RingGimbalsEffect {
   constructor(colorThemeHex = 0x00f0ff) {
     this.group = new THREE.Group();
     this.baseColorHex = colorThemeHex;
+    this._baseColor.setHex(colorThemeHex);
+    this._targetColor.setHex(colorThemeHex);
 
     const geoA = new THREE.RingGeometry(3.75, 3.78, 96);
     const matA = new THREE.MeshBasicMaterial({
@@ -142,9 +155,19 @@ export class RingGimbalsEffect {
     this.ambientAttenuation = active ? 0.22 : 1.0;
   }
 
-  public setCoreActivity(activity: { isListening?: boolean; isSpeaking?: boolean; energyBoost?: number }) {
+  public setCoreActivity(activity: {
+    isListening?: boolean;
+    isSpeaking?: boolean;
+    isProcessing?: boolean;
+    isExecuting?: boolean;
+    isError?: boolean;
+    energyBoost?: number;
+  }) {
     if (activity.isListening !== undefined) this.isListening = activity.isListening;
     if (activity.isSpeaking !== undefined) this.isSpeaking = activity.isSpeaking;
+    if (activity.isProcessing !== undefined) this.isProcessing = activity.isProcessing;
+    if (activity.isExecuting !== undefined) this.isExecuting = activity.isExecuting;
+    if (activity.isError !== undefined) this.isError = activity.isError;
     if (activity.energyBoost !== undefined) this.energyBoost = Math.max(0, activity.energyBoost);
   }
 
@@ -170,6 +193,7 @@ export class RingGimbalsEffect {
 
   public setColorTheme(hex: number) {
     this.baseColorHex = hex;
+    this._baseColor.setHex(hex);
     this.group.traverse((child) => {
       if (child instanceof THREE.Mesh) {
         (child.material as THREE.MeshBasicMaterial).color.setHex(hex);
@@ -181,21 +205,43 @@ export class RingGimbalsEffect {
     });
   }
 
-  public update(time: number, speedMultiplier: number = 1.0) {
-    this.energyBoost = Math.max(0, this.energyBoost - 0.015);
+  public update(time: number, speedMultiplier: number = 1.0, delta: number = 0.016) {
+    const dt = Math.max(0.001, Math.min(0.1, delta));
+    const frameScale = dt / 0.016;
+    this.energyBoost = Math.max(0, this.energyBoost - 0.015 * frameScale);
 
     const rotEnergy = Math.min(1.0, this.interactionRotationSpeed / 3.5);
     const dispEnergy = this.interactionDispersion;
     const reconEnergy = this.isReconstructingFeedback ? 0.85 : 0;
 
+    const targetBoost =
+      (this.isListening ? 0.65 : 0) +
+      (this.isProcessing ? 0.95 : 0) +
+      (this.isExecuting ? 1.05 : 0) +
+      (this.isSpeaking ? 1.15 : 0) +
+      (this.isError ? 0.45 : 0);
+    this.smoothedStateBoost = THREE.MathUtils.damp(this.smoothedStateBoost, targetBoost, 6.5, dt);
+
+    const targetAmp = this.isSpeaking
+      ? 0.045
+      : this.isExecuting
+      ? 0.036
+      : this.isProcessing
+      ? 0.03
+      : this.isListening
+      ? 0.025
+      : this.isError
+      ? 0.032
+      : 0.008;
+    this.smoothedPulseAmp = THREE.MathUtils.damp(this.smoothedPulseAmp, targetAmp, 7.0, dt);
+
     const stateMult =
       1.0 +
-      (this.isListening ? 0.65 : 0) +
-      (this.isSpeaking ? 1.15 : 0) +
+      this.smoothedStateBoost +
       rotEnergy * 1.45 +
       this.energyBoost * 2.2;
 
-    const effective = speedMultiplier * stateMult;
+    const effective = speedMultiplier * stateMult * frameScale;
 
     this.ringA.rotation.z += 0.003 * effective;
     this.ringB.rotation.z -= 0.007 * effective;
@@ -204,9 +250,8 @@ export class RingGimbalsEffect {
     this.orbitalTicks.rotation.z += 0.002 * effective;
     this.orbitalParticles.rotation.z -= 0.006 * effective;
 
-    const amp = this.isSpeaking ? 0.045 : this.isListening ? 0.025 : 0.008;
-    const freq = this.isSpeaking ? 8.0 : this.isListening ? 4.5 : 1.5;
-    const pulse = 1 + Math.sin(time * freq) * amp + this.energyBoost * 0.04;
+    const freq = this.isSpeaking ? 8.0 : this.isExecuting ? 6.5 : this.isProcessing ? 5.5 : this.isListening ? 4.5 : 1.5;
+    const pulse = 1 + Math.sin(time * freq) * this.smoothedPulseAmp + this.energyBoost * 0.04;
 
     const radialExpand = 1 + dispEnergy * 0.14;
     this.ringA.scale.set(radialExpand, radialExpand, 1);
@@ -214,14 +259,23 @@ export class RingGimbalsEffect {
     this.ringD.scale.set(pulse, pulse, 1);
     this.ringC.scale.set(1 + (pulse - 1) * 0.6, 1 + (pulse - 1) * 0.6, 1);
 
-    // Subtle amber warning tint on tracking loss, theme color otherwise
-    const activeColor = this.isTrackingLostFeedback ? 0xffaa33 : this.baseColorHex;
-    (this.ringB.material as THREE.MeshBasicMaterial).color.setHex(activeColor);
-    (this.ringC.material as THREE.MeshBasicMaterial).color.setHex(activeColor);
+    // Smooth non-allocating state color blending
+    this.smoothedErrorBlend = THREE.MathUtils.damp(this.smoothedErrorBlend, this.isError ? 1 : 0, 8.0, dt);
+    this._targetColor.copy(this._baseColor);
+    if (this.isTrackingLostFeedback) {
+      this._targetColor.lerp(this._warningColor, 0.85);
+    } else if (this.isExecuting && !this.isError) {
+      this._targetColor.lerp(this._execColor, 0.35);
+    }
+    if (this.smoothedErrorBlend > 0.01) {
+      this._targetColor.lerp(this._errorColor, this.smoothedErrorBlend * 0.9);
+    }
+    (this.ringB.material as THREE.MeshBasicMaterial).color.copy(this._targetColor);
+    (this.ringC.material as THREE.MeshBasicMaterial).color.copy(this._targetColor);
 
     const att = this.ambientAttenuation;
     const targetOpacityBoost =
-      (this.isSpeaking ? 0.28 : this.isListening ? 0.16 : 0) +
+      (this.isSpeaking ? 0.28 : this.isExecuting ? 0.24 : this.isProcessing ? 0.2 : this.isListening ? 0.16 : 0) +
       rotEnergy * 0.42 +
       dispEnergy * 0.26 +
       reconEnergy * 0.32;
