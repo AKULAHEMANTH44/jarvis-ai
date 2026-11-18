@@ -13,6 +13,7 @@ import { LLMStatusPanel } from './LLMStatusPanel';
 import { OpticalGesturePanel } from './OpticalGesturePanel';
 import { CustomGestureStudioPanel } from './CustomGestureStudioPanel';
 import { DesktopSuperpowersPanel } from './DesktopSuperpowersPanel';
+import { DevStudioPanel } from './DevStudioPanel';
 import { VoiceCommandDock } from './VoiceCommandDock';
 import { HologramSceneManager } from '../../three/HologramScene';
 import {
@@ -140,6 +141,7 @@ export const CommandCenterDashboard: React.FC<CommandCenterDashboardProps> = ({
     else if (nav === 'AI_CORE') onOpenBrain();
     else if (nav === 'AGENTS' || nav === 'TASKS') onOpenTasks();
     else if (nav === 'WORKFLOWS' || nav === 'DESKTOP') setActiveNav('DESKTOP');
+    else if (nav === 'DEV_STUDIO') setActiveNav('DEV_STUDIO');
     else if (nav === 'MEMORY') onOpenMemory();
     else if (nav === 'CONVERSATIONS' || nav === 'KNOWLEDGE') onOpenBrain();
     else if (nav === 'TOOLS' || nav === 'PERMISSIONS') onOpenPermissions();
@@ -183,6 +185,14 @@ export const CommandCenterDashboard: React.FC<CommandCenterDashboardProps> = ({
               onCancelPermission={onCancelPermission}
               pendingPermission={intelligenceState.pendingPermission}
               recentTools={recentTools}
+              onClose={() => setActiveNav('DASHBOARD')}
+            />
+          ) : activeNav === 'DEV_STUDIO' ? (
+            <DevStudioPanel
+              pendingPermission={intelligenceState.pendingPermission}
+              onApprovePermission={onApprovePermission}
+              onDenyPermission={onDenyPermission}
+              onCancelPermission={onCancelPermission}
               onClose={() => setActiveNav('DASHBOARD')}
             />
           ) : (

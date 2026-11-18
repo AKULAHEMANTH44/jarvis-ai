@@ -386,6 +386,7 @@ export interface PendingToolApproval {
 
 export type PermissionCategory =
   | 'FILE_ACCESS'
+  | 'FILE_CREATE'
   | 'FOLDER_ACCESS'
   | 'APPLICATION_LAUNCH'
   | 'BROWSER_ACCESS'
@@ -393,7 +394,10 @@ export type PermissionCategory =
   | 'MUSIC_PLAYBACK'
   | 'MUSIC_CONTROL'
   | 'EXTERNAL_NAVIGATION'
-  | 'WORKSPACE_ACCESS';
+  | 'WORKSPACE_ACCESS'
+  | 'CODE_PATCH'
+  | 'DEV_COMMAND'
+  | 'EXTERNAL_AI_UPLOAD';
 
 export type PermissionStatus =
   | 'NOT_REQUESTED'
@@ -647,4 +651,189 @@ export interface IntelligenceRequestResult {
   cancelled?: boolean;
   error?: string;
 }
+
+// ============================================================================
+// Batch 5 — AI Development Studio Types
+// ============================================================================
+
+export interface ProjectTreeNode {
+  name: string;
+  relativePath: string;
+  fullPath: string;
+  isDirectory: boolean;
+  sizeBytes: number;
+  extension: string;
+  language?: string;
+  isTestFile?: boolean;
+  isEntryPoint?: boolean;
+  isConfigFile?: boolean;
+}
+
+export interface ProjectDependencyInfo {
+  name: string;
+  version: string;
+  scope: 'dependency' | 'devDependency' | 'python';
+  role: string;
+}
+
+export interface ProjectWorkspaceReport {
+  ok: boolean;
+  projectPath: string;
+  projectName: string;
+  inspectedAt: number;
+  languages: { language: string; fileCount: number }[];
+  frameworks: string[];
+  packageManagers: string[];
+  testFrameworks: string[];
+  configFiles: string[];
+  entryPoints: string[];
+  testFiles: string[];
+  scripts: Record<string, string>;
+  dependencies: ProjectDependencyInfo[];
+  files: ProjectTreeNode[];
+  directories: string[];
+  totalFilesScanned: number;
+  totalBytes: number;
+  truncated: boolean;
+  excludedSecretFiles: string[];
+  error?: string;
+}
+
+export interface SourceFileAnalysis {
+  ok: boolean;
+  path: string;
+  relativePath: string;
+  name: string;
+  language: string;
+  lineCount: number;
+  sizeBytes: number;
+  content?: string;
+  symbols: { kind: 'function' | 'class' | 'interface' | 'component' | 'export'; name: string; line: number }[];
+  imports: string[];
+  truncated?: boolean;
+  error?: string;
+}
+
+export interface DiffLine {
+  type: 'context' | 'add' | 'remove';
+  oldLineNumber?: number;
+  newLineNumber?: number;
+  text: string;
+}
+
+export interface CodeDiffPreview {
+  ok: boolean;
+  filePath: string;
+  relativePath: string;
+  existed: boolean;
+  overwriteWarning: boolean;
+  addedLines: number;
+  removedLines: number;
+  unifiedDiff: string;
+  lines: DiffLine[];
+  validationWarnings: string[];
+  originalHash: string;
+  proposedContent: string;
+  originalContent: string;
+  error?: string;
+}
+
+export interface AppliedPatchBackup {
+  patchId: string;
+  filePath: string;
+  relativePath: string;
+  existedBefore: boolean;
+  backupFilePath: string;
+  appliedAt: number;
+  rolledBack: boolean;
+  rolledBackAt?: number;
+  summary: string;
+}
+
+export type DevCommandTool = 'npm' | 'npx' | 'node' | 'python' | 'pytest' | 'tsc' | 'git';
+
+export interface DevTestInterpretation {
+  framework: string;
+  passed: number;
+  failed: number;
+  skipped: number;
+  total: number;
+  durationText?: string;
+  failures: { testName: string; file?: string; message: string }[];
+  summary: string;
+}
+
+export interface DevCommandResult {
+  ok: boolean;
+  taskId: string;
+  commandDisplay: string;
+  cwd: string;
+  exitCode: number | null;
+  signal?: string | null;
+  cancelled?: boolean;
+  timedOut?: boolean;
+  truncatedOutput?: boolean;
+  stdout: string;
+  stderr: string;
+  durationMs: number;
+  testReport?: DevTestInterpretation;
+  error?: string;
+}
+
+export interface DevToolAvailability {
+  tool: string;
+  available: boolean;
+  version?: string;
+}
+
+export interface ProposedPatchEntry {
+  id: string;
+  projectPath: string;
+  filePath: string;
+  relativePath: string;
+  title: string;
+  explanation: string;
+  proposedContent: string;
+  overwrite: boolean;
+  preview: CodeDiffPreview;
+  status: 'PENDING_REVIEW' | 'APPLIED' | 'REJECTED' | 'ROLLED_BACK';
+  appliedPatchId?: string;
+  createdAt: number;
+}
+
+export interface DevPlanStep {
+  id: string;
+  title: string;
+  description: string;
+  kind: 'INSPECT' | 'ANALYZE' | 'PLAN' | 'PROPOSE_PATCH' | 'APPLY_PATCH' | 'RUN_TESTS' | 'VERIFY';
+  dependsOn?: string[];
+  requiresApproval: boolean;
+  status: 'PENDING' | 'RUNNING' | 'AWAITING_APPROVAL' | 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'SKIPPED';
+  outputSummary?: string;
+  error?: string;
+}
+
+export interface DevTaskPlan {
+  id: string;
+  objective: string;
+  projectPath: string;
+  status: 'DRAFT' | 'RUNNING' | 'AWAITING_APPROVAL' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
+  progressPercent: number;
+  steps: DevPlanStep[];
+  proposedPatchIds: string[];
+  createdAt: number;
+  completedAt?: number;
+  verificationSummary?: string;
+}
+
+export interface DevAuditEntry {
+  id: string;
+  category: 'INSPECT' | 'READ' | 'AI_CONTEXT' | 'GENERATE' | 'DEBUG' | 'PATCH' | 'ROLLBACK' | 'COMMAND' | 'DOCS' | 'PLANNER';
+  target: string;
+  summary: string;
+  ok: boolean;
+  timestamp: number;
+  error?: string;
+}
+
 

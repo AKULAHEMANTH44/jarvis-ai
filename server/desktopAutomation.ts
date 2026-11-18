@@ -33,8 +33,10 @@ export interface FolderItemEntry {
 export interface WebPageInspectionResult {
   ok: boolean;
   url: string;
+  status?: number;
   title?: string;
   description?: string;
+  previewText?: string;
   error?: string;
 }
 
@@ -308,6 +310,8 @@ export class DesktopAutomationService {
   private auditLog: DesktopAuditEntry[] = [];
   private policy: ServerPermissionPolicy = createDefaultServerPolicy();
   private policyFilePath: string | null = null;
+  private inFlightLaunches: Set<string> = new Set();
+  private lastLaunchedAt: Map<string, number> = new Map();
 
   constructor(options?: { policyFilePath?: string }) {
     if (options?.policyFilePath) {
@@ -433,11 +437,27 @@ export class DesktopAutomationService {
     return { ok: true };
   }
 
+  private resolveRealIfExists(targetPath: string): string {
+    const resolved = path.resolve(targetPath);
+    try {
+      if (fs.existsSync(resolved)) {
+        return fs.realpathSync(resolved);
+      }
+      const parent = path.dirname(resolved);
+      if (fs.existsSync(parent)) {
+        return path.join(fs.realpathSync(parent), path.basename(resolved));
+      }
+    } catch {
+      // Fall back to lexical resolution if stat/realpath fails
+    }
+    return resolved;
+  }
+
   public isPathWithinApprovedRoots(resolvedPath: string): boolean {
     if (this.approvedRoots.size === 0) return !this.requireApprovedRoot;
-    const normalizedTarget = path.resolve(resolvedPath);
+    const normalizedTarget = this.resolveRealIfExists(resolvedPath);
     for (const root of this.approvedRoots) {
-      const normalizedRoot = path.resolve(root);
+      const normalizedRoot = this.resolveRealIfExists(root);
       if (normalizedTarget === normalizedRoot) return true;
       const rootWithSep = normalizedRoot.endsWith(path.sep) ? normalizedRoot : `${normalizedRoot}${path.sep}`;
       if (normalizedTarget.startsWith(rootWithSep)) return true;
@@ -467,7 +487,7 @@ export class DesktopAutomationService {
   /**
    * Safe path validation:
    * 1. Rejects path traversal sequences (including URL-encoded '%2e%2e' and '..') & null bytes.
-   * 2. Checks absolute path resolution.
+   * 2. Resolves absolute path and inspects realpath to prevent symbolic-link escapes.
    * 3. Verifies path falls inside allowedRoot / approvedRoots when configured.
    */
   public validatePath(
@@ -502,20 +522,21 @@ export class DesktopAutomationService {
 
     try {
       const resolved = path.resolve(trimmed);
+      const effectiveReal = this.resolveRealIfExists(resolved);
 
       if (opts.allowedRoot) {
-        const resolvedRoot = path.resolve(opts.allowedRoot);
+        const resolvedRoot = this.resolveRealIfExists(opts.allowedRoot);
         const rootWithSep = resolvedRoot.endsWith(path.sep) ? resolvedRoot : `${resolvedRoot}${path.sep}`;
-        if (resolved !== resolvedRoot && !resolved.startsWith(rootWithSep)) {
+        if (effectiveReal !== resolvedRoot && !effectiveReal.startsWith(rootWithSep)) {
           return {
             valid: false,
-            error: `Path "${trimmed}" is outside the authorized root directory ("${resolvedRoot}").`
+            error: `Path "${trimmed}" is outside the authorized root directory ("${resolvedRoot}") or escapes via symlink.`
           };
         }
       }
 
       if (!opts.skipApprovedCheck && (this.requireApprovedRoot || this.approvedRoots.size > 0)) {
-        if (!this.isPathWithinApprovedRoots(resolved)) {
+        if (!this.isPathWithinApprovedRoots(effectiveReal)) {
           return {
             valid: false,
             error: `Path "${resolved}" is not within user-selected or approved desktop paths.`
@@ -523,7 +544,7 @@ export class DesktopAutomationService {
         }
       }
 
-      return { valid: true, normalizedPath: resolved };
+      return { valid: true, normalizedPath: effectiveReal };
     } catch (err: unknown) {
       return {
         valid: false,
@@ -649,6 +670,19 @@ export class DesktopAutomationService {
       return appDisabledRes;
     }
 
+    if (this.inFlightLaunches.has(appEntry.id)) {
+      const busyRes: DesktopExecutionResult = {
+        ok: false,
+        action: 'APPLICATION_LAUNCH',
+        target: appEntry.displayName,
+        verified: false,
+        summary: `${appEntry.displayName} launch is already in progress. Duplicate launch prevented.`,
+        error: 'CONCURRENT_LAUNCH_IN_PROGRESS'
+      };
+      this.recordAudit({ action: 'APPLICATION_LAUNCH', target: appEntry.displayName, ok: false, error: busyRes.error });
+      return busyRes;
+    }
+
     const sanitizedArgs = Array.isArray(customArgs)
       ? customArgs.filter((arg) => typeof arg === 'string' && !DANGEROUS_ARG_PATTERN.test(arg.trim()))
       : [];
@@ -661,32 +695,38 @@ export class DesktopAutomationService {
       ? appEntry.macExecutable || 'open'
       : appEntry.linuxExecutable || 'xdg-open';
 
-    const spawnOut = await this.spawnDetachedSafe(executable, sanitizedArgs);
-    if (!spawnOut.ok) {
-      const failRes: DesktopExecutionResult = {
-        ok: false,
+    this.inFlightLaunches.add(appEntry.id);
+    try {
+      const spawnOut = await this.spawnDetachedSafe(executable, sanitizedArgs);
+      if (!spawnOut.ok) {
+        const failRes: DesktopExecutionResult = {
+          ok: false,
+          action: 'APPLICATION_LAUNCH',
+          target: appEntry.displayName,
+          verified: false,
+          summary: `Failed to launch ${appEntry.displayName}: ${spawnOut.error}`,
+          error: spawnOut.error,
+          details: { applicationId: appEntry.id, executable }
+        };
+        this.recordAudit({ action: 'APPLICATION_LAUNCH', target: appEntry.displayName, ok: false, error: spawnOut.error });
+        return failRes;
+      }
+
+      this.lastLaunchedAt.set(appEntry.id, Date.now());
+      const okRes: DesktopExecutionResult = {
+        ok: true,
         action: 'APPLICATION_LAUNCH',
         target: appEntry.displayName,
-        verified: false,
-        summary: `Failed to launch ${appEntry.displayName}: ${spawnOut.error}`,
-        error: spawnOut.error,
+        verified: true,
+        pid: spawnOut.pid,
+        summary: `Successfully launched ${appEntry.displayName} (PID: ${spawnOut.pid || 'detached'}).`,
         details: { applicationId: appEntry.id, executable }
       };
-      this.recordAudit({ action: 'APPLICATION_LAUNCH', target: appEntry.displayName, ok: false, error: spawnOut.error });
-      return failRes;
+      this.recordAudit({ action: 'APPLICATION_LAUNCH', target: appEntry.displayName, ok: true, pid: spawnOut.pid });
+      return okRes;
+    } finally {
+      this.inFlightLaunches.delete(appEntry.id);
     }
-
-    const okRes: DesktopExecutionResult = {
-      ok: true,
-      action: 'APPLICATION_LAUNCH',
-      target: appEntry.displayName,
-      verified: true,
-      pid: spawnOut.pid,
-      summary: `Successfully launched ${appEntry.displayName} (PID: ${spawnOut.pid || 'detached'}).`,
-      details: { applicationId: appEntry.id, executable }
-    };
-    this.recordAudit({ action: 'APPLICATION_LAUNCH', target: appEntry.displayName, ok: true, pid: spawnOut.pid });
-    return okRes;
   }
 
   /**
@@ -1196,7 +1236,8 @@ export class DesktopAutomationService {
         ...app,
         available,
         status: available ? 'AVAILABLE' : 'NOT_INSTALLED',
-        resolvedPath
+        resolvedPath,
+        lastLaunched: this.lastLaunchedAt.get(app.id)
       });
     }
 
@@ -1212,6 +1253,9 @@ export class DesktopAutomationService {
     items: FolderItemEntry[];
     error?: string;
   } {
+    if (this.policy.capabilities.FOLDER_ACCESS.decision === 'DENIED') {
+      return { ok: false, folder: folderPath, items: [], error: 'PERMISSION_DENIED_BY_POLICY: Folder Access is disabled.' };
+    }
     const val = this.validatePath(folderPath);
     if (!val.valid || !val.normalizedPath) {
       return { ok: false, folder: folderPath, items: [], error: val.error };
@@ -1259,9 +1303,12 @@ export class DesktopAutomationService {
     sizeBytes?: number;
     error?: string;
   } {
+    if (this.policy.capabilities.FOLDER_ACCESS.decision === 'DENIED') {
+      return { ok: false, path: filePath, name: path.basename(String(filePath || '')), error: 'PERMISSION_DENIED_BY_POLICY: Folder Access is disabled.' };
+    }
     const val = this.validatePath(filePath);
     if (!val.valid || !val.normalizedPath) {
-      return { ok: false, path: filePath, name: path.basename(filePath), error: val.error };
+      return { ok: false, path: filePath, name: path.basename(String(filePath || '')), error: val.error };
     }
 
     const target = val.normalizedPath;
@@ -1312,9 +1359,12 @@ export class DesktopAutomationService {
     exists?: boolean;
     error?: string;
   } {
+    if (this.policy.capabilities.FOLDER_ACCESS.decision === 'DENIED') {
+      return { ok: false, path: targetFilePath, name: path.basename(String(targetFilePath || '')), error: 'PERMISSION_DENIED_BY_POLICY: Folder Access is disabled.' };
+    }
     const val = this.validatePath(targetFilePath);
     if (!val.valid || !val.normalizedPath) {
-      return { ok: false, path: targetFilePath, name: path.basename(targetFilePath), error: val.error };
+      return { ok: false, path: targetFilePath, name: path.basename(String(targetFilePath || '')), error: val.error };
     }
 
     const target = val.normalizedPath;
@@ -1370,6 +1420,9 @@ export class DesktopAutomationService {
    * Safe web page preview/inspection with SSRF protection
    */
   public async inspectWebPage(rawUrl: string): Promise<WebPageInspectionResult> {
+    if (this.policy.capabilities.BROWSER_ACCESS.decision === 'DENIED') {
+      return { ok: false, url: rawUrl, error: 'PERMISSION_DENIED_BY_POLICY: Browser Access is disabled.' };
+    }
     let parsed: URL;
     try {
       parsed = new URL(String(rawUrl || '').trim());
@@ -1381,11 +1434,17 @@ export class DesktopAutomationService {
       return { ok: false, url: rawUrl, error: 'Only HTTP/HTTPS URLs can be inspected.' };
     }
 
+    if (parsed.username || parsed.password) {
+      return { ok: false, url: parsed.origin, error: 'URLs containing embedded credentials are blocked.' };
+    }
+
     const host = parsed.hostname.toLowerCase();
     if (
       host === 'localhost' ||
       host === '127.0.0.1' ||
       host === '0.0.0.0' ||
+      host === '::1' ||
+      host === '[::1]' ||
       host.endsWith('.local') ||
       /^10\./.test(host) ||
       /^192\.168\./.test(host) ||
@@ -1415,11 +1474,23 @@ export class DesktopAutomationService {
       const metaDescMatch = html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']+)["']/i);
       const description = metaDescMatch ? metaDescMatch[1].trim() : undefined;
 
+      const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+      const rawBody = bodyMatch ? bodyMatch[1] : html;
+      const stripped = rawBody
+        .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+        .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      const previewText = stripped ? stripped.slice(0, 280) : undefined;
+
       return {
         ok: true,
         url: parsed.toString(),
+        status: res.status,
         title,
-        description
+        description,
+        previewText
       };
     } catch (err: unknown) {
       return {

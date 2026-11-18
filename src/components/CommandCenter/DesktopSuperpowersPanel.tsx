@@ -26,7 +26,7 @@ import {
   History,
   Info
 } from 'lucide-react';
-import { desktopBridge, DiscoveredApplicationInfo, FolderItemEntry, WebPageInspectionResult } from '../../services/desktopBridge';
+import { desktopBridge, DiscoveredAppInfo, FolderItemEntry, WebPageInspectionResult } from '../../services/desktopBridge';
 import { permissionManager } from '../../services/permissionManager';
 import { permissionPolicy } from '../../services/permissionPolicy';
 import { musicService } from '../../services/musicService';
@@ -63,7 +63,7 @@ export const DesktopSuperpowersPanel: React.FC<DesktopSuperpowersPanelProps> = (
   const [activeSubTab, setActiveSubTab] = useState<DesktopSubTab>(pendingPermission ? 'APPROVAL' : 'APPS');
 
   // Application Intelligence state
-  const [apps, setApps] = useState<DiscoveredApplicationInfo[]>([]);
+  const [apps, setApps] = useState<DiscoveredAppInfo[]>([]);
   const [appSearch, setAppSearch] = useState('');
   const [isRefreshingApps, setIsRefreshingApps] = useState(false);
   const [appLaunchStatus, setAppLaunchStatus] = useState<Record<string, string>>({});
@@ -144,8 +144,25 @@ export const DesktopSuperpowersPanel: React.FC<DesktopSuperpowersPanelProps> = (
 
   const handleLaunchApp = async (appId: string) => {
     audioService.playChirp(1200);
+    const evalRes = permissionPolicy.evaluateActionPolicy({ capability: 'APPLICATION_ACCESS', appId });
+    if (evalRes.outcome === 'BLOCKED') {
+      setAppLaunchStatus((prev) => ({ ...prev, [appId]: evalRes.reason }));
+      audioService.playChirp(600);
+      return;
+    }
+
     setAppLaunchStatus((prev) => ({ ...prev, [appId]: 'Launching...' }));
-    const res = await desktopBridge.launchApplication(appId);
+    const perm = permissionManager.createRequest({
+      category: 'APPLICATION_LAUNCH',
+      requestedAction: `Launch ${appId}`,
+      target: appId,
+      reason: 'User triggered launch from Desktop Superpowers panel',
+      riskLevel: 'LOW',
+      requestedScope: `Single-use launch of ${appId}`
+    });
+    permissionManager.approveOnce(perm.id);
+
+    const res = await desktopBridge.launchApplication(appId, perm.id);
     if (res.ok) {
       setAppLaunchStatus((prev) => ({ ...prev, [appId]: 'Launched' }));
       audioService.playActivationWhoosh();
@@ -165,10 +182,12 @@ export const DesktopSuperpowersPanel: React.FC<DesktopSuperpowersPanelProps> = (
   const handlePickFolder = async () => {
     audioService.playChirp(1100);
     const res = await desktopBridge.pickFolder();
-    if (res.ok && res.folder) {
+    if (!res.cancelled && res.folder) {
       setSelectedFolder(res.folder.path);
       setWfFolderName(res.folder.path);
       loadFolderContents(res.folder.path);
+    } else if (res.error) {
+      setFileOperationMsg(res.error);
     }
   };
 
@@ -197,7 +216,7 @@ export const DesktopSuperpowersPanel: React.FC<DesktopSuperpowersPanelProps> = (
       setSelectedFileContent({
         name: res.name || filePath,
         content: res.content,
-        lines: res.lineCount || res.content.split('\n').length,
+        lines: res.content.split(/\r?\n/).length,
         size: res.sizeBytes || res.content.length
       });
       setFileOperationMsg(null);
@@ -216,6 +235,7 @@ export const DesktopSuperpowersPanel: React.FC<DesktopSuperpowersPanelProps> = (
     }
 
     const fullPath = `${selectedFolder.replace(/[\\/]+$/, '')}/${newFileName.trim()}`;
+    desktopBridge.registerApprovedPath(fullPath);
     audioService.playChirp(1300);
 
     // Request permission first
@@ -228,8 +248,7 @@ export const DesktopSuperpowersPanel: React.FC<DesktopSuperpowersPanelProps> = (
       requestedScope: `Write new file to "${fullPath}"`
     });
 
-    // Auto-approve once since user explicitly submitted the form in the UI
-    permissionManager.approveRequest(perm.id, 'ONCE');
+    permissionManager.approveOnce(perm.id);
 
     const res = await desktopBridge.createApprovedDesktopFile(fullPath, newFileContent, newFileOverwrite, perm.id);
     if (res.ok) {
@@ -247,8 +266,25 @@ export const DesktopSuperpowersPanel: React.FC<DesktopSuperpowersPanelProps> = (
 
   const handleOpenBrowser = async (url: string) => {
     audioService.playChirp(1200);
+    const evalRes = permissionPolicy.evaluateActionPolicy({ capability: 'BROWSER_ACCESS' });
+    if (evalRes.outcome === 'BLOCKED') {
+      setBrowserStatusMsg(evalRes.reason);
+      audioService.playChirp(600);
+      return;
+    }
+
     setBrowserStatusMsg('Opening browser...');
-    const res = await desktopBridge.openBrowser(url);
+    const perm = permissionManager.createRequest({
+      category: 'BROWSER_ACCESS',
+      requestedAction: `Open browser to ${url}`,
+      target: url,
+      reason: 'User opened URL via Browser Assistant',
+      riskLevel: 'LOW',
+      requestedScope: `Open validated URL ${url}`
+    });
+    permissionManager.approveOnce(perm.id);
+
+    const res = await desktopBridge.openBrowser(url, perm.id);
     if (res.ok) {
       setBrowserStatusMsg('Browser opened successfully.');
     } else {
@@ -287,8 +323,8 @@ export const DesktopSuperpowersPanel: React.FC<DesktopSuperpowersPanelProps> = (
 
   const filteredApps = apps.filter(
     (a) =>
-      a.name.toLowerCase().includes(appSearch.toLowerCase()) ||
-      a.category.toLowerCase().includes(appSearch.toLowerCase())
+      a.displayName.toLowerCase().includes(appSearch.toLowerCase()) ||
+      (a.category || 'APP').toLowerCase().includes(appSearch.toLowerCase())
   );
 
   const filteredFolderItems = folderItems.filter((i) =>
@@ -397,7 +433,7 @@ export const DesktopSuperpowersPanel: React.FC<DesktopSuperpowersPanelProps> = (
                 >
                   <div className="space-y-1.5">
                     <div className="flex items-center justify-between">
-                      <span className="font-orbitron font-bold text-xs text-white truncate">{app.name}</span>
+                      <span className="font-orbitron font-bold text-xs text-white truncate">{app.displayName}</span>
                       <span
                         className={`px-1.5 py-0.5 rounded text-[9px] font-mono uppercase ${
                           app.available
@@ -409,7 +445,7 @@ export const DesktopSuperpowersPanel: React.FC<DesktopSuperpowersPanelProps> = (
                       </span>
                     </div>
                     <div className="flex items-center gap-2 text-[10px] text-cyan-300/60">
-                      <span>Category: {app.category}</span>
+                      <span>Category: {app.category || 'APP'}</span>
                       <span>•</span>
                       <span>Target: {app.id}</span>
                     </div>
@@ -420,7 +456,7 @@ export const DesktopSuperpowersPanel: React.FC<DesktopSuperpowersPanelProps> = (
                       {appLaunchStatus[app.id] ? (
                         <span className="text-amber-300">{appLaunchStatus[app.id]}</span>
                       ) : (
-                        app.isApproved ? 'Approved by Policy' : 'Requires Approval'
+                        permissionPolicy.isAppAllowed(app.id) ? 'Approved by Policy' : 'Disabled in Policy'
                       )}
                     </span>
                     <button
@@ -624,7 +660,17 @@ export const DesktopSuperpowersPanel: React.FC<DesktopSuperpowersPanelProps> = (
                               setSelectedFolder(item.path);
                               loadFolderContents(item.path);
                             } else {
-                              desktopBridge.openFile(item.path);
+                              desktopBridge.registerApprovedPath(item.path);
+                              const perm = permissionManager.createRequest({
+                                category: 'FILE_ACCESS',
+                                requestedAction: `Open file "${item.name}"`,
+                                target: item.path,
+                                reason: 'User opened file from Desktop Explorer',
+                                riskLevel: 'LOW',
+                                requestedScope: `Single-use open access to ${item.path}`
+                              });
+                              permissionManager.approveOnce(perm.id);
+                              void desktopBridge.openFile(item.path, perm.id);
                             }
                           }}
                           className="px-2 py-0.5 rounded bg-cyan-500/20 border border-cyan-400/50 text-[10px] text-white hover:bg-cyan-500/30"
@@ -842,7 +888,16 @@ export const DesktopSuperpowersPanel: React.FC<DesktopSuperpowersPanelProps> = (
                     type="button"
                     onClick={() => {
                       audioService.playActivationWhoosh();
-                      desktopBridge.launchMusicApp('SPOTIFY');
+                      const perm = permissionManager.createRequest({
+                        category: 'MUSIC_CONTROL',
+                        requestedAction: 'Launch Spotify',
+                        target: 'SPOTIFY',
+                        reason: 'User clicked Launch Spotify in Media Control',
+                        riskLevel: 'LOW',
+                        requestedScope: 'Single-use Spotify launch'
+                      });
+                      permissionManager.approveOnce(perm.id);
+                      void desktopBridge.launchMusic('SPOTIFY', perm.id);
                     }}
                     className="px-3 py-1 rounded-lg bg-emerald-950/80 border border-emerald-500/40 text-emerald-200 hover:text-white text-xs font-orbitron font-bold"
                   >
@@ -851,7 +906,7 @@ export const DesktopSuperpowersPanel: React.FC<DesktopSuperpowersPanelProps> = (
                   <button
                     type="button"
                     onClick={() => {
-                      desktopBridge.openBrowser('https://open.spotify.com');
+                      void handleOpenBrowser('https://open.spotify.com');
                     }}
                     className="px-3 py-1 rounded-lg bg-cyan-950/80 border border-cyan-500/40 text-cyan-200 hover:text-white text-xs font-orbitron"
                   >
@@ -1164,15 +1219,15 @@ export const DesktopSuperpowersPanel: React.FC<DesktopSuperpowersPanelProps> = (
                       className="p-3 rounded-lg bg-black/40 border border-cyan-500/20 space-y-1 text-xs"
                     >
                       <div className="flex items-center justify-between">
-                        <span className="font-orbitron font-bold text-cyan-300">{rec.name}</span>
+                        <span className="font-orbitron font-bold text-cyan-300">{rec.toolName}</span>
                         <span
                           className={`px-1.5 py-0.5 rounded text-[9px] font-mono uppercase ${
-                            rec.ok
+                            rec.status === 'EXECUTED'
                               ? 'bg-emerald-950/80 border border-emerald-500/40 text-emerald-300'
                               : 'bg-red-950/80 border border-red-500/30 text-red-300'
                           }`}
                         >
-                          {rec.ok ? 'SUCCESS' : 'FAILED'}
+                          {rec.status}
                         </span>
                       </div>
                       <p className="text-cyan-100/90 text-[11px] leading-snug">{rec.summary}</p>

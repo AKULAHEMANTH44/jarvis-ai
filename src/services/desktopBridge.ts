@@ -1,4 +1,15 @@
-import { DesktopPermissionRequest, SelectedFolderMetadata, SystemStatusTelemetry } from '../types/assistant';
+import {
+  AppliedPatchBackup,
+  CodeDiffPreview,
+  DesktopPermissionRequest,
+  DevCommandResult,
+  DevCommandTool,
+  DevToolAvailability,
+  ProjectWorkspaceReport,
+  SelectedFolderMetadata,
+  SourceFileAnalysis,
+  SystemStatusTelemetry
+} from '../types/assistant';
 import { audioService } from './soundFx';
 import { permissionManager } from './permissionManager';
 import { permissionPolicy } from './permissionPolicy';
@@ -40,8 +51,10 @@ export interface FolderItemEntry {
 export interface WebPageInspectionResult {
   ok: boolean;
   url: string;
+  status?: number;
   title?: string;
   description?: string;
+  previewText?: string;
   error?: string;
 }
 
@@ -1069,6 +1082,486 @@ export class DesktopBridgeService {
       };
     }
   }
+
+  // =========================================================================
+  // Batch 5 — AI Development Studio Bridge Methods
+  // =========================================================================
+
+  public async inspectDevProject(projectPath: string): Promise<ProjectWorkspaceReport> {
+    const clean = projectPath.trim();
+    if (!this.isPathApproved(clean)) {
+      return {
+        ok: false,
+        projectPath: clean,
+        projectName: clean.split(/[\\/]/).pop() || clean,
+        inspectedAt: Date.now(),
+        languages: [],
+        frameworks: [],
+        packageManagers: [],
+        testFrameworks: [],
+        configFiles: [],
+        entryPoints: [],
+        testFiles: [],
+        scripts: {},
+        dependencies: [],
+        files: [],
+        directories: [],
+        totalFilesScanned: 0,
+        totalBytes: 0,
+        truncated: false,
+        excludedSecretFiles: [],
+        error: `Project path "${clean}" is outside approved folders.`
+      };
+    }
+
+    if (this.isElectron()) {
+      const bridge = (window as unknown as {
+        jarvisDesktop: { devInspectProject?: (p: string) => Promise<ProjectWorkspaceReport> };
+      }).jarvisDesktop;
+      if (bridge?.devInspectProject) {
+        const res = await bridge.devInspectProject(clean);
+        this.recordActionAudit('DEV_PROJECT_INSPECT', clean, res.ok, res.ok, res.error);
+        return res;
+      }
+    }
+
+    try {
+      const res = await fetch('/api/dev/project/inspect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectPath: clean })
+      });
+      const data = (await res.json()) as ProjectWorkspaceReport;
+      this.recordActionAudit('DEV_PROJECT_INSPECT', clean, data.ok, data.ok, data.error);
+      return data;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        ok: false,
+        projectPath: clean,
+        projectName: clean.split(/[\\/]/).pop() || clean,
+        inspectedAt: Date.now(),
+        languages: [],
+        frameworks: [],
+        packageManagers: [],
+        testFrameworks: [],
+        configFiles: [],
+        entryPoints: [],
+        testFiles: [],
+        scripts: {},
+        dependencies: [],
+        files: [],
+        directories: [],
+        totalFilesScanned: 0,
+        totalBytes: 0,
+        truncated: false,
+        excludedSecretFiles: [],
+        error: msg
+      };
+    }
+  }
+
+  public async readDevSourceFile(projectPath: string, filePath: string): Promise<SourceFileAnalysis> {
+    const cleanProject = projectPath.trim();
+    const cleanFile = filePath.trim();
+    if (!this.isPathApproved(cleanProject)) {
+      return {
+        ok: false,
+        path: cleanFile,
+        relativePath: cleanFile,
+        name: cleanFile.split(/[\\/]/).pop() || cleanFile,
+        language: 'Unknown',
+        lineCount: 0,
+        sizeBytes: 0,
+        symbols: [],
+        imports: [],
+        error: `Project path "${cleanProject}" is outside approved folders.`
+      };
+    }
+
+    if (this.isElectron()) {
+      const bridge = (window as unknown as {
+        jarvisDesktop: { devReadSource?: (p: string, f: string) => Promise<SourceFileAnalysis> };
+      }).jarvisDesktop;
+      if (bridge?.devReadSource) {
+        return bridge.devReadSource(cleanProject, cleanFile);
+      }
+    }
+
+    try {
+      const res = await fetch('/api/dev/source/read', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectPath: cleanProject, filePath: cleanFile })
+      });
+      return (await res.json()) as SourceFileAnalysis;
+    } catch (err: unknown) {
+      return {
+        ok: false,
+        path: cleanFile,
+        relativePath: cleanFile,
+        name: cleanFile.split(/[\\/]/).pop() || cleanFile,
+        language: 'Unknown',
+        lineCount: 0,
+        sizeBytes: 0,
+        symbols: [],
+        imports: [],
+        error: err instanceof Error ? err.message : String(err)
+      };
+    }
+  }
+
+  public async previewDevPatch(
+    projectPath: string,
+    filePath: string,
+    proposedContent: string
+  ): Promise<CodeDiffPreview> {
+    const cleanProject = projectPath.trim();
+    const cleanFile = filePath.trim();
+    if (!this.isPathApproved(cleanProject)) {
+      return {
+        ok: false,
+        filePath: cleanFile,
+        relativePath: cleanFile,
+        existed: false,
+        overwriteWarning: false,
+        addedLines: 0,
+        removedLines: 0,
+        unifiedDiff: '',
+        lines: [],
+        validationWarnings: [],
+        originalHash: '',
+        proposedContent: '',
+        originalContent: '',
+        error: `Project path "${cleanProject}" is outside approved folders.`
+      };
+    }
+
+    try {
+      const res = await fetch('/api/dev/patch/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectPath: cleanProject, filePath: cleanFile, proposedContent })
+      });
+      return (await res.json()) as CodeDiffPreview;
+    } catch (err: unknown) {
+      return {
+        ok: false,
+        filePath: cleanFile,
+        relativePath: cleanFile,
+        existed: false,
+        overwriteWarning: false,
+        addedLines: 0,
+        removedLines: 0,
+        unifiedDiff: '',
+        lines: [],
+        validationWarnings: [],
+        originalHash: '',
+        proposedContent: '',
+        originalContent: '',
+        error: err instanceof Error ? err.message : String(err)
+      };
+    }
+  }
+
+  public async applyDevPatch(params: {
+    projectPath: string;
+    filePath: string;
+    proposedContent: string;
+    overwrite?: boolean;
+    expectedOriginalHash?: string;
+    summary?: string;
+    permissionId: string;
+  }): Promise<{
+    ok: boolean;
+    patchId?: string;
+    filePath: string;
+    relativePath?: string;
+    backupPath?: string;
+    existedBefore?: boolean;
+    error?: string;
+  }> {
+    const cleanProject = params.projectPath.trim();
+    const cleanFile = params.filePath.trim();
+
+    if (!this.isPathApproved(cleanProject)) {
+      return {
+        ok: false,
+        filePath: cleanFile,
+        error: `Project path "${cleanProject}" is outside approved folders.`
+      };
+    }
+
+    const auth = permissionManager.beginAuthorizedExecution(params.permissionId, 'CODE_PATCH', cleanFile);
+    if (!auth.authorized) {
+      this.recordActionAudit('DEV_CODE_PATCH', cleanFile, false, false, auth.error);
+      return { ok: false, filePath: cleanFile, error: auth.error || 'PERMISSION_DENIED' };
+    }
+
+    try {
+      let data: {
+        ok: boolean;
+        patchId?: string;
+        filePath: string;
+        relativePath?: string;
+        backupPath?: string;
+        existedBefore?: boolean;
+        error?: string;
+      };
+
+      if (this.isElectron()) {
+        const bridge = (window as unknown as {
+          jarvisDesktop: {
+            devApplyPatch?: (p: Record<string, unknown>) => Promise<typeof data>;
+          };
+        }).jarvisDesktop;
+        if (bridge?.devApplyPatch) {
+          data = await bridge.devApplyPatch({
+            projectPath: cleanProject,
+            filePath: cleanFile,
+            proposedContent: params.proposedContent,
+            overwrite: Boolean(params.overwrite)
+          });
+        } else {
+          data = { ok: false, filePath: cleanFile, error: 'Electron devApplyPatch bridge unavailable.' };
+        }
+      } else {
+        const res = await fetch('/api/dev/patch/apply', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            projectPath: cleanProject,
+            filePath: cleanFile,
+            proposedContent: params.proposedContent,
+            overwrite: Boolean(params.overwrite),
+            expectedOriginalHash: params.expectedOriginalHash,
+            summary: params.summary
+          })
+        });
+        data = await res.json();
+      }
+
+      permissionManager.completeExecution(
+        params.permissionId,
+        data.ok,
+        data.ok ? `Applied code patch to "${data.relativePath || cleanFile}".` : data.error || 'Patch failed.',
+        data.error
+      );
+      this.recordActionAudit('DEV_CODE_PATCH', cleanFile, data.ok, data.ok, data.error);
+      return data;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      permissionManager.completeExecution(params.permissionId, false, msg, msg);
+      this.recordActionAudit('DEV_CODE_PATCH', cleanFile, false, false, msg);
+      return { ok: false, filePath: cleanFile, error: msg };
+    }
+  }
+
+  public async rollbackDevPatch(
+    patchId: string,
+    projectPath: string,
+    permissionId: string
+  ): Promise<{ ok: boolean; patchId: string; filePath?: string; restoredAction?: string; error?: string }> {
+    const cleanProject = projectPath.trim();
+    const auth = permissionManager.beginAuthorizedExecution(permissionId, 'CODE_PATCH', patchId);
+    if (!auth.authorized) {
+      return { ok: false, patchId, error: auth.error || 'PERMISSION_DENIED' };
+    }
+
+    try {
+      let data: { ok: boolean; patchId: string; filePath?: string; restoredAction?: string; error?: string };
+      if (this.isElectron()) {
+        const bridge = (window as unknown as {
+          jarvisDesktop: {
+            devRollbackPatch?: (id: string, p: string) => Promise<typeof data>;
+          };
+        }).jarvisDesktop;
+        if (bridge?.devRollbackPatch) {
+          data = await bridge.devRollbackPatch(patchId, cleanProject);
+        } else {
+          data = { ok: false, patchId, error: 'Electron devRollbackPatch bridge unavailable.' };
+        }
+      } else {
+        const res = await fetch('/api/dev/patch/rollback', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ patchId, projectPath: cleanProject })
+        });
+        data = await res.json();
+      }
+
+      permissionManager.completeExecution(
+        permissionId,
+        data.ok,
+        data.ok ? `Rolled back patch "${patchId}".` : data.error || 'Rollback failed.',
+        data.error
+      );
+      this.recordActionAudit('DEV_PATCH_ROLLBACK', patchId, data.ok, data.ok, data.error);
+      return data;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      permissionManager.completeExecution(permissionId, false, msg, msg);
+      return { ok: false, patchId, error: msg };
+    }
+  }
+
+  public async listDevPatchBackups(): Promise<AppliedPatchBackup[]> {
+    try {
+      const res = await fetch('/api/dev/patch/backups');
+      if (!res.ok) return [];
+      const data = (await res.json()) as { ok?: boolean; backups?: AppliedPatchBackup[] };
+      return Array.isArray(data.backups) ? data.backups : [];
+    } catch {
+      return [];
+    }
+  }
+
+  public async detectDevTools(): Promise<DevToolAvailability[]> {
+    try {
+      const res = await fetch('/api/dev/tools');
+      if (!res.ok) return [];
+      const data = (await res.json()) as { ok?: boolean; tools?: DevToolAvailability[] };
+      return Array.isArray(data.tools) ? data.tools : [];
+    } catch {
+      return [];
+    }
+  }
+
+  public async runDevCommand(params: {
+    projectPath: string;
+    tool: DevCommandTool;
+    args: string[];
+    permissionId: string;
+    timeoutMs?: number;
+    taskId?: string;
+  }): Promise<DevCommandResult> {
+    const cleanProject = params.projectPath.trim();
+    const displayCmd = `${params.tool}${params.args.length ? ' ' + params.args.join(' ') : ''}`;
+    const taskId = params.taskId || `devcmd-${Date.now().toString(36)}`;
+
+    if (!this.isPathApproved(cleanProject)) {
+      return {
+        ok: false,
+        taskId,
+        commandDisplay: displayCmd,
+        cwd: cleanProject,
+        exitCode: null,
+        stdout: '',
+        stderr: '',
+        durationMs: 0,
+        error: `Working directory "${cleanProject}" is outside approved folders.`
+      };
+    }
+
+    const auth = permissionManager.beginAuthorizedExecution(params.permissionId, 'DEV_COMMAND', displayCmd);
+    if (!auth.authorized) {
+      this.recordActionAudit('DEV_COMMAND', displayCmd, false, false, auth.error);
+      return {
+        ok: false,
+        taskId,
+        commandDisplay: displayCmd,
+        cwd: cleanProject,
+        exitCode: null,
+        stdout: '',
+        stderr: '',
+        durationMs: 0,
+        error: auth.error || 'PERMISSION_DENIED'
+      };
+    }
+
+    try {
+      let data: DevCommandResult;
+      if (this.isElectron()) {
+        const bridge = (window as unknown as {
+          jarvisDesktop: {
+            devRunCommand?: (payload: Record<string, unknown>) => Promise<DevCommandResult>;
+          };
+        }).jarvisDesktop;
+        if (bridge?.devRunCommand) {
+          data = await bridge.devRunCommand({
+            projectPath: cleanProject,
+            tool: params.tool,
+            args: params.args,
+            taskId
+          });
+        } else {
+          data = {
+            ok: false,
+            taskId,
+            commandDisplay: displayCmd,
+            cwd: cleanProject,
+            exitCode: null,
+            stdout: '',
+            stderr: '',
+            durationMs: 0,
+            error: 'Electron devRunCommand bridge unavailable.'
+          };
+        }
+      } else {
+        const res = await fetch('/api/dev/command/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            projectPath: cleanProject,
+            tool: params.tool,
+            args: params.args,
+            timeoutMs: params.timeoutMs,
+            taskId
+          })
+        });
+        data = (await res.json()) as DevCommandResult;
+      }
+
+      permissionManager.completeExecution(
+        params.permissionId,
+        data.ok,
+        data.ok ? `Executed "${displayCmd}" (exit 0).` : data.error || `Command exited with code ${data.exitCode}.`,
+        data.error
+      );
+      this.recordActionAudit('DEV_COMMAND', displayCmd, data.ok, data.ok, data.error);
+      return data;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      permissionManager.completeExecution(params.permissionId, false, msg, msg);
+      this.recordActionAudit('DEV_COMMAND', displayCmd, false, false, msg);
+      return {
+        ok: false,
+        taskId,
+        commandDisplay: displayCmd,
+        cwd: cleanProject,
+        exitCode: null,
+        stdout: '',
+        stderr: '',
+        durationMs: 0,
+        error: msg
+      };
+    }
+  }
+
+  public async cancelDevCommand(taskId: string): Promise<boolean> {
+    if (this.isElectron()) {
+      const bridge = (window as unknown as {
+        jarvisDesktop: { devCancelCommand?: (id: string) => Promise<{ ok: boolean }> };
+      }).jarvisDesktop;
+      if (bridge?.devCancelCommand) {
+        const res = await bridge.devCancelCommand(taskId);
+        return Boolean(res.ok);
+      }
+    }
+
+    try {
+      const res = await fetch('/api/dev/command/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ taskId })
+      });
+      const data = (await res.json()) as { ok?: boolean };
+      return Boolean(data.ok);
+    } catch {
+      return false;
+    }
+  }
+
 
   // File Read via Native File System Access API
   public async readAuthorizedFile(): Promise<{ name: string; content: string } | null> {

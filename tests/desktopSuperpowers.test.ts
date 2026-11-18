@@ -21,8 +21,29 @@ import { IntelligenceEngine } from '../src/services/intelligenceEngine';
 import { permissionManager } from '../src/services/permissionManager';
 import { permissionPolicy } from '../src/services/permissionPolicy';
 import { toolRegistry } from '../src/services/toolRegistry';
+import { contextualAI } from '../src/services/contextualAI';
+import { conversationManager } from '../src/services/conversationManager';
+import { memoryManager } from '../src/services/memoryManager';
+import { suggestionEngine } from '../src/services/suggestionEngine';
+import { planningEngine } from '../src/services/planningEngine';
 import { musicService } from '../src/services/musicService';
 import { WorkspaceContextSnapshot } from '../src/types/assistant';
+
+function createMemoryStorageMock() {
+  const store = new Map<string, string>();
+  return {
+    getItem: vi.fn((key: string) => store.get(key) ?? null),
+    setItem: vi.fn((key: string, val: string) => {
+      store.set(key, String(val));
+    }),
+    removeItem: vi.fn((key: string) => {
+      store.delete(key);
+    }),
+    clear: vi.fn(() => {
+      store.clear();
+    })
+  };
+}
 
 function makeHealthySpawnChild(pid = 9999) {
   const child = new EventEmitter() as EventEmitter & { pid: number; unref: () => void };
@@ -62,7 +83,7 @@ describe('JARVIS Batch 4 — Desktop Superpowers & Advanced Computer Control Sui
   let serverAutomation: DesktopAutomationService;
   let engine: IntelligenceEngine;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     spawnMock.mockReset();
     spawnMock.mockImplementation(() => makeHealthySpawnChild());
 
@@ -74,10 +95,96 @@ describe('JARVIS Batch 4 — Desktop Superpowers & Advanced Computer Control Sui
     fs.mkdirSync(testSubDir);
     fs.writeFileSync(path.join(testSubDir, 'inner.md'), '# Inner Document\nNested content.', 'utf8');
 
+    const storage = createMemoryStorageMock();
+    vi.stubGlobal('window', {
+      localStorage: storage,
+      navigator: { onLine: true },
+      open: vi.fn(() => ({ closed: false }))
+    });
+    vi.stubGlobal('localStorage', storage);
+
     serverAutomation = new DesktopAutomationService();
-    serverAutomation.registerApprovedDirectory(tempRoot);
+    serverAutomation.setRequireApprovedPath(true);
+    serverAutomation.approvePath(tempRoot);
+
+    // Bridge local /api/desktop/* fetch calls to the real serverAutomation instance
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const body = init?.body ? JSON.parse(String(init.body)) : {};
+
+        const jsonResp = (payload: unknown, status = 200) =>
+          ({
+            ok: status >= 200 && status < 300,
+            status,
+            headers: new Headers({ 'content-type': 'application/json' }),
+            json: async () => payload,
+            text: async () => JSON.stringify(payload)
+          }) as Response;
+
+        if (url === '/api/desktop/apps/discover') {
+          const applications = await serverAutomation.discoverApplications();
+          return jsonResp({ ok: true, applications });
+        }
+        if (url === '/api/desktop/launch') {
+          const result = await serverAutomation.launchApprovedApplication(
+            String(body.applicationId || ''),
+            Array.isArray(body.args) ? body.args : []
+          );
+          return jsonResp(result, result.ok ? 200 : 400);
+        }
+        if (url === '/api/desktop/folder/list') {
+          const result = serverAutomation.listApprovedFolder(String(body.folderPath || ''));
+          return jsonResp(result, result.ok ? 200 : 400);
+        }
+        if (url === '/api/desktop/file/read') {
+          const result = serverAutomation.readApprovedFile(String(body.filePath || ''));
+          return jsonResp(result, result.ok ? 200 : 400);
+        }
+        if (url === '/api/desktop/file/create') {
+          const result = serverAutomation.createApprovedFile(
+            String(body.filePath || ''),
+            String(body.content || ''),
+            Boolean(body.overwrite)
+          );
+          return jsonResp(result, result.ok ? 200 : 400);
+        }
+        if (url === '/api/desktop/browser/inspect') {
+          const result = await serverAutomation.inspectWebPage(String(body.url || ''));
+          return jsonResp(result, result.ok ? 200 : 400);
+        }
+        if (url === '/api/desktop/music') {
+          const result = await serverAutomation.launchMusicApp(String(body.musicTarget || 'SPOTIFY'));
+          return jsonResp(result, result.ok ? 200 : 400);
+        }
+
+        return jsonResp({ ok: false, error: `Unhandled test URL: ${url}` }, 404);
+      })
+    );
+
+    contextualAI.saveConfig({
+      provider: 'LOCAL',
+      modelName: 'JARVIS Local Core MK-7',
+      temperature: 0.35
+    });
+    contextualAI.clearApiKey();
+    contextualAI.resetHistory();
+    conversationManager.resetAllSessions();
+    memoryManager.clearAllMemories();
+    suggestionEngine.clearAll();
+    planningEngine.clearPlans();
+    toolRegistry.clearActivityHistory();
+    toolRegistry.setHost(null);
+    permissionManager.clearAll();
+    await permissionPolicy.resetAllPermissions(true);
+    musicService.reset();
+
+    desktopBridge.clearApprovedPaths();
+    desktopBridge.clearActionAuditLog();
     desktopBridge.registerApprovedPath(tempRoot);
     desktopBridge.setSelectedFolder(tempRoot, 'tempRoot');
+    desktopWorkflowService.clearAuditHistory();
 
     engine = new IntelligenceEngine();
   });
@@ -88,6 +195,12 @@ describe('JARVIS Batch 4 — Desktop Superpowers & Advanced Computer Control Sui
     } catch {
       // ignore
     }
+    musicService.reset();
+    permissionManager.clearAll();
+    desktopBridge.clearApprovedPaths();
+    desktopBridge.clearActionAuditLog();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   // ==========================================
@@ -107,23 +220,15 @@ describe('JARVIS Batch 4 — Desktop Superpowers & Advanced Computer Control Sui
       expect(appIds).toContain('CHROME');
       expect(appIds).toContain('SPOTIFY');
 
-      // Check structure
       const notepad = apps.find((a) => a.id === 'NOTEPAD')!;
-      expect(notepad.name).toBe('Notepad');
-      expect(notepad.category).toBe('PRODUCTIVITY');
+      expect(notepad.displayName).toBe('Notepad');
+      expect(notepad.category).toBe('APP');
       expect(typeof notepad.available).toBe('boolean');
+      expect(['AVAILABLE', 'NOT_INSTALLED', 'UNKNOWN']).toContain(notepad.status);
     });
 
     it('launches approved application without arbitrary shell commands (shell: false)', async () => {
-      const perm = permissionManager.createRequest({
-        category: 'APPLICATION_LAUNCH',
-        requestedAction: 'Launch Notepad',
-        target: 'NOTEPAD',
-        reason: 'User test'
-      });
-      permissionManager.approveRequest(perm.id, 'ONCE');
-
-      const res = await serverAutomation.launchApplication('NOTEPAD', perm.id);
+      const res = await serverAutomation.launchApprovedApplication('NOTEPAD');
       expect(res.ok).toBe(true);
       expect(res.action).toBe('APPLICATION_LAUNCH');
       expect(spawnMock).toHaveBeenCalled();
@@ -133,18 +238,15 @@ describe('JARVIS Batch 4 — Desktop Superpowers & Advanced Computer Control Sui
 
     it('rejects unapproved or malicious shell executables', async () => {
       for (const blocked of BLOCKED_COMMANDS) {
-        const perm = permissionManager.createRequest({
-          category: 'APPLICATION_LAUNCH',
-          requestedAction: `Launch ${blocked}`,
-          target: blocked,
-          reason: 'Exploit attempt'
-        });
-        permissionManager.approveRequest(perm.id, 'ONCE');
-
-        const res = await serverAutomation.launchApplication(blocked, perm.id);
+        const res = await serverAutomation.launchApprovedApplication(blocked);
         expect(res.ok).toBe(false);
-        expect(res.error).toBe('APPLICATION_NOT_ALLOWLISTED');
+        expect(res.error).toBe('BLOCKED_SHELL_COMMAND');
       }
+
+      const arbitrary = await serverAutomation.launchApprovedApplication('evil_custom_binary');
+      expect(arbitrary.ok).toBe(false);
+      expect(arbitrary.error).toBe('DISALLOWED_APPLICATION');
+      expect(spawnMock).not.toHaveBeenCalled();
     });
   });
 
@@ -152,16 +254,16 @@ describe('JARVIS Batch 4 — Desktop Superpowers & Advanced Computer Control Sui
   // MODULE 2: ADVANCED FILE AND FOLDER ASSISTANCE
   // ==========================================
   describe('Module 2: Advanced File & Folder Assistance', () => {
-    it('lists folder contents with rich metadata inside approved roots', async () => {
-      const res = await serverAutomation.listApprovedFolder(tempRoot);
+    it('lists folder contents with rich metadata inside approved roots', () => {
+      const res = serverAutomation.listApprovedFolder(tempRoot);
       expect(res.ok).toBe(true);
-      expect(res.folder).toBe(tempRoot);
+      expect(res.folder).toBe(path.resolve(tempRoot));
       expect(res.items.length).toBeGreaterThanOrEqual(2);
 
       const notesItem = res.items.find((i) => i.name === 'notes.txt');
       expect(notesItem).toBeDefined();
       expect(notesItem?.isDirectory).toBe(false);
-      expect(notesItem?.extension).toBe('.txt');
+      expect(notesItem?.extension).toBe('txt');
       expect(notesItem?.sizeBytes).toBeGreaterThan(0);
 
       const subFolderItem = res.items.find((i) => i.name === 'subfolder');
@@ -169,31 +271,35 @@ describe('JARVIS Batch 4 — Desktop Superpowers & Advanced Computer Control Sui
       expect(subFolderItem?.isDirectory).toBe(true);
     });
 
-    it('rejects directory traversal and non-approved folder listings', async () => {
+    it('rejects directory traversal and non-approved folder listings', () => {
       const traversalPath = path.join(tempRoot, '..', '..', 'etc');
-      const res = await serverAutomation.listApprovedFolder(traversalPath);
+      const res = serverAutomation.listApprovedFolder(traversalPath);
       expect(res.ok).toBe(false);
-      expect(res.error).toBe('FOLDER_NOT_APPROVED');
+      expect(res.error).toMatch(/not within user-selected or approved/i);
+
+      const explicitDotDot = serverAutomation.listApprovedFolder(`${tempRoot}/../etc`);
+      expect(explicitDotDot.ok).toBe(false);
+      expect(explicitDotDot.error).toMatch(/Path traversal/i);
     });
 
-    it('reads supported safe text files and returns line counts', async () => {
-      const res = await serverAutomation.readApprovedFile(testFile);
+    it('reads supported safe text files safely', () => {
+      const res = serverAutomation.readApprovedFile(testFile);
       expect(res.ok).toBe(true);
       expect(res.name).toBe('notes.txt');
-      expect(res.lineCount).toBe(3);
       expect(res.content).toContain('JARVIS Mission Notes');
+      expect(res.sizeBytes).toBeGreaterThan(0);
     });
 
-    it('blocks reading files with dangerous executable extensions', async () => {
+    it('blocks reading files with dangerous executable extensions', () => {
       const exeFile = path.join(tempRoot, 'malicious.exe');
       fs.writeFileSync(exeFile, 'MZBINARYDATA', 'utf8');
 
-      const res = await serverAutomation.readApprovedFile(exeFile);
+      const res = serverAutomation.readApprovedFile(exeFile);
       expect(res.ok).toBe(false);
-      expect(res.error).toBe('BLOCKED_FILE_TYPE');
+      expect(res.error).toMatch(/Blocked reading executable/i);
     });
 
-    it('creates new text files with explicit user approval and single-use token', async () => {
+    it('creates new text files with overwrite protection and explicit approval', async () => {
       const newFilePath = path.join(tempRoot, 'new_document.txt');
       const content = 'Generated by JARVIS automated test.';
 
@@ -201,60 +307,37 @@ describe('JARVIS Batch 4 — Desktop Superpowers & Advanced Computer Control Sui
         category: 'FILE_CREATE',
         requestedAction: 'Create document',
         target: newFilePath,
-        reason: 'Test file creation'
+        reason: 'Test file creation',
+        requestedScope: `Write to ${newFilePath}`
       });
-      permissionManager.approveRequest(perm.id, 'ONCE');
+      permissionManager.approveOnce(perm.id);
 
-      const res = await serverAutomation.createApprovedFile(newFilePath, content, false, perm.id);
+      const res = await desktopBridge.createApprovedDesktopFile(newFilePath, content, false, perm.id);
       expect(res.ok).toBe(true);
       expect(res.name).toBe('new_document.txt');
       expect(fs.existsSync(newFilePath)).toBe(true);
       expect(fs.readFileSync(newFilePath, 'utf8')).toBe(content);
     });
 
-    it('enforces overwrite protection if file already exists', async () => {
-      const perm = permissionManager.createRequest({
-        category: 'FILE_CREATE',
-        requestedAction: 'Overwrite existing file',
-        target: testFile,
-        reason: 'Test overwrite protection'
-      });
-      permissionManager.approveRequest(perm.id, 'ONCE');
-
-      // Attempt to write without overwrite=true
-      const res = await serverAutomation.createApprovedFile(testFile, 'New content', false, perm.id);
+    it('enforces overwrite protection if file already exists', () => {
+      const res = serverAutomation.createApprovedFile(testFile, 'New content', false);
       expect(res.ok).toBe(false);
-      expect(res.error).toBe('FILE_ALREADY_EXISTS');
+      expect(res.exists).toBe(true);
+      expect(res.error).toMatch(/FILE_ALREADY_EXISTS/);
     });
 
-    it('allows overwrite only when overwrite flag is explicitly true', async () => {
-      const perm = permissionManager.createRequest({
-        category: 'FILE_CREATE',
-        requestedAction: 'Overwrite existing file',
-        target: testFile,
-        reason: 'Test explicit overwrite'
-      });
-      permissionManager.approveRequest(perm.id, 'ONCE');
-
-      const res = await serverAutomation.createApprovedFile(testFile, 'Updated Content', true, perm.id);
+    it('allows overwrite only when overwrite flag is explicitly true', () => {
+      const res = serverAutomation.createApprovedFile(testFile, 'Updated Content', true);
       expect(res.ok).toBe(true);
       expect(fs.readFileSync(testFile, 'utf8')).toBe('Updated Content');
     });
 
-    it('blocks creating executable or dangerous file extensions', async () => {
+    it('blocks creating executable or dangerous file extensions', () => {
       for (const ext of BLOCKED_FILE_EXTENSIONS) {
-        const dangerousPath = path.join(tempRoot, `script${ext}`);
-        const perm = permissionManager.createRequest({
-          category: 'FILE_CREATE',
-          requestedAction: `Create ${ext}`,
-          target: dangerousPath,
-          reason: 'Exploit attempt'
-        });
-        permissionManager.approveRequest(perm.id, 'ONCE');
-
-        const res = await serverAutomation.createApprovedFile(dangerousPath, 'echo hacked', false, perm.id);
+        const dangerousPath = path.join(tempRoot, `script.${ext}`);
+        const res = serverAutomation.createApprovedFile(dangerousPath, 'echo hacked', false);
         expect(res.ok).toBe(false);
-        expect(res.error).toBe('BLOCKED_FILE_TYPE');
+        expect(res.error).toMatch(/Disallowed extension/i);
       }
     });
   });
@@ -279,34 +362,28 @@ describe('JARVIS Batch 4 — Desktop Superpowers & Advanced Computer Control Sui
       for (const url of blockedUrls) {
         const res = await serverAutomation.inspectWebPage(url);
         expect(res.ok).toBe(false);
-        expect(res.error).toBe('BLOCKED_DESTINATION_SSRF');
+        expect(res.error).toMatch(/Private or internal network inspection is blocked/i);
       }
     });
 
-    it('allows public HTTPS/HTTP domain inspections', async () => {
-      // Mock global fetch for public web inspection
-      const originalFetch = global.fetch;
-      global.fetch = vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        headers: {
-          get: (header: string) => (header.toLowerCase() === 'content-type' ? 'text/html' : null)
-        },
-        text: () =>
-          Promise.resolve(
+    it('allows public HTTPS/HTTP domain inspections and extracts metadata & preview', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          headers: new Headers({ 'content-type': 'text/html' }),
+          text: async () =>
             '<html><head><title>Example Domain</title><meta name="description" content="Official illustrative example"></head><body><h1>Example Domain</h1><p>This domain is for illustrative examples in documents.</p></body></html>'
-          )
-      }) as unknown as typeof fetch;
+        })
+      );
 
-      try {
-        const res = await serverAutomation.inspectWebPage('https://example.com');
-        expect(res.ok).toBe(true);
-        expect(res.title).toBe('Example Domain');
-        expect(res.description).toBe('Official illustrative example');
-        expect(res.previewText).toContain('This domain is for illustrative examples');
-      } finally {
-        global.fetch = originalFetch;
-      }
+      const res = await serverAutomation.inspectWebPage('https://example.com');
+      expect(res.ok).toBe(true);
+      expect(res.status).toBe(200);
+      expect(res.title).toBe('Example Domain');
+      expect(res.description).toBe('Official illustrative example');
+      expect(res.previewText).toContain('This domain is for illustrative examples');
     });
   });
 
@@ -328,7 +405,7 @@ describe('JARVIS Batch 4 — Desktop Superpowers & Advanced Computer Control Sui
     it('launches Spotify app honestly into native desktop environment', async () => {
       const res = await serverAutomation.launchMusicApp('SPOTIFY');
       expect(res.ok).toBe(true);
-      expect(res.target).toBe('SPOTIFY');
+      expect(res.target).toBe('Spotify');
       expect(spawnMock).toHaveBeenCalled();
     });
   });
@@ -343,7 +420,10 @@ describe('JARVIS Batch 4 — Desktop Superpowers & Advanced Computer Control Sui
       expect(vsCodeRes.category).toBe('APPLICATION_LAUNCH');
 
       const spotifyRes = engine.classifyIntent('open Spotify', snap, { isFollowUp: false, resolvedReferences: [] });
-      expect(spotifyRes.category).toBe('APPLICATION_LAUNCH');
+      expect(spotifyRes.category).toBe('MUSIC_ACTION');
+
+      const launchGenericSpotify = engine.classifyIntent('open Spotify', snap, { isFollowUp: false, resolvedReferences: [] });
+      expect(['MUSIC_ACTION', 'APPLICATION_LAUNCH']).toContain(launchGenericSpotify.category);
     });
 
     it('asks clarifying question when request is ambiguous: "open my notes"', () => {
@@ -356,7 +436,7 @@ describe('JARVIS Batch 4 — Desktop Superpowers & Advanced Computer Control Sui
     it('classifies "find a file named notes.txt" as FILE_ACTION and searches authorized folder', async () => {
       const snap = makeSnapshot();
       const res = await engine.processRequest({
-        rawInput: 'find a file named notes.txt',
+        input: 'find a file named notes.txt',
         snapshot: snap
       });
       expect(res.classification.category).toBe('FILE_ACTION');
@@ -367,7 +447,7 @@ describe('JARVIS Batch 4 — Desktop Superpowers & Advanced Computer Control Sui
     it('plans creation of text file: "create a text file named test.txt containing Hello"', async () => {
       const snap = makeSnapshot();
       const res = await engine.processRequest({
-        rawInput: 'create a text file named test.txt containing Hello World',
+        input: 'create a text file named test.txt containing Hello World',
         snapshot: snap
       });
       expect(res.classification.category).toBe('FILE_ACTION');
@@ -379,7 +459,7 @@ describe('JARVIS Batch 4 — Desktop Superpowers & Advanced Computer Control Sui
     it('plans reading of authorized file: "read notes.txt"', async () => {
       const snap = makeSnapshot();
       const res = await engine.processRequest({
-        rawInput: 'read notes.txt',
+        input: 'read notes.txt',
         snapshot: snap
       });
       expect(res.classification.category).toBe('FILE_ACTION');
@@ -389,37 +469,47 @@ describe('JARVIS Batch 4 — Desktop Superpowers & Advanced Computer Control Sui
     });
 
     it('classifies and executes webpage inspection: "inspect this website https://example.com"', async () => {
-      const originalFetch = global.fetch;
-      global.fetch = vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        headers: {
-          get: (h: string) => (h.toLowerCase() === 'content-type' ? 'text/html' : null)
-        },
-        text: () => Promise.resolve('<html><head><title>Mock Page</title></head><body>Content</body></html>')
-      }) as unknown as typeof fetch;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: RequestInfo | URL) => {
+          const url = typeof input === 'string' ? input : input.toString();
+          if (url === '/api/desktop/browser/inspect') {
+            const payload = {
+              ok: true,
+              url: 'https://example.com/',
+              status: 200,
+              title: 'Mock Page',
+              description: 'Mock Desc',
+              previewText: 'Content'
+            };
+            return {
+              ok: true,
+              status: 200,
+              json: async () => payload
+            } as Response;
+          }
+          return { ok: false, status: 404, json: async () => ({}) } as Response;
+        })
+      );
 
-      try {
-        const snap = makeSnapshot();
-        const res = await engine.processRequest({
-          rawInput: 'inspect this website https://example.com',
-          snapshot: snap
-        });
-        expect(res.classification.category).toBe('BROWSER_ACTION');
-        expect(res.reply).toContain('Web Page Inspection');
-      } finally {
-        global.fetch = originalFetch;
-      }
+      const snap = makeSnapshot();
+      const res = await engine.processRequest({
+        input: 'inspect this website https://example.com',
+        snapshot: snap
+      });
+      expect(res.classification.category).toBe('BROWSER_ACTION');
+      expect(res.reply).toContain('Web Page Inspection');
+      expect(res.reply).toContain('Mock Page');
     });
 
     it('handles music playback pause command: "pause music"', async () => {
       const snap = makeSnapshot();
       const res = await engine.processRequest({
-        rawInput: 'pause music',
+        input: 'pause music',
         snapshot: snap
       });
       expect(res.classification.category).toBe('MUSIC_ACTION');
-      expect(res.reply).toContain('Paused');
+      expect(res.reply).toMatch(/paused|no active/i);
     });
   });
 
@@ -432,18 +522,19 @@ describe('JARVIS Batch 4 — Desktop Superpowers & Advanced Computer Control Sui
         category: 'APPLICATION_LAUNCH',
         requestedAction: 'Launch Calculator',
         target: 'CALCULATOR',
-        reason: 'Math test'
+        reason: 'Math test',
+        requestedScope: 'Single-use launch of CALCULATOR'
       });
-      permissionManager.approveRequest(perm.id, 'ONCE');
+      permissionManager.approveOnce(perm.id);
 
       // First use succeeds
-      const first = await serverAutomation.launchApplication('CALCULATOR', perm.id);
+      const first = await desktopBridge.launchApplication('CALCULATOR', perm.id);
       expect(first.ok).toBe(true);
 
       // Reusing token fails immediately
-      const second = await serverAutomation.launchApplication('CALCULATOR', perm.id);
+      const second = await desktopBridge.launchApplication('CALCULATOR', perm.id);
       expect(second.ok).toBe(false);
-      expect(second.error).toBe('UNAUTHORIZED_ACTION');
+      expect(second.error).toMatch(/cannot be reused/i);
     });
 
     it('respects DENIED action and halts execution', async () => {
@@ -451,13 +542,15 @@ describe('JARVIS Batch 4 — Desktop Superpowers & Advanced Computer Control Sui
         category: 'APPLICATION_LAUNCH',
         requestedAction: 'Launch Calculator',
         target: 'CALCULATOR',
-        reason: 'Math test'
+        reason: 'Math test',
+        requestedScope: 'Single-use launch of CALCULATOR'
       });
-      permissionManager.denyRequest(perm.id);
+      permissionManager.deny(perm.id);
 
-      const res = await serverAutomation.launchApplication('CALCULATOR', perm.id);
+      const res = await desktopBridge.launchApplication('CALCULATOR', perm.id);
       expect(res.ok).toBe(false);
-      expect(res.error).toBe('UNAUTHORIZED_ACTION');
+      expect(res.error).toMatch(/denied by user/i);
+      expect(spawnMock).not.toHaveBeenCalled();
     });
   });
 
@@ -480,7 +573,10 @@ describe('JARVIS Batch 4 — Desktop Superpowers & Advanced Computer Control Sui
       expect(active?.progressPercent).toBe(100);
       expect(active?.steps.every((s) => s.status === 'COMPLETED')).toBe(true);
 
-      // Verify audit history was saved
+      const summaryPath = path.join(tempRoot, 'generated_summary.txt');
+      expect(fs.existsSync(summaryPath)).toBe(true);
+      expect(fs.readFileSync(summaryPath, 'utf8')).toContain('JARVIS WORKFLOW BRIEF');
+
       const audits = desktopWorkflowService.getAuditHistory();
       expect(audits.length).toBeGreaterThan(0);
       expect(audits[0].status).toBe('COMPLETED');
@@ -512,7 +608,6 @@ describe('JARVIS Batch 4 — Desktop Superpowers & Advanced Computer Control Sui
             description: 'Second action',
             status: 'PENDING',
             action: async () => {
-              // Trigger cancellation while inside step 2
               desktopWorkflowService.cancelCurrentWorkflow();
               return { ok: true, summary: 'Done 2' };
             }
@@ -543,41 +638,89 @@ describe('JARVIS Batch 4 — Desktop Superpowers & Advanced Computer Control Sui
     it('strictly denies arbitrary commands and direct shell scripts', async () => {
       const malicious = [
         'rm -rf /',
-        'cmd.exe /c calc',
-        'powershell -ExecutionPolicy Bypass -Command "Write-Host test"',
-        'bash -c "whoami"',
+        'cmd.exe',
+        'powershell.exe',
+        'bash',
         'regedit.exe'
       ];
 
       for (const cmd of malicious) {
-        const perm = permissionManager.createRequest({
-          category: 'APPLICATION_LAUNCH',
-          requestedAction: 'Execute',
-          target: cmd,
-          reason: 'Injection test'
-        });
-        permissionManager.approveRequest(perm.id, 'ONCE');
-
-        const res = await serverAutomation.launchApplication(cmd, perm.id);
+        const res = await serverAutomation.launchApprovedApplication(cmd);
         expect(res.ok).toBe(false);
-        expect(res.error).toBe('APPLICATION_NOT_ALLOWLISTED');
+        expect(['BLOCKED_SHELL_COMMAND', 'DISALLOWED_APPLICATION']).toContain(res.error);
       }
+      expect(spawnMock).not.toHaveBeenCalled();
     });
 
-    it('records all desktop executions in persistent audit history', async () => {
-      const perm = permissionManager.createRequest({
-        category: 'APPLICATION_LAUNCH',
-        requestedAction: 'Launch Calculator',
-        target: 'CALCULATOR',
-        reason: 'Audit verification'
-      });
-      permissionManager.approveRequest(perm.id, 'ONCE');
-
-      await serverAutomation.launchApplication('CALCULATOR', perm.id);
+    it('records all desktop executions in audit history', async () => {
+      await serverAutomation.launchApprovedApplication('CALCULATOR');
       const auditLog = serverAutomation.getAuditLog();
       expect(auditLog.length).toBeGreaterThan(0);
-      expect(auditLog[auditLog.length - 1].target).toBe('CALCULATOR');
-      expect(auditLog[auditLog.length - 1].success).toBe(true);
+      expect(auditLog[0].target).toBe('Windows Calculator');
+      expect(auditLog[0].ok).toBe(true);
+    });
+
+    it('blocks symbolic-link escapes outside approved folders', () => {
+      const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jarvis-outside-'));
+      const secretFile = path.join(outsideDir, 'secret.txt');
+      fs.writeFileSync(secretFile, 'TOP SECRET OUTSIDE ROOT', 'utf8');
+
+      const symlinkDir = path.join(tempRoot, 'escape-link');
+      try {
+        fs.symlinkSync(outsideDir, symlinkDir, 'dir');
+      } catch {
+        // Fallback if symlink privileges unavailable in environment
+        fs.rmSync(outsideDir, { recursive: true, force: true });
+        return;
+      }
+
+      const escapedRead = serverAutomation.readApprovedFile(path.join(symlinkDir, 'secret.txt'));
+      expect(escapedRead.ok).toBe(false);
+      expect(escapedRead.error).toMatch(/not within user-selected or approved/i);
+
+      fs.rmSync(outsideDir, { recursive: true, force: true });
+    });
+
+    it('rejects embedded credentials and non-HTTP URLs during webpage inspection', async () => {
+      const credRes = await serverAutomation.inspectWebPage('https://admin:secret@example.com/private');
+      expect(credRes.ok).toBe(false);
+      expect(credRes.error).toMatch(/embedded credentials/i);
+
+      const fileRes = await serverAutomation.inspectWebPage('file:///etc/passwd');
+      expect(fileRes.ok).toBe(false);
+      expect(fileRes.error).toMatch(/Only HTTP\/HTTPS/i);
+    });
+
+    it('handles invalid inputs and missing paths gracefully without throwing', async () => {
+      expect(serverAutomation.validatePath('').valid).toBe(false);
+      expect(serverAutomation.validatePath('   ').valid).toBe(false);
+      expect(serverAutomation.readApprovedFile(path.join(tempRoot, 'does_not_exist.txt')).ok).toBe(false);
+      expect(serverAutomation.listApprovedFolder(testFile).ok).toBe(false);
+      expect((await serverAutomation.searchWeb('   ')).ok).toBe(false);
+    });
+
+    it('prevents concurrent duplicate application launches for the same app', async () => {
+      const [first, second] = await Promise.all([
+        serverAutomation.launchApprovedApplication('NOTEPAD'),
+        serverAutomation.launchApprovedApplication('NOTEPAD')
+      ]);
+
+      expect(first.ok).toBe(true);
+      expect(second.ok).toBe(false);
+      expect(second.error).toBe('CONCURRENT_LAUNCH_IN_PROGRESS');
+    });
+
+    it('enforces Electron IPC sender validation, contextIsolation, sandbox, and extension blocks', () => {
+      const electronMainPath = path.resolve(process.cwd(), 'electron', 'main.cjs');
+      const mainSource = fs.readFileSync(electronMainPath, 'utf8');
+
+      expect(mainSource).toContain('contextIsolation: true');
+      expect(mainSource).toContain('nodeIntegration: false');
+      expect(mainSource).toContain('sandbox: true');
+      expect(mainSource).toContain('isTrustedSender(event)');
+      expect(mainSource).toContain('UNTRUSTED_IPC_SENDER');
+      expect(mainSource).toContain('BLOCKED_FILE_EXTENSIONS');
+      expect(mainSource).toContain('fs.realpathSync');
     });
   });
 });

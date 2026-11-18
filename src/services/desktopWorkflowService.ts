@@ -291,15 +291,11 @@ export class DesktopWorkflowService {
               requestedScope: `Write to ${savePath}`
             });
 
-            // For testing/mocking or if auto-approved by policy
+            // Wait for user decision or auto-approve in VITEST test runs
             const isApproved = await new Promise<boolean>((resolve) => {
-              if (permissionManager.isCategoryGranted('FILE_CREATE')) {
-                resolve(true);
-                return;
-              }
               const unsub = permissionManager.subscribe(() => {
                 const req = permissionManager.getRequest(perm.id);
-                if (req?.status === 'APPROVED_ONCE' || req?.status === 'APPROVED_PERSISTENT') {
+                if (req?.status === 'APPROVED') {
                   unsub();
                   resolve(true);
                 } else if (req?.status === 'DENIED' || req?.status === 'CANCELLED' || req?.status === 'EXPIRED') {
@@ -307,11 +303,10 @@ export class DesktopWorkflowService {
                   resolve(false);
                 }
               });
-              // Auto-approve after 2s if in vitest or unit test mode
               if (process.env.VITEST) {
                 setTimeout(() => {
-                  permissionManager.approveRequest(perm.id, 'ONCE');
-                }, 50);
+                  permissionManager.approveOnce(perm.id);
+                }, 20);
               }
             });
 
@@ -319,6 +314,7 @@ export class DesktopWorkflowService {
               return { ok: false, summary: '', error: 'Permission denied to save summary file.' };
             }
 
+            desktopBridge.registerApprovedPath(savePath);
             const writeRes = await desktopBridge.createApprovedDesktopFile(savePath, summaryText, true, perm.id);
             if (!writeRes.ok) {
               return { ok: false, summary: '', error: writeRes.error || 'Failed writing summary.' };

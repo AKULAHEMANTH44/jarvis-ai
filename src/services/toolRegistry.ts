@@ -15,7 +15,8 @@ import { browserActionService, validateNavigationUrl } from './browserActionServ
 import { webSearchService, extractSearchIntent } from './webSearchService';
 import { musicService } from './musicService';
 import { desktopWorkflowService } from './desktopWorkflowService';
-import { MusicSourceType, WebSearchProviderId } from '../types/assistant';
+import { devStudioService } from './devStudioService';
+import { DevCommandTool, MusicSourceType, WebSearchProviderId } from '../types/assistant';
 
 export interface WorkspaceToolHost {
   getContextSnapshot: () => WorkspaceContextSnapshot;
@@ -1171,7 +1172,7 @@ export class ToolRegistry {
           return {
             ok,
             verified: ok,
-            summary: st.statusMessage,
+            summary: ok ? st.statusMessage : 'No active local audio track to pause.',
             data: { musicState: st },
             error: ok ? undefined : 'No active local audio track to pause.'
           };
@@ -1179,12 +1180,13 @@ export class ToolRegistry {
         if (action === 'RESUME') {
           const ok = await musicService.resume();
           const st = musicService.getState();
+          const errMsg = st.error || 'No paused local audio track to resume.';
           return {
             ok,
             verified: ok,
-            summary: st.statusMessage,
+            summary: ok ? st.statusMessage : errMsg,
             data: { musicState: st },
-            error: ok ? undefined : st.error || 'Unable to resume audio.'
+            error: ok ? undefined : errMsg
           };
         }
         if (action === 'STOP') {
@@ -1639,6 +1641,162 @@ export class ToolRegistry {
             ? `Multi-step workflow "${workflow.title}" completed successfully.`
             : 'Workflow stopped or cancelled before full completion.',
           data: { workflowResult: desktopWorkflowService.getActiveWorkflow() }
+        };
+      }
+    });
+
+    // =========================================================================
+    // Batch 5 — AI Development Studio Tools
+    // =========================================================================
+
+    this.registerTool({
+      name: 'inspect_dev_project',
+      description: 'Inspect an approved software project workspace (languages, frameworks, scripts, dependencies, entry points, and tests) while excluding secrets.',
+      permissionLevel: 'READ_ONLY',
+      requiresConfirmation: false,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          projectPath: { type: 'string', description: 'Approved local project folder path.' }
+        },
+        required: ['projectPath']
+      },
+      execute: async (args) => {
+        const projectPath = String(args.projectPath || '');
+        const report = await devStudioService.inspectProject(projectPath);
+        return {
+          ok: report.ok,
+          verified: report.ok,
+          summary: report.ok
+            ? `Inspected "${report.projectName}" (${report.totalFilesScanned} files; languages: ${report.languages.map((l) => l.language).join(', ') || 'Unknown'}).`
+            : report.error || 'Project inspection failed.',
+          data: { projectReport: report },
+          error: report.error
+        };
+      }
+    });
+
+    this.registerTool({
+      name: 'read_dev_source_file',
+      description: 'Read a non-secret source file inside an approved project folder and extract its symbols and imports.',
+      permissionLevel: 'READ_ONLY',
+      requiresConfirmation: false,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          projectPath: { type: 'string', description: 'Approved project root path.' },
+          filePath: { type: 'string', description: 'Relative or full path of the source file.' }
+        },
+        required: ['projectPath', 'filePath']
+      },
+      execute: async (args) => {
+        const res = await devStudioService.readSourceFile(String(args.projectPath || ''), String(args.filePath || ''));
+        return {
+          ok: res.ok,
+          verified: res.ok,
+          summary: res.ok
+            ? `Read "${res.relativePath}" (${res.lineCount} lines, ${res.symbols.length} symbols).`
+            : res.error || 'Failed to read source file.',
+          data: { sourceAnalysis: res },
+          error: res.error
+        };
+      }
+    });
+
+    this.registerTool({
+      name: 'propose_dev_code_patch',
+      description: 'Generate a code or documentation proposal and diff preview inside an approved project without writing to disk.',
+      permissionLevel: 'READ_ONLY',
+      requiresConfirmation: false,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          projectPath: { type: 'string', description: 'Approved project root path.' },
+          prompt: { type: 'string', description: 'Natural-language code generation prompt.' },
+          targetRelativePath: { type: 'string', description: 'Optional relative path for the proposed file.' }
+        },
+        required: ['projectPath', 'prompt']
+      },
+      execute: async (args) => {
+        const gen = await devStudioService.generateCodeProposal({
+          projectPath: String(args.projectPath || ''),
+          prompt: String(args.prompt || ''),
+          targetRelativePath: args.targetRelativePath ? String(args.targetRelativePath) : undefined
+        });
+        return {
+          ok: gen.ok,
+          verified: Boolean(gen.patch),
+          summary: gen.ok
+            ? `Prepared diff preview for "${gen.patch?.relativePath}" (+${gen.patch?.preview.addedLines}/-${gen.patch?.preview.removedLines}). Explicit approval required before writing.`
+            : gen.error || 'Failed to propose patch.',
+          data: { patch: gen.patch },
+          error: gen.error
+        };
+      }
+    });
+
+    this.registerTool({
+      name: 'apply_dev_code_patch',
+      description: 'Apply a reviewed code patch inside an approved project with backup creation after explicit CODE_PATCH approval.',
+      permissionLevel: 'CONSEQUENTIAL',
+      requiresConfirmation: true,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          patchId: { type: 'string', description: 'Proposed patch ID from preview.' },
+          permissionId: { type: 'string', description: 'Single-use approved CODE_PATCH permission ID.' },
+          overwriteConfirmed: { type: 'boolean', description: 'Explicit overwrite confirmation for existing files.' }
+        },
+        required: ['patchId', 'permissionId']
+      },
+      execute: async (args) => {
+        const res = await devStudioService.applyProposedPatch(
+          String(args.patchId || ''),
+          String(args.permissionId || ''),
+          Boolean(args.overwriteConfirmed)
+        );
+        return {
+          ok: res.ok,
+          verified: res.ok,
+          summary: res.ok
+            ? `Applied patch "${res.patch?.relativePath}" with backup snapshot.`
+            : res.error || 'Patch application failed.',
+          data: { patchResult: res },
+          error: res.error
+        };
+      }
+    });
+
+    this.registerTool({
+      name: 'run_dev_command',
+      description: 'Execute an allowlisted test, build, or lint command inside an approved project folder after explicit DEV_COMMAND approval.',
+      permissionLevel: 'CONSEQUENTIAL',
+      requiresConfirmation: true,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          projectPath: { type: 'string', description: 'Approved working directory.' },
+          tool: { type: 'string', enum: ['npm', 'npx', 'node', 'python', 'pytest', 'tsc', 'git'], description: 'Allowlisted tool.' },
+          args: { type: 'array', description: 'Safe argument array (no shell metacharacters).' },
+          permissionId: { type: 'string', description: 'Single-use approved DEV_COMMAND permission ID.' }
+        },
+        required: ['projectPath', 'tool', 'args', 'permissionId']
+      },
+      execute: async (args) => {
+        const cmdRes = await devStudioService.runApprovedCommand({
+          projectPath: String(args.projectPath || ''),
+          tool: String(args.tool || 'npm') as DevCommandTool,
+          args: Array.isArray(args.args) ? args.args.map(String) : [],
+          permissionId: String(args.permissionId || '')
+        });
+        return {
+          ok: cmdRes.ok,
+          verified: cmdRes.ok,
+          summary: cmdRes.ok
+            ? cmdRes.testReport?.summary || `Executed "${cmdRes.commandDisplay}" in ${cmdRes.durationMs} ms (exit ${cmdRes.exitCode}).`
+            : cmdRes.error || `Command failed (exit ${cmdRes.exitCode}).`,
+          data: { commandResult: cmdRes },
+          error: cmdRes.error
         };
       }
     });

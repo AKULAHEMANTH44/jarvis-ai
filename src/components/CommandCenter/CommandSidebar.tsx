@@ -16,13 +16,15 @@ import {
   Shield,
   Sliders,
   Camera,
-  Hand
+  Hand,
+  Code2
 } from 'lucide-react';
 import { audioService } from '../../services/soundFx';
 
 export type CommandCenterNavId =
   | 'DASHBOARD'
   | 'DESKTOP'
+  | 'DEV_STUDIO'
   | 'OPTICAL'
   | 'AI_CORE'
   | 'AGENTS'
@@ -52,6 +54,7 @@ interface CommandSidebarProps {
 const NAV_ITEMS: { id: CommandCenterNavId; label: string; icon: React.ReactNode; badge?: number }[] = [
   { id: 'DASHBOARD', label: 'Command Center', icon: <LayoutDashboard className="w-4 h-4" /> },
   { id: 'DESKTOP', label: 'Desktop Control', icon: <Monitor className="w-4 h-4" /> },
+  { id: 'DEV_STUDIO', label: 'AI Dev Studio', icon: <Code2 className="w-4 h-4" /> },
   { id: 'OPTICAL', label: 'Optics & Gestures', icon: <Hand className="w-4 h-4" /> },
   { id: 'AI_CORE', label: 'AI Core', icon: <Cpu className="w-4 h-4" /> },
   { id: 'AGENTS', label: 'Agents', icon: <Bot className="w-4 h-4" /> },

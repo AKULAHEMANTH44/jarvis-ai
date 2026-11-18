@@ -79,5 +79,29 @@ contextBridge.exposeInMainWorld('jarvisDesktop', {
 
   createFile: async (filePath, content, overwrite = false) => {
     return ipcRenderer.invoke('jarvis:createFile', { filePath, content, overwrite });
+  },
+
+  devInspectProject: async (projectPath) => {
+    return ipcRenderer.invoke('jarvis:devInspectProject', { projectPath });
+  },
+
+  devReadSource: async (projectPath, filePath) => {
+    return ipcRenderer.invoke('jarvis:devReadSource', { projectPath, filePath });
+  },
+
+  devApplyPatch: async (payload) => {
+    return ipcRenderer.invoke('jarvis:devApplyPatch', payload);
+  },
+
+  devRollbackPatch: async (patchId, projectPath) => {
+    return ipcRenderer.invoke('jarvis:devRollbackPatch', { patchId, projectPath });
+  },
+
+  devRunCommand: async (payload) => {
+    return ipcRenderer.invoke('jarvis:devRunCommand', payload);
+  },
+
+  devCancelCommand: async (taskId) => {
+    return ipcRenderer.invoke('jarvis:devCancelCommand', { taskId });
   }
 });

@@ -38,6 +38,7 @@ import { musicService, MUSIC_SOURCE_CHOICES } from './musicService';
 import { desktopBridge, DesktopExecutionResult, WebPageInspectionResult } from './desktopBridge';
 import { desktopWorkflowService } from './desktopWorkflowService';
 import { agentOrchestrator } from './agentOrchestrator';
+import { devStudioService } from './devStudioService';
 
 export interface IntelligenceStateSnapshot {
   status: IntelligenceStatus;
@@ -516,12 +517,12 @@ export class IntelligenceEngine {
       };
     }
 
-    // 10b. Coding Assistance Intent
+    // 10b. Coding Assistance & AI Dev Studio Intent
     const hasCodeAttachment = attachments.some((a) =>
       /\.(ts|tsx|js|jsx|py|json|css|html|yml|yaml|md)$/i.test(a.name)
     );
     if (
-      /\b(debug|fix\s+(?:this|the)\s+bug|review\s+(?:this|the)\s+code|write\s+(?:unit\s+)?tests|refactor|stack\s*trace|typescript\s+error|lint\s+error)\b/i.test(
+      /\b(debug|fix\s+(?:this|the)\s+bug|review\s+(?:this|the)\s+code|write\s+(?:unit\s+)?tests|refactor|stack\s*trace|typescript\s+error|lint\s+error|python\s+calculator|fastapi\s+backend|login\s+page|react\s+component|generate\s+code|run\s+(?:the\s+)?(?:project\s+)?tests|generate\s+(?:a\s+)?readme|architecture\s+doc|inspect\s+(?:this|the)\s+project)\b/i.test(
         lower
       ) ||
       (hasCodeAttachment && /\b(explain|review|analyze|check|debug|audit|fix)\b/i.test(lower))
@@ -529,7 +530,7 @@ export class IntelligenceEngine {
       return {
         category: 'CODING_ASSISTANCE',
         confidence: 0.9,
-        summary: 'Controlled Coding & Verification Agent assistance.',
+        summary: 'Controlled Coding, Verification & AI Dev Studio assistance.',
         requiresTool: false,
         requiresPlan: false,
         missingInformation,
@@ -627,11 +628,16 @@ export class IntelligenceEngine {
   }
 
   private looksLikeBrowserIntent(lower: string): boolean {
-    if (/\b(open\s+a\s+new\s+tab|open\s+new\s+tab|open\s+website|open\s+site|inspect\s+(?:this\s+)?(?:website|webpage|page|site|url))\b/i.test(lower)) {
+    if (
+      /\b(open\s+a\s+new\s+tab|open\s+new\s+tab|open\s+website|open\s+site|inspect\s+(?:this\s+)?(?:website|webpage|page|site|url))\b/i.test(
+        lower
+      ) ||
+      /\binspect\s+https?:\/\/\S+/i.test(lower)
+    ) {
       return true;
     }
     const navMatch = lower.match(
-      /\b(?:open|navigate\s+to|go\s+to|visit|browse\s+to|launch|inspect)\s+([a-z0-9.-/:?=&_%+-]+(?:\s+[a-z0-9.-]+)?)/i
+      /\b(?:open|navigate\s+to|go\s+to|visit|browse\s+to|launch)\s+([a-z0-9.-/:?=&_%+-]+(?:\s+[a-z0-9.-]+)?)/i
     );
     if (!navMatch) return false;
     const rawTarget = navMatch[1].replace(/[.?!]+$/, '').trim().toLowerCase();
@@ -1033,6 +1039,8 @@ export class IntelligenceEngine {
               ? 'WEB_SEARCH'
               : existing.category === 'MUSIC_PLAYBACK' || existing.category === 'MUSIC_CONTROL'
               ? 'MUSIC_ACTION'
+              : existing.category === 'CODE_PATCH' || existing.category === 'DEV_COMMAND'
+              ? 'CODING_ASSISTANCE'
               : 'BROWSER_ACTION',
           confidence: 1,
           summary: existing.requestedAction,
@@ -1994,10 +2002,14 @@ export class IntelligenceEngine {
               { filePath: fullPath, permissionId },
               { approvedByUser: true }
             );
-            const readData = res.result.data?.fileRead;
-            const reply = res.result.ok && readData?.content
-              ? `File "${readData.name}" (${readData.sizeBytes} bytes, ${readData.lineCount} lines):\n\n${readData.content.slice(0, 1500)}`
-              : res.result.summary;
+            const readData = res.result.data?.fileRead as
+              | { ok?: boolean; name?: string; sizeBytes?: number; content?: string; error?: string }
+              | undefined;
+            const lineCount = readData?.content ? readData.content.split(/\r?\n/).length : 0;
+            const reply =
+              res.result.ok && readData?.content
+                ? `File "${readData.name || targetName}" (${readData.sizeBytes || readData.content.length} bytes, ${lineCount} lines):\n\n${readData.content.slice(0, 1500)}`
+                : res.result.summary;
             return {
               ok: res.result.ok,
               reply,
@@ -2177,12 +2189,12 @@ export class IntelligenceEngine {
 
         // Webpage Inspection request: "inspect this website <url>"
         if (/\binspect\b/i.test(rawInput)) {
-          this.setStatus('TOOL_EXECUTION', `Inspecting web page: ${targetUrl}`);
+          this.setStatus('EXECUTING', `Inspecting web page: ${targetUrl}`);
           const res = await toolRegistry.executeTool('inspect_web_page', { url: targetUrl });
           const inspection = res.result.data?.pageInspection as WebPageInspectionResult | undefined;
           let reply = '';
           if (res.result.ok && inspection) {
-            reply = `Web Page Inspection for ${targetUrl}:\n• Title: ${inspection.title || 'Untitled'}\n• Status: ${inspection.status}\n• Description: ${inspection.description || 'No description provided'}\n• Content Preview: ${inspection.previewText || 'None'}`;
+            reply = `Web Page Inspection for ${targetUrl}:\n• Title: ${inspection.title || 'Untitled'}\n• Status: ${inspection.status ?? 200}\n• Description: ${inspection.description || 'No description provided'}\n• Content Preview: ${inspection.previewText || 'None'}`;
           } else {
             reply = res.result.error || `Unable to inspect ${targetUrl}`;
           }
@@ -3233,6 +3245,206 @@ export class IntelligenceEngine {
             snapshot: params.snapshot,
             error: result.ok ? undefined : result.error
           });
+        }
+      }
+
+      // 7a. Batch 5 — AI Development Studio natural-language workflow when an approved project folder is active
+      if (classification.category === 'CODING_ASSISTANCE') {
+        const lowerDev = rawInput.toLowerCase();
+        const activeDevProject =
+          devStudioService.getActiveProjectPath() ||
+          desktopBridge.getSelectedFolder()?.path ||
+          permissionPolicy.getApprovedFolders()[0]?.path ||
+          '';
+
+        const isDevStudioAction =
+          /\b(inspect\s+(?:this|the)\s+project|python\s+calculator|fastapi\s+backend|login\s+page|react\s+component|run\s+(?:the\s+)?(?:project\s+)?tests|generate\s+(?:a\s+)?readme|architecture\s+doc)\b/i.test(
+            lowerDev
+          );
+
+        if (isDevStudioAction && !activeDevProject) {
+          const prompt: PendingInteractivePrompt = {
+            kind: 'FOLDER_PICKER',
+            requestedAction: 'Select an approved project folder for AI Development Studio',
+            message: 'Select or approve a project folder first in Permissions or AI Dev Studio before inspecting or modifying project files.'
+          };
+          this.interactivePrompt = prompt;
+          conversationManager.addTurn({ role: 'assistant', text: prompt.message, intent: 'CODING_ASSISTANCE' });
+          return this.finishResult({
+            id: reqId,
+            input: rawInput,
+            reply: prompt.message,
+            status: 'RESPONDING',
+            classification,
+            providerUsed: 'LOCAL',
+            isExternalModel: false,
+            toolRecords,
+            interactivePrompt: prompt,
+            memoryCandidate,
+            snapshot: params.snapshot
+          });
+        }
+
+        if (isDevStudioAction && activeDevProject) {
+          if (/\binspect\s+(?:this|the)\s+project\b/i.test(lowerDev)) {
+            const { result, record } = await toolRegistry.executeTool('inspect_dev_project', {
+              projectPath: activeDevProject
+            });
+            toolRecords.push(record);
+            conversationManager.addTurn({ role: 'assistant', text: result.summary, intent: 'CODING_ASSISTANCE' });
+            return this.finishResult({
+              id: reqId,
+              input: rawInput,
+              reply: result.summary,
+              status: result.ok ? 'RESPONDING' : 'ERROR',
+              classification,
+              providerUsed: 'LOCAL',
+              isExternalModel: false,
+              toolRecords,
+              memoryCandidate,
+              snapshot: params.snapshot,
+              error: result.error
+            });
+          }
+
+          if (/\brun\s+(?:the\s+)?(?:project\s+)?tests\b/i.test(lowerDev)) {
+            const perm = devStudioService.requestDevCommandPermission(activeDevProject, 'npm', ['test']);
+            this.pendingPermission = perm;
+            this.pendingPermissionInputFingerprint = fingerprint;
+            this.permissionExecutors.set(perm.id, async (permissionId) => {
+              const res = await toolRegistry.executeTool(
+                'run_dev_command',
+                { projectPath: activeDevProject, tool: 'npm', args: ['test'], permissionId },
+                { approvedByUser: true }
+              );
+              return {
+                ok: res.result.ok,
+                reply: res.result.summary,
+                toolRecord: res.record,
+                error: res.result.error
+              };
+            });
+            const reply = `Prepared allowlisted test command "npm test" in "${activeDevProject}". Do you approve running it?`;
+            conversationManager.addTurn({ role: 'assistant', text: reply, intent: 'CODING_ASSISTANCE' });
+            this.setStatus('AWAITING_APPROVAL', 'Waiting for approval to run npm test', 'Waiting for your permission.');
+            return this.finishResult({
+              id: reqId,
+              input: rawInput,
+              reply,
+              status: 'AWAITING_APPROVAL',
+              classification,
+              providerUsed: 'LOCAL',
+              isExternalModel: false,
+              toolRecords,
+              pendingPermission: perm,
+              memoryCandidate,
+              snapshot: params.snapshot,
+              preserveStatus: true
+            });
+          }
+
+          if (/\b(generate\s+(?:a\s+)?readme|architecture\s+doc)\b/i.test(lowerDev)) {
+            const docType = lowerDev.includes('architecture') ? 'ARCHITECTURE' : 'README';
+            const docRes = await devStudioService.generateGroundedDocumentation(activeDevProject, docType);
+            if (!docRes.ok || !docRes.patch) {
+              const errMsg = docRes.error || 'Failed to generate documentation preview.';
+              conversationManager.addTurn({ role: 'assistant', text: errMsg, intent: 'CODING_ASSISTANCE' });
+              return this.finishResult({
+                id: reqId,
+                input: rawInput,
+                reply: errMsg,
+                status: 'ERROR',
+                classification,
+                providerUsed: 'LOCAL',
+                isExternalModel: false,
+                toolRecords,
+                memoryCandidate,
+                snapshot: params.snapshot,
+                error: errMsg
+              });
+            }
+
+            const perm = devStudioService.requestPatchPermission(docRes.patch.id);
+            if (perm) {
+              this.pendingPermission = perm;
+              this.pendingPermissionInputFingerprint = fingerprint;
+              const patchId = docRes.patch.id;
+              this.permissionExecutors.set(perm.id, async (permissionId) => {
+                const res = await toolRegistry.executeTool(
+                  'apply_dev_code_patch',
+                  { patchId, permissionId, overwriteConfirmed: false },
+                  { approvedByUser: true }
+                );
+                return {
+                  ok: res.result.ok,
+                  reply: res.result.summary,
+                  toolRecord: res.record,
+                  error: res.result.error
+                };
+              });
+            }
+
+            const reply = `Generated grounded ${docType} preview for "${docRes.patch.relativePath}" (+${docRes.patch.preview.addedLines} lines). Review in AI Dev Studio or approve to write it.`;
+            conversationManager.addTurn({ role: 'assistant', text: reply, intent: 'CODING_ASSISTANCE' });
+            this.setStatus('AWAITING_APPROVAL', `Awaiting approval to save ${docRes.patch.relativePath}`, 'Waiting for your permission.');
+            return this.finishResult({
+              id: reqId,
+              input: rawInput,
+              reply,
+              status: 'AWAITING_APPROVAL',
+              classification,
+              providerUsed: 'LOCAL',
+              isExternalModel: false,
+              toolRecords,
+              pendingPermission: perm || undefined,
+              memoryCandidate,
+              snapshot: params.snapshot,
+              preserveStatus: true
+            });
+          }
+
+          if (/\b(python\s+calculator|fastapi\s+backend|login\s+page|react\s+component)\b/i.test(lowerDev)) {
+            const { result, record } = await toolRegistry.executeTool('propose_dev_code_patch', {
+              projectPath: activeDevProject,
+              prompt: rawInput
+            });
+            toolRecords.push(record);
+            const patch = result.data?.patch as { id: string; relativePath: string } | undefined;
+            const perm = patch ? devStudioService.requestPatchPermission(patch.id) : null;
+            if (perm && patch) {
+              this.pendingPermission = perm;
+              this.pendingPermissionInputFingerprint = fingerprint;
+              this.permissionExecutors.set(perm.id, async (permissionId) => {
+                const res = await toolRegistry.executeTool(
+                  'apply_dev_code_patch',
+                  { patchId: patch.id, permissionId, overwriteConfirmed: false },
+                  { approvedByUser: true }
+                );
+                return {
+                  ok: res.result.ok,
+                  reply: res.result.summary,
+                  toolRecord: res.record,
+                  error: res.result.error
+                };
+              });
+              this.setStatus('AWAITING_APPROVAL', `Waiting for approval to write ${patch.relativePath}`, 'Waiting for your permission.');
+              conversationManager.addTurn({ role: 'assistant', text: result.summary, intent: 'CODING_ASSISTANCE' });
+              return this.finishResult({
+                id: reqId,
+                input: rawInput,
+                reply: result.summary,
+                status: 'AWAITING_APPROVAL',
+                classification,
+                providerUsed: 'LOCAL',
+                isExternalModel: false,
+                toolRecords,
+                pendingPermission: perm,
+                memoryCandidate,
+                snapshot: params.snapshot,
+                preserveStatus: true
+              });
+            }
+          }
         }
       }
 

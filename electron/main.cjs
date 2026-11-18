@@ -22,6 +22,12 @@ const BLOCKED_BINARIES = new Set([
   'reg', 'reg.exe', 'regedit', 'regedit.exe', 'rundll32', 'rundll32.exe'
 ]);
 
+const BLOCKED_FILE_EXTENSIONS = new Set([
+  'exe', 'msi', 'bat', 'cmd', 'ps1', 'sh', 'vbs', 'vbe', 'dll', 'sys', 'com', 'app', 'dmg', 'pkg', 'deb', 'rpm'
+]);
+
+const inFlightLaunches = new Set();
+
 const DANGEROUS_ARG_PATTERN = /[;&|`$<>\r\n\0]|^(?:\/c|-c|-e|--eval|-enc|-encodedcommand|-command)(?:$|[=\s:])/i;
 
 const CAPABILITY_IDS = [
@@ -185,6 +191,22 @@ function isTrustedSender(event) {
   }
 }
 
+function resolveRealIfExists(targetPath) {
+  const resolved = path.resolve(targetPath);
+  try {
+    if (fs.existsSync(resolved)) {
+      return fs.realpathSync(resolved);
+    }
+    const parent = path.dirname(resolved);
+    if (fs.existsSync(parent)) {
+      return path.join(fs.realpathSync(parent), path.basename(resolved));
+    }
+  } catch {
+    // Fallback to resolved path
+  }
+  return resolved;
+}
+
 function validatePath(rawPath) {
   if (!rawPath || typeof rawPath !== 'string') return { valid: false, error: 'Path must be a non-empty string.' };
   const trimmed = rawPath.trim();
@@ -200,11 +222,11 @@ function validatePath(rawPath) {
     return { valid: false, error: 'Path traversal (..) is strictly blocked.' };
   }
   try {
-    const resolved = path.resolve(trimmed);
+    const resolved = resolveRealIfExists(trimmed);
     if (approvedPaths.size > 0) {
       let within = false;
       for (const root of approvedPaths) {
-        const normRoot = path.resolve(root);
+        const normRoot = resolveRealIfExists(root);
         const prefix = normRoot.endsWith(path.sep) ? normRoot : `${normRoot}${path.sep}`;
         if (resolved === normRoot || resolved.startsWith(prefix)) {
           within = true;
@@ -275,12 +297,28 @@ async function handleLaunchApplication(applicationId, args = []) {
     };
   }
 
+  if (inFlightLaunches.has(entry.id)) {
+    return {
+      ok: false,
+      action: 'APPLICATION_LAUNCH',
+      target: entry.displayName,
+      verified: false,
+      error: 'CONCURRENT_LAUNCH_IN_PROGRESS',
+      summary: `${entry.displayName} launch is already in progress.`
+    };
+  }
+
   const sanitizedArgs = Array.isArray(args)
     ? args.filter((a) => typeof a === 'string' && !DANGEROUS_ARG_PATTERN.test(a.trim()))
     : [];
 
+  inFlightLaunches.add(entry.id);
   return new Promise((resolve) => {
     let settled = false;
+    const finish = (payload) => {
+      inFlightLaunches.delete(entry.id);
+      resolve(payload);
+    };
     try {
       const isWin = process.platform === 'win32';
       const bin = isWin ? entry.win : entry.unix;
@@ -288,7 +326,7 @@ async function handleLaunchApplication(applicationId, args = []) {
       child.on('error', (err) => {
         if (!settled) {
           settled = true;
-          resolve({
+          finish({
             ok: false,
             action: 'APPLICATION_LAUNCH',
             target: entry.displayName,
@@ -306,7 +344,7 @@ async function handleLaunchApplication(applicationId, args = []) {
           } catch {
             // ignore
           }
-          resolve({
+          finish({
             ok: true,
             action: 'APPLICATION_LAUNCH',
             target: entry.displayName,
@@ -319,7 +357,7 @@ async function handleLaunchApplication(applicationId, args = []) {
     } catch (err) {
       if (!settled) {
         settled = true;
-        resolve({ ok: false, verified: false, error: err.message, summary: err.message });
+        finish({ ok: false, verified: false, error: err.message, summary: err.message });
       }
     }
   });
@@ -593,8 +631,12 @@ ipcMain.handle('jarvis:discoverApps', async (event) => {
   return { ok: true, applications: apps };
 });
 
-ipcMain.handle('jarvis:listFolder', async (event, { folderPath }) => {
+ipcMain.handle('jarvis:listFolder', async (event, payload) => {
   if (!isTrustedSender(event)) return { ok: false, items: [], error: 'UNTRUSTED_IPC_SENDER' };
+  if (permissionConfig.capabilities?.FOLDER_ACCESS?.decision === 'DENIED') {
+    return { ok: false, items: [], error: 'PERMISSION_DENIED_BY_POLICY' };
+  }
+  const { folderPath } = payload || {};
   const val = validatePath(folderPath);
   if (!val.valid) return { ok: false, items: [], error: val.error };
   if (!fs.existsSync(val.resolved) || !fs.statSync(val.resolved).isDirectory()) {
@@ -626,15 +668,19 @@ ipcMain.handle('jarvis:listFolder', async (event, { folderPath }) => {
   }
 });
 
-ipcMain.handle('jarvis:readFile', async (event, { filePath }) => {
+ipcMain.handle('jarvis:readFile', async (event, payload) => {
   if (!isTrustedSender(event)) return { ok: false, error: 'UNTRUSTED_IPC_SENDER' };
+  if (permissionConfig.capabilities?.FOLDER_ACCESS?.decision === 'DENIED') {
+    return { ok: false, error: 'PERMISSION_DENIED_BY_POLICY' };
+  }
+  const { filePath } = payload || {};
   const val = validatePath(filePath);
   if (!val.valid) return { ok: false, error: val.error };
   if (!fs.existsSync(val.resolved)) return { ok: false, error: 'FILE_NOT_FOUND' };
   const stat = fs.statSync(val.resolved);
   if (stat.isDirectory()) return { ok: false, error: 'IS_DIRECTORY' };
   const ext = path.extname(val.resolved).replace(/^\./, '').toLowerCase();
-  if (BLOCKED_BINARIES.has(ext) || ext === 'exe' || ext === 'dll') {
+  if (BLOCKED_FILE_EXTENSIONS.has(ext) || BLOCKED_BINARIES.has(ext)) {
     return { ok: false, error: 'BLOCKED_EXTENSION' };
   }
   if (stat.size > 5 * 1024 * 1024) {
@@ -648,12 +694,16 @@ ipcMain.handle('jarvis:readFile', async (event, { filePath }) => {
   }
 });
 
-ipcMain.handle('jarvis:createFile', async (event, { filePath, content, overwrite }) => {
+ipcMain.handle('jarvis:createFile', async (event, payload) => {
   if (!isTrustedSender(event)) return { ok: false, error: 'UNTRUSTED_IPC_SENDER' };
+  if (permissionConfig.capabilities?.FOLDER_ACCESS?.decision === 'DENIED') {
+    return { ok: false, error: 'PERMISSION_DENIED_BY_POLICY' };
+  }
+  const { filePath, content, overwrite } = payload || {};
   const val = validatePath(filePath);
   if (!val.valid) return { ok: false, error: val.error };
   const ext = path.extname(val.resolved).replace(/^\./, '').toLowerCase();
-  if (BLOCKED_BINARIES.has(ext) || ext === 'exe' || ext === 'dll') {
+  if (BLOCKED_FILE_EXTENSIONS.has(ext) || BLOCKED_BINARIES.has(ext)) {
     return { ok: false, error: 'BLOCKED_EXTENSION' };
   }
   if (fs.existsSync(val.resolved) && !overwrite) {
@@ -665,6 +715,163 @@ ipcMain.handle('jarvis:createFile', async (event, { filePath, content, overwrite
   } catch (err) {
     return { ok: false, error: err.message };
   }
+});
+
+// Batch 5 — Electron Dev Studio Secure IPC Handlers
+const DEV_SECRET_PATTERNS = [/^\.env($|\.)/i, /^secrets?(\..*)?\.json$/i, /^credentials?(\..*)?\.json$/i, /service[-_]?account.*\.json$/i, /^id_(rsa|ed25519)/i, /^\.(npmrc|pypirc|netrc)$/i];
+const DEV_SECRET_EXTS = new Set(['pem', 'key', 'p12', 'pfx', 'jks', 'keystore']);
+const DEV_ALLOWED_TOOLS = new Set(['npm', 'npx', 'node', 'python', 'pytest', 'tsc', 'git']);
+const devBackups = new Map();
+const devRunningTasks = new Map();
+
+function isDevSecretFile(p) {
+  const base = path.basename(String(p || ''));
+  const ext = path.extname(base).replace(/^\./, '').toLowerCase();
+  return DEV_SECRET_PATTERNS.some((re) => re.test(base)) || DEV_SECRET_EXTS.has(ext);
+}
+
+ipcMain.handle('jarvis:devInspectProject', async (event, payload) => {
+  if (!isTrustedSender(event)) return { ok: false, error: 'UNTRUSTED_IPC_SENDER' };
+  if (permissionConfig.capabilities?.FOLDER_ACCESS?.decision === 'DENIED') {
+    return { ok: false, error: 'PERMISSION_DENIED_BY_POLICY' };
+  }
+  const { projectPath } = payload || {};
+  const val = validatePath(projectPath);
+  if (!val.valid) return { ok: false, error: val.error };
+  if (!fs.existsSync(val.resolved) || !fs.statSync(val.resolved).isDirectory()) {
+    return { ok: false, error: 'FOLDER_NOT_FOUND' };
+  }
+  const files = [];
+  const excludedSecretFiles = [];
+  const skipDirs = new Set(['node_modules', '.git', 'dist', 'build', '__pycache__', '.venv']);
+  const walk = (dir, depth) => {
+    if (depth > 6 || files.length >= 300) return;
+    for (const name of fs.readdirSync(dir)) {
+      if (files.length >= 300) break;
+      const full = path.join(dir, name);
+      const rel = path.relative(val.resolved, full).replace(/\\/g, '/');
+      const lstat = fs.lstatSync(full);
+      if (lstat.isSymbolicLink()) continue;
+      if (lstat.isDirectory()) {
+        if (!skipDirs.has(name)) walk(full, depth + 1);
+      } else if (isDevSecretFile(full)) {
+        excludedSecretFiles.push(rel);
+      } else {
+        files.push({
+          name,
+          relativePath: rel,
+          fullPath: full,
+          isDirectory: false,
+          sizeBytes: lstat.size,
+          extension: path.extname(name).replace(/^\./, '').toLowerCase()
+        });
+      }
+    }
+  };
+  walk(val.resolved, 0);
+  return { ok: true, projectPath: val.resolved, projectName: path.basename(val.resolved), files, excludedSecretFiles, totalFilesScanned: files.length };
+});
+
+ipcMain.handle('jarvis:devReadSource', async (event, payload) => {
+  if (!isTrustedSender(event)) return { ok: false, error: 'UNTRUSTED_IPC_SENDER' };
+  const { projectPath, filePath } = payload || {};
+  const projVal = validatePath(projectPath);
+  if (!projVal.valid) return { ok: false, error: projVal.error };
+  const target = path.isAbsolute(String(filePath || '')) ? String(filePath) : path.join(projVal.resolved, String(filePath || ''));
+  const fileVal = validatePath(target);
+  if (!fileVal.valid) return { ok: false, error: fileVal.error };
+  const prefix = projVal.resolved.endsWith(path.sep) ? projVal.resolved : `${projVal.resolved}${path.sep}`;
+  if (fileVal.resolved !== projVal.resolved && !fileVal.resolved.startsWith(prefix)) {
+    return { ok: false, error: 'OUTSIDE_PROJECT_ROOT' };
+  }
+  if (isDevSecretFile(fileVal.resolved)) return { ok: false, error: 'SECRET_FILE_BLOCKED' };
+  const ext = path.extname(fileVal.resolved).replace(/^\./, '').toLowerCase();
+  if (BLOCKED_FILE_EXTENSIONS.has(ext)) return { ok: false, error: 'BLOCKED_EXTENSION' };
+  if (!fs.existsSync(fileVal.resolved)) return { ok: false, error: 'FILE_NOT_FOUND' };
+  const stat = fs.statSync(fileVal.resolved);
+  if (stat.size > 512 * 1024) return { ok: false, error: 'FILE_TOO_LARGE' };
+  const content = fs.readFileSync(fileVal.resolved, 'utf8');
+  return { ok: true, path: fileVal.resolved, relativePath: path.relative(projVal.resolved, fileVal.resolved).replace(/\\/g, '/'), name: path.basename(fileVal.resolved), content, sizeBytes: stat.size, lineCount: content.split(/\r?\n/).length };
+});
+
+ipcMain.handle('jarvis:devApplyPatch', async (event, payload) => {
+  if (!isTrustedSender(event)) return { ok: false, error: 'UNTRUSTED_IPC_SENDER' };
+  const { projectPath, filePath, proposedContent, overwrite } = payload || {};
+  const projVal = validatePath(projectPath);
+  if (!projVal.valid) return { ok: false, error: projVal.error };
+  const target = path.isAbsolute(String(filePath || '')) ? String(filePath) : path.join(projVal.resolved, String(filePath || ''));
+  const fileVal = validatePath(target);
+  if (!fileVal.valid) return { ok: false, error: fileVal.error };
+  const prefix = projVal.resolved.endsWith(path.sep) ? projVal.resolved : `${projVal.resolved}${path.sep}`;
+  if (!fileVal.resolved.startsWith(prefix)) return { ok: false, error: 'OUTSIDE_PROJECT_ROOT' };
+  if (isDevSecretFile(fileVal.resolved)) return { ok: false, error: 'SECRET_FILE_BLOCKED' };
+  const ext = path.extname(fileVal.resolved).replace(/^\./, '').toLowerCase();
+  if (BLOCKED_FILE_EXTENSIONS.has(ext)) return { ok: false, error: 'BLOCKED_EXTENSION' };
+  const existed = fs.existsSync(fileVal.resolved);
+  if (existed && !overwrite) return { ok: false, error: 'FILE_ALREADY_EXISTS' };
+  const originalContent = existed ? fs.readFileSync(fileVal.resolved, 'utf8') : null;
+  const patchId = `epatch-${Date.now().toString(36)}`;
+  devBackups.set(patchId, { patchId, filePath: fileVal.resolved, existedBefore: existed, originalContent, rolledBack: false });
+  fs.mkdirSync(path.dirname(fileVal.resolved), { recursive: true });
+  fs.writeFileSync(fileVal.resolved, String(proposedContent || ''), { encoding: 'utf8', mode: 0o644 });
+  return { ok: true, patchId, filePath: fileVal.resolved, existedBefore: existed };
+});
+
+ipcMain.handle('jarvis:devRollbackPatch', async (event, payload) => {
+  if (!isTrustedSender(event)) return { ok: false, error: 'UNTRUSTED_IPC_SENDER' };
+  const rec = devBackups.get(payload?.patchId);
+  if (!rec || rec.rolledBack) return { ok: false, error: 'BACKUP_NOT_FOUND_OR_USED' };
+  if (rec.existedBefore && rec.originalContent !== null) {
+    fs.writeFileSync(rec.filePath, rec.originalContent, { encoding: 'utf8', mode: 0o644 });
+  } else if (fs.existsSync(rec.filePath)) {
+    fs.unlinkSync(rec.filePath);
+  }
+  rec.rolledBack = true;
+  return { ok: true, patchId: rec.patchId, filePath: rec.filePath };
+});
+
+ipcMain.handle('jarvis:devRunCommand', async (event, payload) => {
+  if (!isTrustedSender(event)) return { ok: false, error: 'UNTRUSTED_IPC_SENDER' };
+  const { projectPath, tool, args, taskId } = payload || {};
+  const val = validatePath(projectPath);
+  if (!val.valid) return { ok: false, error: val.error };
+  const normTool = String(tool || '').trim().toLowerCase();
+  if (!DEV_ALLOWED_TOOLS.has(normTool)) return { ok: false, error: 'DISALLOWED_DEV_TOOL' };
+  const safeArgs = Array.isArray(args) ? args.map(String) : [];
+  if (safeArgs.some((a) => DANGEROUS_ARG_PATTERN.test(a) || /(^|[\\/])\.\.([\\/]|$)/.test(a))) {
+    return { ok: false, error: 'UNSAFE_ARGUMENT' };
+  }
+  const id = taskId || `edev-${Date.now().toString(36)}`;
+  const exe = process.platform === 'win32' && (normTool === 'npm' || normTool === 'npx' || normTool === 'tsc') ? `${normTool}.cmd` : normTool;
+  return new Promise((resolve) => {
+    let stdout = '';
+    let stderr = '';
+    const child = spawn(exe, safeArgs, { cwd: val.resolved, shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
+    devRunningTasks.set(id, { child, cancelled: false });
+    const timer = setTimeout(() => { try { child.kill('SIGTERM'); } catch {} }, 30000);
+    child.stdout?.on('data', (d) => { if (stdout.length < 65536) stdout += d.toString(); });
+    child.stderr?.on('data', (d) => { if (stderr.length < 65536) stderr += d.toString(); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      const rec = devRunningTasks.get(id);
+      devRunningTasks.delete(id);
+      resolve({ ok: !rec?.cancelled && code === 0, taskId: id, exitCode: code, cancelled: Boolean(rec?.cancelled), stdout, stderr });
+    });
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      devRunningTasks.delete(id);
+      resolve({ ok: false, taskId: id, exitCode: null, stdout, stderr, error: err.message });
+    });
+  });
+});
+
+ipcMain.handle('jarvis:devCancelCommand', async (event, payload) => {
+  if (!isTrustedSender(event)) return { ok: false, error: 'UNTRUSTED_IPC_SENDER' };
+  const rec = devRunningTasks.get(payload?.taskId);
+  if (!rec) return { ok: false };
+  rec.cancelled = true;
+  try { rec.child.kill('SIGTERM'); } catch {}
+  return { ok: true };
 });
 
 app.whenReady().then(() => {

@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { llmService } from './llmService.js';
 import { LLMChatRequest, LLMMode } from './types.js';
 import { desktopAutomationService } from './desktopAutomation.js';
+import { devStudioService } from './devStudioService.js';
 
 export const apiRouter = Router();
 
@@ -340,4 +341,108 @@ apiRouter.post('/desktop/browser/inspect', async (req: Request, res: Response) =
   const result = await desktopAutomationService.inspectWebPage(String(url));
   res.status(result.ok ? 200 : 400).json(result);
 });
+
+// =============================================================================
+// Batch 5 — AI Development Studio Endpoints
+// =============================================================================
+
+apiRouter.post('/dev/project/inspect', (req: Request, res: Response) => {
+  const { projectPath } = req.body || {};
+  if (!projectPath || typeof projectPath !== 'string') {
+    res.status(400).json({ ok: false, error: 'MISSING_PROJECT_PATH' });
+    return;
+  }
+  const report = devStudioService.inspectProjectWorkspace(projectPath);
+  res.status(report.ok ? 200 : 400).json(report);
+});
+
+apiRouter.post('/dev/source/read', (req: Request, res: Response) => {
+  const { projectPath, filePath } = req.body || {};
+  if (!projectPath || !filePath || typeof projectPath !== 'string' || typeof filePath !== 'string') {
+    res.status(400).json({ ok: false, error: 'MISSING_PROJECT_OR_FILE_PATH' });
+    return;
+  }
+  const result = devStudioService.readSourceFile(projectPath, filePath);
+  res.status(result.ok ? 200 : 400).json(result);
+});
+
+apiRouter.post('/dev/patch/preview', (req: Request, res: Response) => {
+  const { projectPath, filePath, proposedContent } = req.body || {};
+  if (!projectPath || !filePath || typeof projectPath !== 'string' || typeof filePath !== 'string') {
+    res.status(400).json({ ok: false, error: 'MISSING_PATCH_PARAMETERS' });
+    return;
+  }
+  const preview = devStudioService.previewPatch({
+    projectPath,
+    filePath,
+    proposedContent: typeof proposedContent === 'string' ? proposedContent : ''
+  });
+  res.status(preview.ok ? 200 : 400).json(preview);
+});
+
+apiRouter.post('/dev/patch/apply', (req: Request, res: Response) => {
+  const { projectPath, filePath, proposedContent, overwrite, expectedOriginalHash, summary } = req.body || {};
+  if (!projectPath || !filePath || typeof projectPath !== 'string' || typeof filePath !== 'string') {
+    res.status(400).json({ ok: false, error: 'MISSING_PATCH_PARAMETERS' });
+    return;
+  }
+  const result = devStudioService.applyPatch({
+    projectPath,
+    filePath,
+    proposedContent: typeof proposedContent === 'string' ? proposedContent : '',
+    overwrite: Boolean(overwrite),
+    expectedOriginalHash: typeof expectedOriginalHash === 'string' ? expectedOriginalHash : undefined,
+    summary: typeof summary === 'string' ? summary : undefined
+  });
+  res.status(result.ok ? 200 : 400).json(result);
+});
+
+apiRouter.post('/dev/patch/rollback', (req: Request, res: Response) => {
+  const { patchId, projectPath } = req.body || {};
+  if (!patchId || typeof patchId !== 'string') {
+    res.status(400).json({ ok: false, error: 'MISSING_PATCH_ID' });
+    return;
+  }
+  const result = devStudioService.rollbackPatch(
+    patchId,
+    typeof projectPath === 'string' ? projectPath : undefined
+  );
+  res.status(result.ok ? 200 : 400).json(result);
+});
+
+apiRouter.get('/dev/patch/backups', (_req: Request, res: Response) => {
+  res.json({ ok: true, backups: devStudioService.getPatchBackups() });
+});
+
+apiRouter.get('/dev/tools', async (_req: Request, res: Response) => {
+  const tools = await devStudioService.detectInstalledDevTools();
+  res.json({ ok: true, tools });
+});
+
+apiRouter.post('/dev/command/run', async (req: Request, res: Response) => {
+  const { projectPath, tool, args, timeoutMs, taskId } = req.body || {};
+  if (!projectPath || !tool || typeof projectPath !== 'string' || typeof tool !== 'string') {
+    res.status(400).json({ ok: false, error: 'MISSING_COMMAND_PARAMETERS' });
+    return;
+  }
+  const result = await devStudioService.runApprovedCommand({
+    projectPath,
+    tool: tool as 'npm' | 'npx' | 'node' | 'python' | 'pytest' | 'tsc' | 'git',
+    args: Array.isArray(args) ? args.map(String) : [],
+    timeoutMs: typeof timeoutMs === 'number' ? timeoutMs : undefined,
+    taskId: typeof taskId === 'string' ? taskId : undefined
+  });
+  res.status(result.ok ? 200 : result.cancelled ? 200 : 400).json(result);
+});
+
+apiRouter.post('/dev/command/cancel', (req: Request, res: Response) => {
+  const { taskId } = req.body || {};
+  if (!taskId || typeof taskId !== 'string') {
+    res.status(400).json({ ok: false, error: 'MISSING_TASK_ID' });
+    return;
+  }
+  const cancelled = devStudioService.cancelCommand(taskId);
+  res.json({ ok: cancelled, taskId });
+});
+
 
